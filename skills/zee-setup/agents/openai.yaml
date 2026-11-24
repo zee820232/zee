@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Setup"
+  short_description: "Configure universal per-role models and harness links for zee"
+policy:
+  allow_implicit_invocation: false

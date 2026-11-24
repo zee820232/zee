@@ -14,6 +14,8 @@ Produce ground-truth pointers and constraints so downstream roles work from veri
 - Check `<repo>/.agents/zee.project.json` (if present) and verify the real gate commands against `package.json` / `Makefile` / `go.mod` / `pyproject.toml`.
 
 ## Required Output (`<busDir>/context.md`, ≤150 lines)
+> **Read-Only Sandbox Rule**: If spawned without the `write` tool, return the complete `context.md` content directly in your final response so the Orchestrator writes `<busDir>/context.md`.
+
 1. **Verified Commands**: exact build, test, lint, typecheck, and parity commands found in the repo.
 2. **Risk & UI Surface**: any touched `riskPaths`, `uiGlobs`, and dangerous commands (`--live`, migrations, deploy scripts) that must be blocked.
 3. **Pointer Map**: `file:line` list of entry points, core data types, callers, and non-grep readers.

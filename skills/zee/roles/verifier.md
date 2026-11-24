@@ -15,7 +15,7 @@ Independently verify that a specific **Pinned SHA** builds, passes deterministic
    - Boot the app on a free isolated port; run functional E2E flow checking zero `console.error`, zero 5xx/failed network calls, and zero horizontal overflow (`scrollWidth <= innerWidth`).
    - Capture screenshots for every viewport/state listed in `<busDir>/ui-spec.md` into `<busDir>/screenshots/verify-*.png`.
    - Use T3 `preview_*` tools **only** when the user's request explicitly asked for browser preview work (use `reuseExistingTab: false` and close your tab before finishing); otherwise use headless Playwright / CLI browser tools.
-   - If `~/.agents/skills/impeccable/scripts/detect.mjs` exists, run it on touched HTML/CSS and record violations.
+   - Run any static UI/lint/slop check declared in `<repo>/.agents/zee.project.json` (`uiCheckCmds`) or passed in the brief on touched UI files and record violations.
    - For visual-parity migrations, run pixel-diff against baseline screenshots (non-zero diff = `FAIL`).
 
 ## Strict 3-State Verdict

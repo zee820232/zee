@@ -26,6 +26,9 @@ const VALID_TIERS = new Set(["lite", "fast", "standard", "pro"]);
 const VALID_EFFORTS = new Set(["off", "low", "medium", "high", "xhigh", "max"]);
 
 function detectActiveHarness() {
+  if (process.env.PI_CODING_AGENT === "true" || process.env.AI_AGENT === "pi") {
+    return "pi";
+  }
   const norm = path.resolve(SOURCE_SKILLS_DIR);
   for (const t of HARNESS_TARGETS) {
     if (path.resolve(t.dir) === norm) return t.name;
@@ -277,6 +280,7 @@ function cmdAuditRules(args) {
       try {
         const cfg = JSON.parse(fs.readFileSync(piSettings, "utf8"));
         const skillsArr = Array.isArray(cfg.skills) ? cfg.skills : [];
+        const packagesArr = Array.isArray(cfg.packages) ? cfg.packages : [];
         const hasPstackExclude = skillsArr.some((s) => typeof s === "string" && s.includes("poteto-mode"));
         const pstackExists = fs.existsSync(path.join(HOME, ".agents", "skills", "poteto-mode"));
         if (pstackExists) {
@@ -288,6 +292,40 @@ function cmdAuditRules(args) {
             detail: hasPstackExclude
               ? "Pi 已通过 settings.json 排除 ~/.agents/skills 下的 pstack 工作流"
               : "Pi 会自动扫描 ~/.agents/skills/ 中的 pstack，可在 ~/.pi/agent/settings.json 的 skills 中用 ! 规则排除",
+          });
+        }
+
+        // 双安装冲突检测：Pi Package 已注册 zee 时，检查 ~/.pi/agent/skills 与 ~/.agents/skills 是否有重复副本
+        const hasZeePkg = packagesArr.some((p) => {
+          const src = typeof p === "string" ? p : p?.source;
+          return typeof src === "string" && /(^|[/:\\])zee([\\/.]|$)|zee-workflow/.test(src);
+        });
+        if (hasZeePkg) {
+          const dupDirs = [];
+          for (const checkRoot of [path.join(HOME, ".pi", "agent", "skills"), path.join(HOME, ".agents", "skills")]) {
+            for (const skillName of SKILL_NAMES) {
+              const candidate = path.join(checkRoot, skillName);
+              if (!fs.existsSync(candidate)) continue;
+              try {
+                const realCandidate = fs.realpathSync(candidate);
+                const realSource = fs.realpathSync(path.join(SOURCE_SKILLS_DIR, skillName));
+                if (realCandidate !== realSource) {
+                  dupDirs.push(candidate);
+                }
+              } catch {
+                dupDirs.push(candidate);
+              }
+            }
+          }
+          findings.push({
+            harness: "pi",
+            file: piSettings,
+            severity: dupDirs.length > 0 ? "high" : "info",
+            status: dupDirs.length > 0 ? "存在双安装重名冲突" : "Pi Package 单源正常",
+            detail:
+              dupDirs.length > 0
+                ? `Pi 已以 Package 形态加载 zee，但同时发现重复技能副本（${dupDirs.join("、")}），会触发重名警告；请删除这些重复目录`
+                : "Pi 以 Package 形态单源加载 zee，未发现技能重名冲突",
           });
         }
       } catch {}

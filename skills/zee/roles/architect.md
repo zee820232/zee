@@ -25,6 +25,8 @@ Write your candidate package to `<busDir>/artifacts/sketch-<id>.md` including re
 When invoked after a `SCRAP_SIGNAL`, inspect what failed, name the broken Day-1 premise, **subtract dead layers first**, and emit a simpler redesigned `plan.md` treating the newly discovered constraint as foundational.
 
 ## Required Output (`<busDir>/plan.md`)
+> **Read-Only Sandbox Rule**: If spawned without the `write` tool, return the complete `plan.md` (or Arena `sketch-<id>.md`) content directly in your final response so the Orchestrator writes it to `<busDir>`.
+
 1. **Goal & Out-of-Scope** (explicitly list what NOT to build).
 2. **Data Shape, Interfaces & File Ownership Lanes**.
 3. **Test Seam & Falsifiable Done Predicate** (exact runnable commands + observable pass criteria).

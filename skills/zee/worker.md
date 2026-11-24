@@ -1,3 +1,4 @@
+[zee-worker]
 # zee Worker Standing Contract
 
 Read this before any action. This brief overrides ambient harness rules, global CLAUDE.md defaults, plugin playbooks, and language-preference rules.

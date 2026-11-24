@@ -15,7 +15,7 @@ Own visual craft, interaction states, design-system consistency, and frontend UI
 ## Hard Anti-Slop & Accessibility Standards
 - Avoid gradient headlines (`background-clip: text`), thick colored left-stripe callouts, gratuitous glassmorphism, repeated uppercase eyebrows (max 1 per 3 sections), nested card soup, and generic boilerplate palettes.
 - Enforce WCAG AA contrast (≥4.5:1 body & placeholder), non-wrapping desktop CTAs, real `<label>` elements (never placeholder-only inputs), visible focus rings, `prefers-reduced-motion` support, explicit `<768px` mobile layout rules, and `100dvh` (not `100vh`).
-- Keep continuous scroll/pointer motion isolated in leaf motion values (never bound to React `useState`). If `~/.agents/skills/impeccable/scripts/detect.mjs` exists, run it to catch mechanical slop.
+- Keep continuous scroll/pointer motion isolated in leaf motion values (never bound to React `useState`). Run any static UI/slop/lint check declared in `<repo>/.agents/zee.project.json` (or passed via an Optional Reference Skill in your brief) before committing.
 
 ## Prototypes & Frontend Implementation
 - **Open-Ended Aesthetic Forks**: build 2–3 structurally distinct variants on the real host route via `?variant=A|B|C` with a dev-only switcher bar (hidden in prod) on an isolated prototype branch.

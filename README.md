@@ -1,100 +1,99 @@
-# zee
+# zee — 通用多模型全自动工程工作流
 
-Universal, harness-agnostic multi-model autonomous engineering workflow packaged as plain [Agent Skills](https://agentskills.io).
+`zee` 是一套按标准 [Agent Skills](https://agentskills.io) 编写的**通用多模型全自动研发工作流**。
 
-Configure your per-role models and thinking effort **once**, then run the same workflow from **any harness** (T3 Code, Pi, Cursor, OpenCode, Claude Code, Codex, or Antigravity) across **0-to-1 greenfield builds**, **1-to-100 risk-routed iteration**, **multi-model architecture debate (Arena)**, **cross-family adversarial reviews**, and **overnight unattended runs**.
+**核心理念：**
+- **一次装配，长期自动**：只需通过 `/zee-setup` 配置一次各角色的模型、思考强度与预授权备胎，后续自动按任务难度调度执行。
+- **装在哪就管哪个 Harness**：不绑死特定总控，也不越界改动其他框架。你安装在 Pi、T3 Code、Claude Code、Codex、Cursor、OpenCode 或 Antigravity 中的哪一个，就只管理当前这一个宿主环境。
+- **内部指令严谨、对外提示全中文**：底层工程契约与跨模型 worker 协议保持英文以确保各家模型执行稳定；所有面向用户的提问、进度播报、方案确认、风险提醒、最终报告和过夜晨报一律使用简体中文。
 
 ---
 
-## Install
+## 安装方式
+
+使用 `skills` CLI 安装到你想使用的宿主目录：
 
 ```bash
 npx skills add zee820232/zee
 ```
 
-Or clone manually into your harness skills directory (e.g. `~/.agents/skills/` or `~/.pi/agent/skills/`):
+或手动复制到指定 Harness 的 skills 目录（例如仅给 Pi 使用）：
 
 ```bash
 git clone https://github.com/zee820232/zee.git
-cp -R zee/skills/zee zee/skills/zee-setup ~/.agents/skills/
+cp -R zee/skills/zee zee/skills/zee-setup ~/.pi/agent/skills/
 ```
 
-Then run `/zee-setup` once inside your agent session to detect available models, pick a budget preset (`eco` / `balanced` / `max`), audit conflicting always-on rules, and write `~/.agents/zee-config.json`.
+安装完成后，在对应宿主里运行一次 **`/zee-setup`** 完成模型装配即可开用。
 
 ---
 
-## Architecture Highlights
+## 核心能力
 
-### 1. Assign Models Once, Run on Any Harness
-`~/.agents/zee-config.json` stores canonical role intent (`family`, `modelHint`, `tier`, `effort`, and authorized `backup`) plus optional harness-specific bindings. [`skills/zee/references/harness.md`](skills/zee/references/harness.md) translates abstract orchestration ops (`PROBE`, `SPAWN`, `ISOLATE`, `ASK`, `VISUAL_CHECK`, `SCHEDULE`) to whichever host you start `/zee` in:
+### 1. 双入口引擎：项目 0→1 落地 & 1→100 风险定级
 
-- **T3 Code** (any active provider thread): native cross-provider `delegate_task` with live `orchestrator_capabilities` option clamping (`thought_level` / `thinking` / `effort`) and `isolation: "worktree"`.
-- **Cursor / OpenCode / Claude Code / Codex / Antigravity / bare Pi**: automatic adapter mapping with transparent single-vendor degradation when cross-vendor dispatch is unavailable.
+- **项目 0→1 模式（`/zee init` 或空目录自动触发）** — 见 [`skills/zee/references/greenfield.md`](skills/zee/references/greenfield.md)
+  1. **产品成型**：多轮带默认推荐的结构化访谈 → 产出 `SPEC.md`（锁定 MVP 核心主线与明确砍掉的 Out-of-Scope），默认停一次由你拍板方向。
+  2. **骨架与设计**：`Scout` 查本机工具链与框架最新版 → `Architect` 定架构与垂直切片里程碑 → 涉 UI 时 `UI` 同步定 `DESIGN.md`（可选 `?variant=` 风格原型）。
+  3. **M0 地基 + M1 最小活链路**：搭建脚手架 + 冒烟测试 + `.agents/zee.project.json` 并打下首次基础提交（解锁 Worktree 与门禁），再单人打通 1 条最薄端到端主线。
+  4. **M2..Mk 自动切片**：按依赖图逐切片全自动闭环开发，每绿一个本地 commit（可无缝切入 `night` 过夜模式）。
+  5. **0→1 交付验收**：冷启动实测安装/构建/启动、跑通核心用户旅程 E2E 与 UI 截图、生成 `README.md`、异构终审交付。
 
-### 2. Two-Track Routing: Project 0→1 & 1→100 Risk Routing
+- **1→100 自动风险定级（`风险路径 × 意图 × 模式`）**
+  - `L0 直出`：非敏感路径的极简改动或问答，总控直接处理并自验。
+  - `L1 轻量`：低风险局部改动（`Coder` 或 `UI` → `Verifier`）。
+  - `L2 标准`：常规功能、重构、触及 `riskPaths` 的改动，或 Bug 修复（**先红后绿复现专线**）→ 全流程 + 1 个跨家族 `Reviewer`。
+  - `L3 攻坚 / 辩论`：高风险架构变更或显式 `debate` → 正交约束 **Arena**（2–3 个模型各自按不同维度出方案 + 匿名跨厂商裁判评分 + 总控手工嫁接）+ `Verifier` 前置门禁 + 2–3 个跨家族 `Reviewer` 实证会审。
+  - `+ night`：独立无人值守模式（隔离分支 `zee/<slug>`、Unit 0 验证夹具与基线、Canary 首单元、仓库外 `state.json` 与 `decisions.tsv`、预算熔断、异构抽检中文晨报）。
 
-- **Track A · Project 0→1 (`/zee init` or empty repo)** — [`greenfield.md`](skills/zee/references/greenfield.md):
-  1. **Product Shaping**: multi-round recommendation-first grilling -> `SPEC.md` (MVP + explicit Out-of-Scope) with default human sign-off.
-  2. **Foundation**: `Scout` toolchain/docs research + `Architect` (`ARCHITECTURE.md`, `GLOSSARY.md`, vertical milestone DAG) + `UI` (`DESIGN.md` + optional `?variant=` prototypes).
-  3. **M0 + M1**: initial runnable scaffold + smoke test + `.agents/zee.project.json` + **Initial Foundation Commit** (unlocking worktrees) -> single-owner thinnest end-to-end **Walking Skeleton**.
-  4. **M2..Mk**: autonomous vertical slices, commit per green unit (can transition into `night` mode).
-  5. **Delivery**: polish pass, cold-start install/build/start check, E2E + UI screenshots, `README.md`, cross-family final audit.
+### 2. 六大正交角色
 
-- **Track B · 1→100 Risk × Intent × Mode**:
-  - `L0`: trivial non-risk edit handled directly by Orchestrator.
-  - `L1`: low-risk local slice (`Coder` or `UI` -> `Verifier`).
-  - `L2`: standard feature, bug fix (**red-repro-first fast track**), refactor, or any touch to `riskPaths` -> full loop + 1 cross-family `Reviewer`.
-  - `L3`: high-stakes architecture / `debate` -> orthogonal **Arena** (2–3 constrained sketches + anonymous cross-vendor `Judge` + Orchestrator `Graft`) + `Verifier` Gate 1 + 2–3 cross-family `Reviewers` Gate 2.
-  - `+ night`: orthogonal unattended mode (`zee/<slug>` branch, Unit 0 harness + baseline, Canary first unit, Out-of-Tree `state.json` & append-only `decisions.tsv`, budget fuse, cross-family trail audit, Morning Report).
-
-### 3. Six Orthogonal Roles
-
-| Role | Responsibility | Key Discipline |
+| 角色 | 职责定位 | 核心纪律 |
 | :--- | :--- | :--- |
-| **`scout`** | Read-only codebase/env mapping | `file:line` pointers, real test commands, `riskPaths`, non-grep readers |
-| **`architect`** | Contracts, seams & slice DAG | Data shape first, Test Seam, Throughput Checkpoint, orthogonal Arena, `Scrap` redesign |
-| **`ui`** | Design Engineer (visuals + frontend) | `DESIGN.md` / `ui-spec.md`, Anti-Slop checklist, `?variant=` prototypes, 4-quadrant headless screenshot self-check |
-| **`coder`** | Isolated worktree implementation | Seam TDD (features), red-first repro (bugs), Expand–Contract (wide refactors), reports **Pinned SHA** |
-| **`verifier`** | Cold-start machine gate (Gate 1) | Checks out exact Pinned SHA; strict `PASS \| FAIL \| INCONCLUSIVE`; captures raw logs & UI screenshots |
-| **`reviewer`** | Cross-family auditor (Gate 2) | Dynamically excludes author's model `family`; isolated `Spec`, `Standards/Smells`, and evidence-only `Break` axes + Gate Tampering audit |
+| **`scout`** | 只读侦察与环境调研 | 输出精确 `file:line` 指针、真实测试命令、`riskPaths`、grep 查不到的隐式调用方；0→1 查本机环境与框架最新版 |
+| **`architect`** | 架构契约与垂直切片设计 | 数据形状优先、锁定 Test Seam、四维并行检查点、正交约束 Arena、架构受阻触发 `Scrap` 重画 |
+| **`ui`** | Design Engineer（审美 + 前端） | 输出 `DESIGN.md` / `ui-spec.md`、执行 Anti-Slop 硬禁令、`?variant=` 原型、写前端代码并做 4 象限无头截图自检 |
+| **`coder`** | Worktree 隔离实现与测试 | 功能走 Seam TDD、Bug 必先跑红复现再修、宽重构走 Expand–Contract；提交后汇报 **Pinned SHA**，拥有带证据反驳权 |
+| **`verifier`** | 独立冷启动机器门禁（Gate 1） | 检出精确 Pinned SHA 复跑构建、单测、E2E 与 UI 截图；严格三态判定（`PASS / FAIL / INCONCLUSIVE`） |
+| **`reviewer`** | 跨家族三轴对抗审查（Gate 2） | 动态排除作者模型家族；分 `Spec`、`Standards/Smells`、`Break/Blast-Radius` 实证三轴审查 + 看图审 UI + Gate 篡改反签 |
 
-### 4. Built-In Engineering Guardrails
-- **Out-of-Tree Run Bus**: `~/.local/state/zee/runs/<repo-key>/<slug>/` shared safely across git worktrees without polluting repos or colliding with `.scratch/`.
-- **Pinned SHA & Sequential Grafting**: every verdict binds to one commit SHA; verified branches merge sequentially with per-merge verification.
-- **Four-Level Failure Ladder**: micro-fixes (≤15 lines) handled directly by Orchestrator -> 1st failure retries same tier with 5-line root-cause reflection & objection right -> 2nd same-root failure checks shared premise (`Scrap` back to Architect vs escalate to `heavy`) -> 3rd failure trips circuit breaker.
-- **Domain Redlines**: committable `<repo>/.agents/zee.project.json` defines `testCmds`, `riskPaths`, `uiGlobs`, and `denyCommands` (hard-blocking live signing, deploys, or destructive ops).
+### 3. 核心工程护栏
+- **仓库外共享总线**：`~/.local/state/zee/runs/<repo-key>/<slug>/`，跨 Worktree 无损共享，绝不污染 Git，也不与仓库内 `.scratch/` 冲突。
+- **Pinned SHA 与顺序合流**：所有验证和审查结论严格绑定具体提交 SHA，多分支按验证顺序逐个合入并复测。
+- **四级失败阶梯**：≤15 行明确小错由总控原地自修 → 第 1 次实质失败同档重试（先写 5 行根因反思）→ 第 2 次同根因检查共享前提（计划错触发 `Scrap` 重画，实现难升档 `heavy`）→ 第 3 次硬熔断。
+- **项目级安全红线**：通过 `<repo>/.agents/zee.project.json` 声明 `testCmds`、`riskPaths`、`uiGlobs` 与 `denyCommands`（硬禁止 `--live`、实盘签名、读私钥、直接发生产等操作）。
 
 ---
 
-## Repository Layout
+## 目录结构
 
 ```text
 skills/
 ├── zee/
-│   ├── SKILL.md                  # Harness-agnostic Orchestrator kernel
-│   ├── worker.md                 # Standing delegate contract
-│   ├── agents/openai.yaml        # Codex invocation policy
-│   ├── roles/                    # scout, architect, ui, coder, verifier, reviewer
-│   ├── references/               # harness, protocols, greenfield, overnight
-│   └── scripts/zee-tool.mjs      # Zero-dep config validator, symlink helper, bus & TSV logger
+│   ├── SKILL.md                  # 宿主无关总控内核
+│   ├── worker.md                 # 子代理通用前置契约
+│   ├── agents/openai.yaml        # Codex 触发策略
+│   ├── roles/                    # scout / architect / ui / coder / verifier / reviewer
+│   ├── references/               # harness / protocols / greenfield / overnight
+│   └── scripts/zee-tool.mjs      # 零依赖工具：配置校验、单端规则审计、总线初始化与 TSV 日志
 └── zee-setup/
-    ├── SKILL.md                  # One-time setup & always-on rule conflict audit
+    ├── SKILL.md                  # 一次模型装配与当前宿主配置引导
     └── agents/openai.yaml
 ```
 
 ---
 
-## Usage Examples
+## 常用示例
 
 ```text
-/zee-setup                                      # Configure per-role models & thinking effort once
-/zee init Build a local bookmark manager CLI    # 0-to-1 project mode
-/zee Fix the retry timeout bug                  # Auto-routed (Bug fast-track)
-/zee L3 Redesign the job queue architecture     # Force L3 Arena + multi-model adversarial review
-/zee review                                     # Read-only cross-family adversarial review of current diff
-/zee night Migrate storage layer to SQLite      # Unattended overnight mode on isolated branch
+/zee-setup                              # 装配角色模型、思考强度并检查当前宿主规则冲突
+/zee init 帮我从零做一个本地书签管理 CLI   # 进入项目 0→1 模式
+/zee 修复重试超时导致的重复提交问题         # 自动走 Bug 先红后绿专线
+/zee L3 重构任务队列并发架构               # 强制开启 L3 正交 Arena + 多模型实证会审
+/zee review                             # 对当前改动做只读跨家族对抗审查
+/zee night 把存储层平滑迁移到 SQLite       # 无人值守过夜模式（自动切独立分支并生成中文晨报）
 ```
 
-## License
+## 开源协议
 
 MIT

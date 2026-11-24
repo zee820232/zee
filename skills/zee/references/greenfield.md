@@ -1,22 +1,22 @@
 # Project 0→1 Mode (`greenfield.md`)
 
-Auto-triggers on `/zee init`, an empty repository / missing Git `HEAD`, or an explicit request to build a new product/project from scratch. Runs 5 stages to deliver a cold-start-verified, documented v1 product before switching to 1→100 iteration.
+Auto-triggers on `/zee init`, an empty repository / missing Git `HEAD`, or an explicit request to build a new product/project from scratch. **All product interviews, spec summaries, sign-off prompts, and delivery notes presented to the user MUST be in Simplified Chinese (简体中文).**
 
 ## Stage 1 · Product Shaping & Scope Lock (0 -> 0.3)
-Orchestrator works directly with the user (never delegate user interviews):
-1. Run structured decision-tree **Grilling** (multi-round as needed; every question includes a `-> Recommended` default) until 4 product anchors are locked:
+Orchestrator works directly with the user in Chinese (never delegate user interviews):
+1. Run structured decision-tree **Grilling** (multi-round as needed; every question includes a `-> 推荐` default) until 4 product anchors are locked:
    - **Target User & Core Journeys**: the exact 2–3 end-to-end user flows that define v1 success.
    - **MVP vs Out-of-Scope**: explicitly list tempting features cut from v1 so autonomous slices do not bloat.
    - **Stack, Data & Runtime Shape**: CLI / Web / API / Bot, language/framework, persistence, auth/config model.
    - **Visual Tone** (if UI): product personality, density, dark/light support, reference direction.
 2. Write `<busDir>/SPEC.md` (and copy to `<repo>/SPEC.md` once initialized).
-3. **Default Product Sign-Off Gate**: pause once to present `SPEC.md` (core flows + Out-of-Scope + stack) for user approval before building. Skip this pause only if the user supplied a complete spec or explicitly granted full autonomy ("you decide everything, build it").
+3. **Default Product Sign-Off Gate**: pause once and present a concise Chinese summary of `SPEC.md` (核心流程 + 明确砍掉的 Out-of-Scope + 技术栈) for user approval before building. Skip this pause only if the user supplied a complete spec or explicitly granted full autonomy ("全权交给你").
 
 ## Stage 2 · Technical & Design Foundation
 1. **Scout (0→1 Research Mode)**: inspect local runtimes/package managers and verify current stable initialization/API patterns for the chosen stack.
 2. **Architect (+ `UI` in parallel if visual)**:
    - `Architect` (single primary or L3 Arena if architecture is novel) produces `ARCHITECTURE.md`, `GLOSSARY.md` (domain terms), and a **Vertical Milestone Roadmap** (`M0 -> M1 -> M2..Mk -> M_final`).
-   - `UI` produces `DESIGN.md` (Design Read 3 dials, color/type/spacing tokens, component rules) and `ui-spec.md`. For open-ended consumer UI, optionally render 2–3 visual direction prototypes (`?variant=A|B|C`) for user sign-off.
+   - `UI` produces `DESIGN.md` (Design Read 3 dials, color/type/spacing tokens, component rules) and `ui-spec.md`. For open-ended consumer UI, optionally render 2–3 visual direction prototypes (`?variant=A|B|C`) for user sign-off in Chinese.
 
 ## Stage 3 · M0 Foundation Commit + M1 Walking Skeleton
 1. **M0 · Bootstrap Foundation** (single `Coder`, before any worktree fan-out):
@@ -33,5 +33,5 @@ Execute remaining MVP slices in DAG order using standard `zee` L2/L3 closed loop
 Before declaring the 0→1 project complete:
 1. **Polish Pass**: verify empty states, error states, loading feedback, and mobile layout (if UI).
 2. **Cold-Start Check (`Verifier`)**: test installation, build, and startup from a clean state following the documented commands; run full core user-journey E2E (with final screenshots if UI).
-3. **Handover Docs**: write a concise, accurate `README.md` (what it does, prerequisites, setup/env vars, run/test commands, directory layout) and `.env.example` (no real secrets).
-4. **Cross-Family Final Audit**: run 1 independent cross-family Reviewer/Judge pass checking `SPEC.md` coverage vs delivered code and cold-start receipts.
+3. **Handover Docs**: write a concise, accurate `README.md` (project overview, prerequisites, setup/env vars, run/test commands, directory layout) and `.env.example` (no real secrets).
+4. **Cross-Family Final Audit**: run 1 independent cross-family Reviewer/Judge pass checking `SPEC.md` coverage vs delivered code and cold-start receipts, then deliver the final Chinese summary.

@@ -1,5 +1,5 @@
 interface:
   display_name: "Zee"
-  short_description: "Universal multi-model autonomous engineering workflow (0-to-1 & 1-to-100)"
+  short_description: "通用多模型全自动研发工作流（0→1 建项与 1→100 迭代）"
 policy:
   allow_implicit_invocation: false

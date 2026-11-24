@@ -24,7 +24,7 @@ Do not start unattended execution until all 5 invariants are locked (confirm wit
 
 ## 4. Pause-Safely & Session-Pickup
 - **Pause-Safely** (on `pause`, quota exhaustion, irreversible gate, or budget/plateau fuse): cancel in-flight delegates, save any dirty work as `wip: pause <unit>` commit (never discard verified commits), update `state.json` (`status: "paused"`, `resumeNext: <unit>`), and log a `pause` row in `decisions.tsv`.
-- **Session-Pickup** (resuming an existing bus): read `state.json`, `git log`, and `decisions.tsv` first; append a `phase=start` marker row naming the resume point; treat prior verified commits as authoritative and continue from `resumeNext`.
+- **Session-Pickup** (resuming an existing bus): first run `node "<zeeDir>/scripts/zee-tool.mjs" list-runs "<repoRoot>"` to locate the exact paused/active `<busDir>` without guessing; then read `state.json`, `git log`, and `decisions.tsv`, append a `phase=start` marker row naming the resume point, treat prior verified commits as authoritative, and continue from `resumeNext`.
 
 ## 5. Cross-Family Trail Audit & Morning Report (in Chinese)
 Before concluding `night` mode:

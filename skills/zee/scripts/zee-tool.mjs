@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HOME = os.homedir();
@@ -46,6 +47,8 @@ function usage() {
                                  默认仅审计当前安装宿主的常驻规则冲突；加 --all 审计全机
   symlinks [--apply]             （仅用户显式要求同步多端时使用）检查或创建跨宿主软链
   init-run <仓库路径> <任务名>    创建仓库外运行总线（~/.local/state/zee/runs/...）
+  list-runs [仓库路径]            列出当前仓库（或全部）的活跃/暂停任务总线，用于跨会话一键续跑
+  cleanup-worktrees [仓库路径]    只读体检 Git worktree 状态（安全可清理 / 未合并 / 有未提交改动）
   log-decision <总线目录> <单元> <阶段> <决策> <原因> <证据> <结果>
                                  安全追加一行决策记录到 decisions.tsv
 `);
@@ -406,6 +409,101 @@ function cmdLogDecision(args) {
   console.log(JSON.stringify({ ok: true, tsvPath, appended: row.trim() }));
 }
 
+function repoKeyFor(repoPath) {
+  const absRepo = path.resolve(repoPath);
+  const hash = crypto.createHash("sha256").update(absRepo).digest("hex").slice(0, 8);
+  return `${sanitizeSlug(path.basename(absRepo))}-${hash}`;
+}
+
+function cmdListRuns(repoPath) {
+  if (!fs.existsSync(RUNS_ROOT)) {
+    console.log(JSON.stringify({ ok: true, count: 0, runs: [] }, null, 2));
+    return;
+  }
+  const repoDirs = repoPath && repoPath !== "--all"
+    ? [path.join(RUNS_ROOT, repoKeyFor(repoPath))]
+    : fs.readdirSync(RUNS_ROOT).map((d) => path.join(RUNS_ROOT, d));
+
+  const runs = [];
+  for (const rDir of repoDirs) {
+    if (!fs.existsSync(rDir) || !fs.statSync(rDir).isDirectory()) continue;
+    for (const slug of fs.readdirSync(rDir)) {
+      const statePath = path.join(rDir, slug, "state.json");
+      if (!fs.existsSync(statePath)) continue;
+      try {
+        const st = JSON.parse(fs.readFileSync(statePath, "utf8"));
+        runs.push({
+          slug: st.slug || slug,
+          status: st.status || "unknown",
+          mode: st.mode || "standard",
+          level: st.level ?? null,
+          repoRoot: st.repoRoot || null,
+          busDir: st.busDir || path.join(rDir, slug),
+          updatedAt: st.updatedAt || st.createdAt || null,
+          resumeNext: st.resumeNext ?? null,
+          unitsCount: Array.isArray(st.units) ? st.units.length : 0,
+        });
+      } catch {}
+    }
+  }
+  runs.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  console.log(JSON.stringify({ ok: true, count: runs.length, runs }, null, 2));
+}
+
+function cmdCleanupWorktrees(repoPath = process.cwd()) {
+  const absRepo = path.resolve(repoPath);
+  let porcelain;
+  try {
+    porcelain = execFileSync("git", ["-C", absRepo, "worktree", "list", "--porcelain"], { encoding: "utf8" });
+  } catch (e) {
+    console.error(`检查失败：${absRepo} 不是合法的 Git 仓库（${e.message}）`);
+    process.exit(1);
+  }
+
+  let mergedSet = new Set();
+  try {
+    const mergedOut = execFileSync("git", ["-C", absRepo, "branch", "--merged"], { encoding: "utf8" });
+    mergedSet = new Set(mergedOut.split(/\r?\n/).map((l) => l.replace(/^[*+\s]+/, "").trim()).filter(Boolean));
+  } catch {}
+
+  const blocks = porcelain.trim().split(/\n\n+/);
+  const worktrees = [];
+  blocks.forEach((blk, idx) => {
+    const lines = blk.split(/\r?\n/);
+    const wtPath = lines.find((l) => l.startsWith("worktree "))?.slice(9).trim();
+    const head = lines.find((l) => l.startsWith("HEAD "))?.slice(5).trim();
+    const branchRef = lines.find((l) => l.startsWith("branch "))?.slice(7).trim();
+    const branch = branchRef ? branchRef.replace(/^refs\/heads\//, "") : "(detached)";
+    if (!wtPath) return;
+
+    let dirtyCount = 0;
+    try {
+      const st = execFileSync("git", ["-C", wtPath, "status", "--porcelain"], { encoding: "utf8" }).trim();
+      dirtyCount = st ? st.split(/\r?\n/).length : 0;
+    } catch {}
+
+    const isPrimary = idx === 0;
+    const isMerged = branch !== "(detached)" && mergedSet.has(branch);
+    let bucket = "primary";
+    if (!isPrimary) {
+      if (dirtyCount > 0) bucket = "keep_dirty";
+      else if (isMerged) bucket = "safe_to_prune";
+      else bucket = "review_unmerged";
+    }
+    worktrees.push({
+      path: wtPath,
+      branch,
+      head: head?.slice(0, 10) || null,
+      dirtyFiles: dirtyCount,
+      mergedIntoCurrent: isMerged,
+      bucket,
+      pruneHint: bucket === "safe_to_prune" ? `git -C "${absRepo}" worktree remove "${wtPath}"` : null,
+    });
+  });
+
+  console.log(JSON.stringify({ ok: true, readOnly: true, repoRoot: absRepo, worktrees }, null, 2));
+}
+
 const [, , cmd, ...rest] = process.argv;
 switch (cmd) {
   case "validate":
@@ -419,6 +517,12 @@ switch (cmd) {
     break;
   case "init-run":
     cmdInitRun(rest[0], rest[1]);
+    break;
+  case "list-runs":
+    cmdListRuns(rest[0]);
+    break;
+  case "cleanup-worktrees":
+    cmdCleanupWorktrees(rest[0]);
     break;
   case "log-decision":
     cmdLogDecision(rest);

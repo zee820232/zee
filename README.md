@@ -59,6 +59,7 @@ cp -R zee/skills/zee* ~/.pi/agent/skills/
   - `L1 轻量`：低风险局部改动（`Coder` 或 `UI` → `Verifier`）。
   - `L2 标准`：常规功能、重构、触及 `riskPaths` 的改动，或 Bug 修复（**先红后绿复现专线**）→ 全流程 + 1 个跨家族 `Reviewer`。
   - `L3 攻坚 / 辩论`：高风险架构变更或显式 `debate` → 正交约束 **Arena**（2–3 个模型各自按不同维度出方案 + 匿名跨厂商裁判评分 + 总控手工嫁接）+ `Verifier` 前置门禁 + 2–3 个跨家族 `Reviewer` 实证会审。
+  - **专项模式（[`specialized.md`](skills/zee/references/specialized.md)）**：`investigate`（纯只读深度调研）、`perf` / `hillclimb`（冻结基准测试 + 单变量指标爬坡）、`prototype`（隔离一次性技术实验）、`sweep`（大规模只读并发清扫）、`resume`（通过 `list-runs` 一键跨会话续跑）。
   - `+ night`：独立无人值守模式（隔离分支 `zee/<slug>`、Unit 0 验证夹具与基线、Canary 首单元、仓库外 `state.json` 与 `decisions.tsv`、预算熔断、异构抽检中文晨报）。
 
 ### 2. 六大正交角色
@@ -89,8 +90,8 @@ skills/
 │   ├── worker.md                 # 子代理通用前置契约
 │   ├── agents/openai.yaml        # Codex 触发策略
 │   ├── roles/                    # scout / architect / ui / coder / verifier / reviewer
-│   ├── references/               # harness / protocols / plan-mode / greenfield / overnight
-│   └── scripts/zee-tool.mjs      # 零依赖工具：配置校验、单端规则审计、总线初始化与 TSV 日志
+│   ├── references/               # harness / protocols / plan-mode / greenfield / overnight / specialized
+│   └── scripts/zee-tool.mjs      # 零依赖工具：配置校验、单端规则审计、总线/续跑寻址、Worktree 体检与 TSV 日志
 ├── zee-plan/                     # 快捷入口：Grill 深度访谈 → 沉淀计划文档（只规划不写码）
 ├── zee-init/                     # 快捷入口：项目 0→1 全自动建项
 ├── zee-review/                   # 快捷入口：只读跨家族对抗审查

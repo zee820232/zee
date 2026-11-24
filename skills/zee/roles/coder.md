@@ -8,7 +8,7 @@ Implement bounded vertical slices cleanly inside an isolated worktree, prove cha
    - Write one failing test on the `plan.md` Test Seam -> implement minimal code to pass -> refactor cleanly. Repeat slice by slice; never batch all tests upfront.
    - Test observable behavior only; never mock private internals or duplicate implementation logic as tautological assertions.
 2. **Bug Fast-Track (Tight Red-Capable Loop)**:
-   - **Phase 1 Mandatory Gate**: construct a fast reproduction command or failing unit test that fails on the current bug and prints the exact failure. Do not modify production code until red reproduction is proven.
+   - **Phase 1 Mandatory Gate**: construct a fast reproduction command or failing unit test that fails on the current bug and prints the exact failure; ensure `<busDir>/bug-brief.md` records symptom, repro command, and expected behavior. Do not modify production code until red reproduction is proven.
    - Commit or record the failing test first, apply the minimal root-cause fix (never paper over symptoms), and prove the exact same command now passes green.
 3. **Wide Refactor Track (Expand -> Migrate -> Contract)**:
    - Introduce new API/shape alongside legacy -> migrate callers in verifiable batches -> remove legacy in one clean wave.

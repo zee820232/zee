@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # zee — Universal Multi-Model Autonomous Workflow
 
-Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | night]`
+Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | investigate | perf | prototype | sweep | resume | night]`
 Shortcuts: `zee-plan`, `zee-init`, `zee-review`, `zee-night`, `zee-setup`.
 Current session acts as **Orchestrator** on whichever harness `zee` is installed in. Never delegate orchestration itself, and only manage the active harness where this skill lives (`<zeeDir>` = parent directory of this `SKILL.md`).
 
@@ -37,10 +37,12 @@ Classify unknowns before asking: **code facts -> Scout**; **observable tech fork
   - **L1 Quick**: low-risk local change, no contract/schema/UI-system impact -> `[optional Scout]` -> `Coder(standard)` or `UI(standard)` -> `Verifier`.
   - **L2 Standard**: multi-file feature, bug fix, refactor, or **any edit touching `riskPaths`** (auth, crypto, billing, migrations, live trading/signing, public APIs) -> full pipeline + 1 cross-family `Reviewer`.
   - **L3 High-Stakes / Debate**: cross-module architecture, concurrency/state-machine change, major redesign, or explicit `debate`/`L3` -> `Scout(Deep)` -> orthogonal **Arena** + cross-vendor `Judge` + Orchestrator **Graft** -> `Coder(heavy)` / `UI(heavy)` -> `Verifier` (Gate 1) -> 2–3 cross-family `Reviewers` (Gate 2).
-  - **Standalone Modes**:
+  - **Standalone & Specialized Modes**:
     - `plan` (or `/zee-plan`): load `<zeeDir>/references/plan-mode.md`. Runs `Scout` -> multi-round Chinese **Grilling** -> `Architect` (+ `UI`, optional L3 Arena) -> writes finalized `plan.md` and **stops without editing production code**.
     - `debate`: stops after L3 Arena + cross-vendor Judge ADR/decision report.
     - `review` (or `/zee-review`): runs cross-family `Reviewers` read-only on target diff/SHA without editing.
+    - `investigate` / `perf` (`hillclimb`) / `prototype` / `sweep`: load `<zeeDir>/references/specialized.md` and follow the matched specialized track.
+    - `resume`: run `node "<zeeDir>/scripts/zee-tool.mjs" list-runs "<repoRoot>"` to locate active/paused buses and follow Session-Pickup in `<zeeDir>/references/overnight.md`.
   - **Approved Plan Fast-Path**: if the user passes an existing approved `plan.md` / `SPEC.md` (e.g. from `zee-plan`), verify no repo drift and skip Intake/Architect straight into **Build -> Check -> Merge**.
   - **`night` Mode (or `/zee-night`, orthogonal modifier)**: load `<zeeDir>/references/overnight.md`. Applies autonomous branch isolation, Unit 0 verification harness + baseline, Canary first unit, `decisions.tsv` audit trail, budget fuse, and Chinese morning report.
 
@@ -50,7 +52,7 @@ Load `<zeeDir>/references/protocols.md` for bus schemas, Pinned SHA rules, and w
 
 1. **Scout (`roles/scout.md`)** [L2+]: read-only pointer map (`file:line`, test commands, `riskPaths`, non-grep readers). Re-check level (upgrade only).
 2. **Design (`roles/architect.md` + `roles/ui.md`)**:
-   - **Bug Intent**: skip Architect; open Bug Fast-Track in `roles/coder.md` (Phase 1 must prove a fast **red reproduction** before touching production code).
+   - **Bug Intent**: skip Architect; write a 10-line `<busDir>/bug-brief.md` (symptom, repro command, expected behavior) as Reviewer Axis 1 anchor, then open Bug Fast-Track in `roles/coder.md` (Phase 1 must prove a fast **red reproduction** before touching production code).
    - **Feature / Refactor**: Architect produces `plan.md` (data shape, Test Seam, Throughput Checkpoint, Out-of-Scope, falsifiable `Done Predicate`, vertical slices; L3 runs orthogonal Arena + anonymous cross-vendor Judge + Orchestrator Graft).
    - **UI Scope** (matches `uiGlobs` or visual task): `ui` runs alongside Architect to emit `ui-spec.md` (state matrix, design tokens, visual rubric, optional `?variant=` prototype). Default L3 proceeds after design unless user asks to review plan first.
 3. **Build (`roles/coder.md`, `roles/ui.md`)**:

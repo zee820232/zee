@@ -2,6 +2,9 @@
 
 Auto-triggers on `/zee init`, an empty repository / missing Git `HEAD`, or an explicit request to build a new product/project from scratch. **All product interviews, spec summaries, sign-off prompts, and delivery notes presented to the user MUST be in Simplified Chinese (简体中文).**
 
+## Pre-Check · Non-Empty Repo Guard
+Before starting Stage 1, inspect the current working directory. If it already contains source code or existing Git commits (and the user did not explicitly ask to build inside this existing repo), pause in Chinese and ask whether to create a new subdirectory or switch to an empty folder before writing anything.
+
 ## Stage 1 · Product Shaping & Scope Lock (0 -> 0.3)
 Orchestrator works directly with the user in Chinese (never delegate user interviews):
 1. Run structured decision-tree **Grilling** (multi-round as needed; every question includes a `-> 推荐` default) until 4 product anchors are locked:

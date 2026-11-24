@@ -48,3 +48,15 @@ Follow the header with: **Goal**, **Relevant Bus Paths**, **Exact Gate Commands*
 2. **Fan-Out**: launch 2–3 distinct-family `Architect` candidates in parallel writing to `artifacts/sketch-<id>.md`.
 3. **Anonymous Cross-Judge**: spawn 1 read-only `Judge` from a `family` **different from the Orchestrator's family** (using `roles.judge` if set, else first eligible entry in `roles.reviewers`). Pass rubric + anonymized candidate paths (`Candidate 1/2/3`). Judge scores criterion-by-criterion and recommends a base — **Judge never merges text**.
 4. **Orchestrator Graft**: Orchestrator reads all sketches and the Judge verdict, selects the strongest base, and manually folds 1–2 high-value ideas from losing candidates into one coherent `<busDir>/plan.md`. If candidates diverge wildly, reframe with the user in Chinese instead of averaging.
+
+## 6. Optional Delivery & PR Protocol (Only When Requested)
+Execute only when the user asks to open a PR (or after confirming the push one-way door):
+1. **Commit Hygiene**: ensure verified changes are organized into clean, logical commits on the feature branch (no stray debug logs, no unrequested files, no force-push to shared branches).
+2. **Push & Open PR**: push the feature branch and open a concise PR (`gh pr create`, ready unless user asked for draft) whose body stays ≤40 lines and includes:
+   - **Why / Goal** (1–2 sentences)
+   - **Key Changes** (grouped by module/file)
+   - **Verification Receipts** (exact gate commands + exit codes + Pinned SHA)
+   - **Blast Radius & One-Way Doors** (what downstream callers/data could be affected, any gate/baseline countersigns)
+   - **Cross-Family Review Verdict** (reviewer families + resolved blockers)
+3. **CI Watch**: if the host provides PR watch tools (e.g. T3 `watch_pull_request`) and the user asked to babysit checks, link/watch the PR cleanly instead of shell polling.
+

@@ -5,11 +5,11 @@ Audit a specific **Pinned SHA** from a fresh context using a **different underly
 
 ## Setup
 1. Check out the exact snapshot: `git checkout --detach <PINNED_SHA>` and inspect the real diff (`git diff <BASE_SHA>..<PINNED_SHA>`) plus full surrounding files where needed.
-2. Read `<busDir>/plan.md` (and `<busDir>/ui-spec.md` + `<busDir>/screenshots/verify-*.png` if UI was touched).
+2. Read `<busDir>/plan.md` (or `<busDir>/bug-brief.md` on Bug Fast-Track, plus `<busDir>/ui-spec.md` & `<busDir>/screenshots/verify-*.png` if UI was touched).
 
 ## Three Isolated Review Axes (Never Blend Across Axes)
 
-### Axis 1 · Spec Compliance (Evidence = Spec Clause + `file:line`)
+### Axis 1 · Spec Compliance (Evidence = Spec/Bug-Brief Clause + `file:line`)
 - Verify every requirement and edge case in `plan.md` / `SPEC.md` is genuinely implemented (catch missing cases, silent stubs, contract drift, and out-of-scope creep).
 
 ### Axis 2 · Standards & Architecture Smells (Evidence = Repo Convention / Concrete Smell + `file:line`)

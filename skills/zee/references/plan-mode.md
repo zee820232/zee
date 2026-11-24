@@ -21,7 +21,7 @@ Orchestrator works directly with the user (never delegate user interviews):
 3. Every plan document MUST contain:
    - **目标与明确不做（Out-of-Scope）**
    - **关键决策记录**（Grill 阶段拍板的每一项取舍与理由）
-   - **数据形状、共享契约与文件归属**
+   - **数据形状、共享契约与文件归属**（若计划前后端 `Coder ∥ UI` 或多 `Coder` 并行，必须显式把“共享可编译契约/Mock 数据提交”列为前置 Slice 0，或规定由单人串行打通第 1 条垂直切片后再并行）
    - **Test Seam、Throughput Checkpoint 与可机检的 `Done Predicate`**
    - **带 `blockedBy` 依赖的垂直切片清单**（每片独立可验收）
 

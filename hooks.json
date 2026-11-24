@@ -1,0 +1,17 @@
+{
+  "zee-safety-and-plan-gate": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/agy-guard.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

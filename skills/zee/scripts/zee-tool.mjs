@@ -29,6 +29,13 @@ function detectActiveHarness() {
   if (process.env.PI_CODING_AGENT === "true" || process.env.AI_AGENT === "pi") {
     return "pi";
   }
+  if (
+    process.env.ANTIGRAVITY_CLI ||
+    process.env.ANTIGRAVITY_AGENT ||
+    (process.env.PLUGIN_ROOT && process.env.PLUGIN_ROOT.includes(`${path.sep}.gemini${path.sep}`))
+  ) {
+    return "antigravity";
+  }
   const norm = path.resolve(SOURCE_SKILLS_DIR);
   for (const t of HARNESS_TARGETS) {
     if (path.resolve(t.dir) === norm) return t.name;
@@ -250,6 +257,41 @@ function cmdAuditRules(args) {
         severity: "low",
         status: "提示",
         detail: "可能偏向使用 Bend 2 写脚本；zee 的 worker.md 已明确要求沿用仓库现有语言",
+      });
+    }
+
+    // Antigravity 原生插件状态与双安装重名检测
+    const agyZeePlugin = path.join(HOME, ".gemini", "config", "plugins", "zee");
+    if (fs.existsSync(agyZeePlugin)) {
+      let pluginEnabled = true;
+      try {
+        const cfg = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));
+        if (cfg?.plugins?.zee?.enabled === false) pluginEnabled = false;
+      } catch {}
+      const dupDirs = [];
+      for (const checkRoot of [path.join(HOME, ".gemini", "config", "skills"), path.join(HOME, ".agents", "skills")]) {
+        for (const skillName of SKILL_NAMES) {
+          const candidate = path.join(checkRoot, skillName);
+          if (!fs.existsSync(candidate)) continue;
+          try {
+            const realCand = fs.realpathSync(candidate);
+            const realPlug = fs.realpathSync(path.join(agyZeePlugin, "skills", skillName));
+            if (realCand !== realPlug) dupDirs.push(candidate);
+          } catch {
+            dupDirs.push(candidate);
+          }
+        }
+      }
+      findings.push({
+        harness: "antigravity",
+        file: agyZeePlugin,
+        severity: dupDirs.length > 0 ? "high" : "info",
+        status: !pluginEnabled ? "插件已禁用" : dupDirs.length > 0 ? "存在双安装重名冲突" : "Antigravity 插件单源正常",
+        detail: !pluginEnabled
+          ? "zee 插件已安装但在 ~/.gemini/config/config.json 中处于禁用状态，可用 agy plugin enable zee 启用"
+          : dupDirs.length > 0
+            ? `Antigravity 已以原生插件加载 zee，但同时发现重复技能副本（${dupDirs.join("、")}）；建议删除重复目录`
+            : "Antigravity 以原生插件单源加载 zee（含 6 技能 + 7 代理 + 安全/规划 Hook）",
       });
     }
   }

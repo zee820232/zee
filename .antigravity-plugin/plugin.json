@@ -1,0 +1,27 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "zee",
+  "displayName": "zee Workflow",
+  "version": "3.1.0",
+  "description": "通用多模型全自动工程工作流：支持 0→1 建项、风险定级编排、Grill 深度规划、跨家族三轴审查与过夜自治，原生适配 Antigravity CLI 与子代理体系。",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "/zee-plan 先做需求访谈并沉淀计划文档，不改业务代码",
+    "/zee-review 对当前改动做只读跨家族三轴对抗审查",
+    "/zee-setup 初始化或审计当前宿主的模型与工作流配置"
+  ],
+  "author": {
+    "name": "zee820232",
+    "url": "https://github.com/zee820232"
+  },
+  "homepage": "https://github.com/zee820232/zee",
+  "repository": "https://github.com/zee820232/zee",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "multi-agent",
+    "planning",
+    "code-review",
+    "autonomous"
+  ]
+}

@@ -8,7 +8,7 @@ disable-model-invocation: true
 # zee — Universal Multi-Model Autonomous Workflow
 
 Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | investigate | perf | prototype | sweep | resume | night]`
-Shortcuts: `zee-plan`, `zee-init`, `zee-review`, `zee-night`, `zee-setup` (plus `/zee-mode` auto-routing switch when installed as a Pi Package).
+Shortcuts: `zee-plan`, `zee-init`, `zee-review`, `zee-night`, `zee-setup` (plus Pi `/zee-mode` auto-routing switch and Antigravity `agy --agent zee` primary agent).
 Current session acts as **Orchestrator** on whichever harness `zee` is installed in. Never delegate orchestration itself, and only manage the active harness where this skill lives (`<zeeDir>` = parent directory of this `SKILL.md`).
 
 ## User-Facing Language Policy (Mandatory)
@@ -17,7 +17,7 @@ Current session acts as **Orchestrator** on whichever harness `zee` is installed
 
 ## 0. Preflight (Every Run)
 
-1. Resolve `<zeeDir>` (the directory containing this `SKILL.md`). Load `<zeeDir>/references/harness.md` to bind abstract ops (`PROBE`, `SPAWN`, `ISOLATE`, `ASK`, `VISUAL_CHECK`, `SCHEDULE`) to the active harness only, and follow `<zeeDir>/references/interop.md` when reusing host-discovered domain skills.
+1. Resolve `<zeeDir>` (the directory containing this `SKILL.md`). Load `<zeeDir>/references/harness.md` to bind abstract ops (`PROBE`, `SPAWN`, `ISOLATE`, `ASK`, `VISUAL_CHECK`, `SCHEDULE`) to the active harness only (load `<zeeDir>/references/antigravity.md` when running natively in Google Antigravity), and follow `<zeeDir>/references/interop.md` when reusing host-discovered domain skills.
 2. Read `~/.agents/zee-config.json` (plus optional `<repo>/.agents/zee.project.json` and `<repo>/.agents/zee.local.json`). If missing, run `zee-setup` first.
 3. Run `PROBE` once per thread. Resolve each needed role slot (`bindings.<harness>` -> `prefer` -> authorized `backup`) with **Capability Clamping** onto live supported option values (cap routine effort at `xhigh`). Fail closed if no authorized model is available; always announce any `backup` switch to the user in Chinese.
 4. Detect workspace state (`git rev-parse --verify HEAD`, dirty tree, `CONTEXT.md`/`GLOSSARY.md`, `docs/adr/`).

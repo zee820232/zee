@@ -9,11 +9,19 @@
 
 ---
 
-## 安装方式
+## 安装方式（安装时自由选择宿主）
 
-`zee` 采用 **Pi Package + 标准 Agent Skills 双形态封装**：
+`zee` 采用 **Pi Package + Google Antigravity Native Plugin + 标准 Agent Skills 三形态单仓封装**，装在哪就只管哪一个宿主：
 
-### 方式一：Pi 用户（推荐 · 完整扩展包形态）
+### 方式一：一键交互式选择安装（推荐）
+
+```bash
+git clone https://github.com/zee820232/zee.git
+node zee/scripts/install.mjs
+# 或非交互直接指定：node zee/scripts/install.mjs --target pi | agy | skills | both
+```
+
+### 方式二：Pi 用户（完整 Pi Package 形态）
 
 ```bash
 pi install git:github.com/zee820232/zee
@@ -24,11 +32,23 @@ pi install git:github.com/zee820232/zee
 - **常驻自动路由开关 `/zee-mode`（`auto | strict | off`）**：按分支持久化状态，支持 4 层防子代理递归
 - **免前缀短命令**：直接输入 `/zee`、`/zee-plan`、`/zee-init`、`/zee-review`、`/zee-night`、`/zee-setup`
 - **Plan / Review 路径级防写锁**：`/zee-plan` 自动拦截业务代码修改（仅放行计划文档与运行总线），`/zee-review` 强制只读，任务结束或按 `Esc` 自动解锁
-- **内置并行子代理工具 `zee_subagent`**：支持动态传参 `provider`、`model`、`thinkingLevel`、`tools` 与 `cwd`，子进程强制 `-ne` + `ZEE_WORKER=1` 防递归
+- **内置并行子代理工具 `zee_subagent`**：支持动态传参 `provider`、`model`、`thinkingLevel`、`tools` 与 `cwd`，子进程强制 `-ne --no-mcp -ns` + `ZEE_WORKER=1` 防递归
 
-> ⚠️ **防冲突提示**：Pi 用户使用 `pi install` 后，请勿同时在 `~/.pi/agent/skills/` 或 `~/.agents/skills/` 保留旧的 `zee*` 手动拷贝，以免触发重名冲突警告（可运行 `zee-tool.mjs audit-rules` 自动排查）。
+### 方式三：Google Antigravity（`agy` CLI / App / IDE 原生插件形态）
 
-### 方式二：通用 Harness（T3 Code / Claude Code / Codex / Cursor / OpenCode / Antigravity）
+```bash
+agy plugin install https://github.com/zee820232/zee
+```
+
+一次安装自动获得：
+- **专属主控代理 `zee`**：终端运行 **`agy --agent zee`**（或在 CLI `/agents` / Antigravity App 中切换 `zee`），开箱即享自动分级路由，等价于 Pi 的 `/zee-mode auto`
+- **6 个隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 防递归防串扰，配合 `Workspace: "share"` 原生 worktree 隔离与 `flash` / `pro` 模型分档
+- **6 个原生斜杠命令**：直接输入 `/zee`、`/zee-plan`、`/zee-init`、`/zee-review`、`/zee-night`、`/zee-setup`
+- **原生 `PreToolUse` 安全与规划保护 Hook**（`hooks.json` + `scripts/agy-guard.mjs`）：`/zee-plan` 与 `/zee-review` 自动启用路径级防写锁，并强制执行 `.agents/zee.project.json` 中的 `denyCommands` 红线（非锁定场景原样透传，绝不静默跳过权限确认）
+
+> ⚠️ **防冲突提示**：使用 `pi install` 或 `agy plugin install` 安装后，请勿同时在对应宿主的 `skills/` 目录保留旧的 `zee*` 手动拷贝，以免触发重名警告（`install.mjs` 会自动检测清理，也可运行 `zee-tool.mjs audit-rules` 排查）。
+
+### 方式四：其他通用 Harness（T3 Code / Claude Code / Codex / Cursor / OpenCode）
 
 ```bash
 npx skills add zee820232/zee
@@ -42,9 +62,9 @@ npx skills add zee820232/zee
 
 > 在 Pi 中安装 Pi Package 后可直接使用下方全部短命令；通用 Harness 若仅安装 Skills 则使用对应宿主的技能触发方式。
 
-| 命令 | 定位 | 典型用法 |
+| 命令 / 入口 | 定位 | 典型用法 |
 | :--- | :--- | :--- |
-| **`/zee-mode`** | **Pi 常驻自动路由开关**（`auto` 智能路由 / `strict` 强制编排 / `off` 关闭 / `status` 查看） | `/zee-mode auto` |
+| **`/zee-mode`** / **`agy --agent zee`** | **常驻自动路由入口**（Pi 用 `/zee-mode auto\|strict\|off`；Antigravity 用 `agy --agent zee`） | `/zee-mode auto` 或 `agy --agent zee` |
 | **`/zee`** | 全自动主入口（按风险自动定级，也可直接接棒已确认的 `plan.md`） | `/zee 修复重试超时导致的重复提交` |
 | **`/zee-plan`** | **先 Grill 访谈 → 沉淀正式计划文档并停机**（Pi 下自动加路径级防写锁） | `/zee-plan 给面板加多账户支持` |
 | **`/zee-init`** | **项目 0→1 模式**：从想法访谈到可运行、冷启动验收通过的 v1 | `/zee-init 做一个本地书签管理 CLI` |
@@ -95,6 +115,13 @@ npx skills add zee820232/zee
 ## 目录结构
 
 ```text
+.antigravity-plugin/plugin.json   # Google Antigravity 原生插件清单
+assets/logo.svg                   # Antigravity 插件卡片图标
+agents/                           # Antigravity 原生代理（主控 zee + 6 隔离角色子代理）
+hooks.json                        # Antigravity 原生 PreToolUse 安全与规划保护 Hook
+scripts/
+├── install.mjs                   # 交互式 / 命令行多宿主选择安装器（pi | agy | skills | both）
+└── agy-guard.mjs                 # Antigravity PreToolUse 路径级防写锁与 denyCommands 守卫
 package.json                      # Pi Package 清单（导出 pi-extension 与 skills）
 pi-extension/
 └── index.ts                      # Pi 原生扩展：/zee-mode、短命令、Plan/Review 路径锁、并行 zee_subagent
@@ -104,7 +131,7 @@ skills/
 │   ├── worker.md                 # 子代理通用前置契约（含 [zee-worker] 防递归哨兵）
 │   ├── agents/openai.yaml        # Codex 触发策略
 │   ├── roles/                    # scout / architect / ui / coder / verifier / reviewer
-│   ├── references/               # harness / interop / protocols / plan-mode / greenfield / overnight / specialized
+│   ├── references/               # harness / antigravity / interop / protocols / plan-mode / greenfield / overnight / specialized
 │   └── scripts/zee-tool.mjs      # 零依赖工具：配置校验、单端与双安装冲突审计、总线/续跑寻址、Worktree 体检与 TSV 日志
 ├── zee-plan/                     # 快捷入口：Grill 深度访谈 → 沉淀计划文档（只规划不写码）
 ├── zee-init/                     # 快捷入口：项目 0→1 全自动建项

@@ -1,9 +1,9 @@
 {
   "name": "zee-workflow",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "type": "module",
-  "description": "通用多模型全自动工程工作流（Agent Skills + Pi Extension 双形态包）",
+  "description": "通用多模型全自动工程工作流（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包）",
   "keywords": [
     "pi-package",
     "agent-skills",

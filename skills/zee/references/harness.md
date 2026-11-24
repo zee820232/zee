@@ -10,7 +10,8 @@ Select the highest available tier in the active harness (never switch hosts or s
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **T1** | **T3 Code** (any active provider) | `delegate_task` + `orchestrator_capabilities` available | `orchestrator_capabilities` (1x/thread) | `delegate_task(mode:"async", target, role, isolation)` | `isolation:"worktree"` | `ask_question` or numbered text | `schedule_task` |
 | **T2** | **Pi** (`zee` Package or subagent ext) | `zee_subagent` (built-in) or `subagent_spawn` available (no `delegate_task`) | `pi --list-models` or session models | `zee_subagent({ task, role, provider, model, thinkingLevel, tools, cwd })` (supports parallel calls) or `subagent_spawn` | `git worktree add` (pass `cwd` to worker) | `ask_user_question` or numbered text | manual |
-| **T3** | **Cursor / OpenCode / Claude / Codex / Antigravity** (standalone) | `Task` / `task` / `Agent` / `spawn_agent` / `invoke_subagent` (no `delegate_task`) | Host model catalog / tiers | Native subagent tool (`Task` / `task` / `Agent` / `spawn_agent` / `invoke_subagent`) | Native worktree/branch or `git worktree` | Host ask tool or numbered text | `/loop` / `schedule` / manual |
+| **T2-AGY** | **Google Antigravity** (`zee` Plugin / `agy`) | `invoke_subagent` available (no `delegate_task`); see `references/antigravity.md` | Native tiers (`pro`/`flash`/`flash_lite`/`inherit`) | `invoke_subagent(TypeName:"zee-scout"\|"zee-architect"\|"zee-ui"\|"zee-coder"\|"zee-verifier"\|"zee-reviewer", Model, Workspace)` (fallback `"self"`) | `Workspace:"share"` (worktree) or `"branch"` | `ask_question` | `schedule` |
+| **T3** | **Cursor / OpenCode / Claude / Codex** (standalone) | `Task` / `task` / `Agent` / `spawn_agent` (no `delegate_task`) | Host model catalog / tiers | Native subagent tool (`Task` / `task` / `Agent` / `spawn_agent`) | Native worktree/branch or `git worktree` | Host ask tool or numbered text | `/loop` / manual |
 | **T4** | **Single-Thread Fallback** (bare Pi / no subagent tool) | No subagent tool available | Active model only | Sequential role switching in current thread | Dedicated branch `zee/<slug>` | numbered text | manual |
 
 ### Visual Check (`VISUAL_CHECK`)
@@ -37,7 +38,7 @@ Read `~/.agents/zee-config.json` (plus optional `.agents/zee.local.json` overrid
      - `zee_subagent` supports parallel tool calls in a single assistant turn and enforces `-ne` (`--no-extensions`) + `ZEE_WORKER=1` anti-recursion automatically. When using `subagent_spawn`, cancel unneeded jobs with `subagent_cancel({ jobId })`.
    - **Cursor**: emit `<modelHint>-<effort>` (omit unsupported `-xhigh` on models that cap at `high`).
    - **Claude Code (standalone)**: pass Claude `modelHint` + `effort` directly; if slot prefers an external family, announce single-vendor degradation once and map by `tier` (`pro`->opus, `standard`->sonnet, `fast`->haiku) while preserving fresh-context separation.
-   - **Antigravity (standalone)**: map `tier` -> `pro | flash | flash_lite | inherit`; announce single-vendor degradation once.
+   - **Google Antigravity (`agy` standalone)**: load `references/antigravity.md`; map `tier` -> `pro | flash | flash_lite | inherit`, prefer bundled `TypeName: "zee-*"` subagents (`inheritCustomizations: false`) with `Workspace: "share"` for coding, and announce single-vendor degradation once in Chinese.
    - **Single-Thread Fallback**: announce sequential mode once; enforce strict bus artifact handoffs between phases so context stays clean.
 
 ## 3. Concurrency & Wakeup Discipline

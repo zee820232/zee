@@ -13,12 +13,17 @@
 
 `zee` 采用 **Pi Package + Google Antigravity Native Plugin + 标准 Agent Skills 三形态单仓封装**，装在哪就只管哪一个宿主：
 
-### 方式一：一键交互式选择安装（推荐）
+### 方式一：一行 `npx` 交互式选择安装（推荐 · 无需克隆）
 
 ```bash
-git clone https://github.com/zee820232/zee.git
-node zee/scripts/install.mjs
-# 或非交互直接指定：node zee/scripts/install.mjs --target pi | agy | skills | both
+# 弹出菜单自由选择：Pi / Google Antigravity (agy) / 通用 Agent Skills / 同时安装
+npx github:zee820232/zee
+
+# 或直接非交互指定目标宿主：
+npx github:zee820232/zee --target pi
+npx github:zee820232/zee --target agy
+npx github:zee820232/zee --target skills
+npx github:zee820232/zee --target both
 ```
 
 ### 方式二：Pi 用户（完整 Pi Package 形态）

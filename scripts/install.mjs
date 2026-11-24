@@ -19,7 +19,16 @@ import { fileURLToPath } from "node:url";
 
 const HOME = os.homedir();
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const GITHUB_HTTPS = "https://github.com/zee820232/zee";
+const PI_GIT_SOURCE = "git:github.com/zee820232/zee";
 const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-night"];
+
+function isEphemeralSource(forceRemote) {
+  if (forceRemote) return true;
+  if (REPO_ROOT.includes(`${path.sep}_npx${path.sep}`)) return true;
+  if (REPO_ROOT.includes(`${path.sep}node_modules${path.sep}`)) return true;
+  return !fs.existsSync(path.join(REPO_ROOT, ".git"));
+}
 
 function hasBinary(bin) {
   const res = spawnSync("which", [bin], { encoding: "utf8" });
@@ -53,11 +62,11 @@ function runCmd(cmd, args, dryRun) {
   execFileSync(cmd, args, { stdio: "inherit" });
 }
 
-function installPi(dryRun) {
+function installPi(dryRun, useRemote) {
   console.log("\n=== 安装目标：Pi 完整扩展包（技能 + /zee-mode + 短命令 + 路径锁 + zee_subagent） ===");
   if (!hasBinary("pi")) {
     console.error("未检测到 pi 命令。请先安装 @earendil-works/pi-coding-agent，或手动执行：");
-    console.error("  pi install git:github.com/zee820232/zee");
+    console.error(`  pi install ${PI_GIT_SOURCE}`);
     process.exitCode = 1;
     return;
   }
@@ -69,15 +78,16 @@ function installPi(dryRun) {
       else fs.rmSync(d, { recursive: true, force: true });
     }
   }
-  runCmd("pi", ["install", REPO_ROOT], dryRun);
+  const piSource = useRemote ? PI_GIT_SOURCE : REPO_ROOT;
+  runCmd("pi", ["install", piSource], dryRun);
   console.log("✅ Pi 安装完成！进入 Pi 后可直接使用 /zee-mode auto、/zee、/zee-plan、/zee-setup。");
 }
 
-function installAgy(dryRun) {
+function installAgy(dryRun, useRemote) {
   console.log("\n=== 安装目标：Google Antigravity (agy) 原生插件（6 技能 + 7 代理 + 安全/规划 Hook） ===");
   if (!hasBinary("agy")) {
     console.error("未检测到 agy 命令。请先安装 Google Antigravity CLI，或手动执行：");
-    console.error("  agy plugin install https://github.com/zee820232/zee");
+    console.error(`  agy plugin install ${GITHUB_HTTPS}`);
     process.exitCode = 1;
     return;
   }
@@ -89,8 +99,9 @@ function installAgy(dryRun) {
       else fs.rmSync(d, { recursive: true, force: true });
     }
   }
-  runCmd("agy", ["plugin", "validate", "--strict", REPO_ROOT], dryRun);
-  runCmd("agy", ["plugin", "install", REPO_ROOT], dryRun);
+  const agySource = useRemote ? GITHUB_HTTPS : REPO_ROOT;
+  runCmd("agy", ["plugin", "validate", "--strict", agySource], dryRun);
+  runCmd("agy", ["plugin", "install", agySource], dryRun);
   console.log("✅ Google Antigravity 安装完成！");
   console.log("   - 启动专属总控代理：agy --agent zee（或在 CLI 输入 /agents 选择 zee）");
   console.log("   - 直接调用斜杠命令：/zee、/zee-plan、/zee-init、/zee-review、/zee-night、/zee-setup");
@@ -102,12 +113,12 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee 多宿主安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
+  console.log(`zee 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
 
 用法：
-  node scripts/install.mjs                       交互式菜单选择宿主
-  node scripts/install.mjs --target <目标>       直接安装到指定宿主
-  node scripts/install.mjs --target <目标> --dry-run
+  npx github:zee820232/zee                       无需克隆，交互式选择宿主安装
+  npx github:zee820232/zee --target <目标>       直接安装到指定宿主
+  node scripts/install.mjs --target <目标> [--dry-run] [--remote]
 
 可选目标 (--target)：
   pi       安装为 Pi 完整扩展包（pi install）
@@ -125,13 +136,14 @@ async function main() {
   }
 
   const dryRun = args.includes("--dry-run");
+  const useRemote = isEphemeralSource(args.includes("--remote"));
   const targetIdx = args.indexOf("--target");
   let target = targetIdx >= 0 ? (args[targetIdx + 1] || "").toLowerCase() : "";
 
   if (!target) {
     const piDetected = hasBinary("pi") ? "已检测到" : "未检测到";
     const agyDetected = hasBinary("agy") ? "已检测到" : "未检测到";
-    console.log(`zee 工作流安装向导（仓库路径：${REPO_ROOT}）\n`);
+    console.log(`zee 工作流安装向导（来源：${useRemote ? GITHUB_HTTPS : REPO_ROOT}）\n`);
     console.log(`  1) Pi 完整扩展包（${piDetected} pi）— 含 /zee-mode、短命令、路径锁、并行 zee_subagent`);
     console.log(`  2) Google Antigravity 原生插件（${agyDetected} agy）— 含 agy --agent zee、6 专用子代理、安全/规划 Hook`);
     console.log(`  3) 通用 Agent Skills（npx skills add）— 适用于 T3 Code / Claude Code / Codex / Cursor / OpenCode`);
@@ -152,17 +164,17 @@ async function main() {
 
   switch (target) {
     case "pi":
-      installPi(dryRun);
+      installPi(dryRun, useRemote);
       break;
     case "agy":
-      installAgy(dryRun);
+      installAgy(dryRun, useRemote);
       break;
     case "skills":
       installUniversalSkills(dryRun);
       break;
     case "both":
-      installPi(dryRun);
-      installAgy(dryRun);
+      installPi(dryRun, useRemote);
+      installAgy(dryRun, useRemote);
       break;
     default:
       console.error(`未知安装目标 "${target}"。可用值：pi | agy | skills | both`);

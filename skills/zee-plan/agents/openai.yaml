@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Plan"
+  short_description: "先 grill 深度访谈，再沉淀正式计划文档（只规划不写代码）"
+policy:
+  allow_implicit_invocation: false

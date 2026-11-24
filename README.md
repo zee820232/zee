@@ -21,10 +21,25 @@ npx skills add zee820232/zee
 
 ```bash
 git clone https://github.com/zee820232/zee.git
-cp -R zee/skills/zee zee/skills/zee-setup ~/.pi/agent/skills/
+cp -R zee/skills/zee* ~/.pi/agent/skills/
 ```
 
-安装完成后，在对应宿主里运行一次 **`/zee-setup`** 完成模型装配即可开用。
+安装完成后，在对应宿主里运行一次 **`/zee-setup`**（Pi 中为 `/skill:zee-setup`）完成模型装配即可开用。
+
+---
+
+## 斜杠命令一览（共 6 个，简洁无冗余）
+
+> 在 Pi 中原生命令格式为 `/skill:<名>`，在支持简写的界面（T3 Code / Claude Code / Cursor）中可直接用 `/<名>`。
+
+| 命令 | 定位 | 典型用法 |
+| :--- | :--- | :--- |
+| **`/zee`** | 全自动主入口（按风险自动定级，也可直接接棒已确认的 `plan.md`） | `/zee 修复重试超时导致的重复提交` |
+| **`/zee-plan`** | **先 Grill 访谈 → 沉淀正式计划文档并停机**（不写代码；加 `L3` 跑 Arena） | `/zee-plan 给面板加多账户支持` |
+| **`/zee-init`** | **项目 0→1 模式**：从想法访谈到可运行、冷启动验收通过的 v1 | `/zee-init 做一个本地书签管理 CLI` |
+| **`/zee-review`** | **只读跨家族三轴对抗审查**（仅保留实证问题，不改代码） | `/zee-review` |
+| **`/zee-night`** | **无人值守过夜模式**（独立分支、断点日志、预算熔断、中文晨报） | `/zee-night 执行 .scratch/auth/plan.md` |
+| **`/zee-setup`** | 一次配置 6 个角色模型与思考强度、审计当前宿主规则冲突 | `/zee-setup` |
 
 ---
 
@@ -69,29 +84,31 @@ cp -R zee/skills/zee zee/skills/zee-setup ~/.pi/agent/skills/
 
 ```text
 skills/
-├── zee/
+├── zee/                          # 核心工作流（唯一真源）
 │   ├── SKILL.md                  # 宿主无关总控内核
 │   ├── worker.md                 # 子代理通用前置契约
 │   ├── agents/openai.yaml        # Codex 触发策略
 │   ├── roles/                    # scout / architect / ui / coder / verifier / reviewer
-│   ├── references/               # harness / protocols / greenfield / overnight
+│   ├── references/               # harness / protocols / plan-mode / greenfield / overnight
 │   └── scripts/zee-tool.mjs      # 零依赖工具：配置校验、单端规则审计、总线初始化与 TSV 日志
-└── zee-setup/
-    ├── SKILL.md                  # 一次模型装配与当前宿主配置引导
-    └── agents/openai.yaml
+├── zee-plan/                     # 快捷入口：Grill 深度访谈 → 沉淀计划文档（只规划不写码）
+├── zee-init/                     # 快捷入口：项目 0→1 全自动建项
+├── zee-review/                   # 快捷入口：只读跨家族对抗审查
+├── zee-night/                    # 快捷入口：无人值守过夜模式
+└── zee-setup/                    # 一次模型装配与当前宿主配置引导
 ```
 
 ---
 
-## 常用示例
+## 推荐配合用法
 
 ```text
-/zee-setup                              # 装配角色模型、思考强度并检查当前宿主规则冲突
-/zee init 帮我从零做一个本地书签管理 CLI   # 进入项目 0→1 模式
-/zee 修复重试超时导致的重复提交问题         # 自动走 Bug 先红后绿专线
-/zee L3 重构任务队列并发架构               # 强制开启 L3 正交 Arena + 多模型实证会审
-/zee review                             # 对当前改动做只读跨家族对抗审查
-/zee night 把存储层平滑迁移到 SQLite       # 无人值守过夜模式（自动切独立分支并生成中文晨报）
+# 1. 先访谈想清楚，再沉淀计划文档（完全不动代码）
+/zee-plan 重构任务队列并支持优先级调度
+
+# 2. 看完 plan.md 满意后，直接交给 zee 白天跑或过夜跑（跳过重复问答与重画）
+/zee 执行 .scratch/job-queue/plan.md
+/zee-night 执行 .scratch/job-queue/plan.md
 ```
 
 ## 开源协议

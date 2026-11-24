@@ -7,7 +7,8 @@ disable-model-invocation: true
 
 # zee — Universal Multi-Model Autonomous Workflow
 
-Command syntax: `/zee <request> [init | L0 | L1 | L2 | L3 | debate | review | night]`
+Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | night]`
+Shortcuts: `zee-plan`, `zee-init`, `zee-review`, `zee-night`, `zee-setup`.
 Current session acts as **Orchestrator** on whichever harness `zee` is installed in. Never delegate orchestration itself, and only manage the active harness where this skill lives (`<zeeDir>` = parent directory of this `SKILL.md`).
 
 ## User-Facing Language Policy (Mandatory)
@@ -36,8 +37,12 @@ Classify unknowns before asking: **code facts -> Scout**; **observable tech fork
   - **L1 Quick**: low-risk local change, no contract/schema/UI-system impact -> `[optional Scout]` -> `Coder(standard)` or `UI(standard)` -> `Verifier`.
   - **L2 Standard**: multi-file feature, bug fix, refactor, or **any edit touching `riskPaths`** (auth, crypto, billing, migrations, live trading/signing, public APIs) -> full pipeline + 1 cross-family `Reviewer`.
   - **L3 High-Stakes / Debate**: cross-module architecture, concurrency/state-machine change, major redesign, or explicit `debate`/`L3` -> `Scout(Deep)` -> orthogonal **Arena** + cross-vendor `Judge` + Orchestrator **Graft** -> `Coder(heavy)` / `UI(heavy)` -> `Verifier` (Gate 1) -> 2–3 cross-family `Reviewers` (Gate 2).
-  - **Standalone Modes**: `debate` stops after Arena + ADR/decision report; `review` runs `Reviewers` read-only on target diff/SHA without editing.
-  - **`night` Mode (orthogonal modifier)**: load `<zeeDir>/references/overnight.md`. Applies autonomous branch isolation, Unit 0 verification harness + baseline, Canary first unit, `decisions.tsv` audit trail, budget fuse, and Chinese morning report.
+  - **Standalone Modes**:
+    - `plan` (or `/zee-plan`): load `<zeeDir>/references/plan-mode.md`. Runs `Scout` -> multi-round Chinese **Grilling** -> `Architect` (+ `UI`, optional L3 Arena) -> writes finalized `plan.md` and **stops without editing production code**.
+    - `debate`: stops after L3 Arena + cross-vendor Judge ADR/decision report.
+    - `review` (or `/zee-review`): runs cross-family `Reviewers` read-only on target diff/SHA without editing.
+  - **Approved Plan Fast-Path**: if the user passes an existing approved `plan.md` / `SPEC.md` (e.g. from `zee-plan`), verify no repo drift and skip Intake/Architect straight into **Build -> Check -> Merge**.
+  - **`night` Mode (or `/zee-night`, orthogonal modifier)**: load `<zeeDir>/references/overnight.md`. Applies autonomous branch isolation, Unit 0 verification harness + baseline, Canary first unit, `decisions.tsv` audit trail, budget fuse, and Chinese morning report.
 
 ## 2. Core Pipeline (Load Role Card Per Step)
 

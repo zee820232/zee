@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Night"
+  short_description: "无人值守过夜模式（独立分支、断点日志、预算熔断与中文晨报）"
+policy:
+  allow_implicit_invocation: false

@@ -9,7 +9,7 @@ const HOME = os.homedir();
 const DEFAULT_CONFIG = path.join(HOME, ".agents", "zee-config.json");
 const SOURCE_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RUNS_ROOT = path.join(HOME, ".local", "state", "zee", "runs");
-const SKILL_NAMES = ["zee", "zee-setup"];
+const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-night"];
 
 const HARNESS_TARGETS = [
   { name: "agents", dir: path.join(HOME, ".agents", "skills"), parentMustExist: path.join(HOME, ".agents") },

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Review"
+  short_description: "只读跨家族三轴对抗审查（仅保留实证问题，不改代码）"
+policy:
+  allow_implicit_invocation: false

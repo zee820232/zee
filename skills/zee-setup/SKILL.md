@@ -67,4 +67,4 @@ Present ONLY the conflicts relevant to the active harness surfaced by `audit-rul
 ## Step 5: Optional Project Contract & Summary
 
 1. If inside a git repo without `<repo>/.agents/zee.project.json`, ask in Chinese whether to generate it with discovered `testCmds`, `buildCmd`, `lintCmd`, `riskPaths`, `uiGlobs`, and `denyCommands`.
-2. Summarize the saved config path, active harness, budget preset, and usage examples in Chinese (`/zee init`、`/zee <需求>`、`/zee review`、`/zee night`).
+2. Summarize the saved config path, active harness, budget preset, and usage examples in Chinese (`/zee-plan`、`/zee-init`、`/zee <需求>`、`/zee-review`、`/zee-night`).

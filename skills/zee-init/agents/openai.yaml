@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Init"
+  short_description: "项目 0→1 模式：从想法访谈到可运行、已验收的 v1 产品"
+policy:
+  allow_implicit_invocation: false

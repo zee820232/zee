@@ -298,6 +298,35 @@ test("v4.1 回归 [C4/H4]：Stop Hook 豁免 initialized/awaiting-approval 且�
       { PLUGIN_DATA: pluginData },
     );
     assert.deepEqual(workerAllowBus, {});
+
+    // 5. v4.1.1: /zee-verify run 启用只读 review 锁，且 Scout /tmp/zee-probe-* 沙盒装包放行、(rm -rf /) 必拦截
+    runHook(
+      { hookEventName: "PreInvocation", conversationId: "conv-verify-run", cwd: absRepo, lastUserInput: "/zee-verify run" },
+      { PLUGIN_DATA: pluginData },
+    );
+    const verifyRunBlock = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "conv-verify-run",
+        cwd: absRepo,
+        lastUserInput: "/zee-verify run",
+        toolCall: { name: "write_file", args: { Path: path.join(absRepo, "src", "edit.ts") } },
+      },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.equal(verifyRunBlock.decision, "deny");
+
+    const parenBlock = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "conv-paren",
+        cwd: absRepo,
+        lastUserInput: "clean",
+        toolCall: { name: "run_command", args: { CommandLine: "(rm -rf /)" } },
+      },
+      { PLUGIN_DATA: pluginData, NON_INTERACTIVE: "1" },
+    );
+    assert.equal(parenBlock.decision, "deny");
   } finally {
     fs.rmSync(pluginData, { recursive: true, force: true });
     fs.rmSync(repoDir, { recursive: true, force: true });

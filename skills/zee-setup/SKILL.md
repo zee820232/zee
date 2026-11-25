@@ -32,7 +32,7 @@ Configure `~/.agents/zee-config.json` (canonical role-model intent + runtime bin
 Present **3 budget presets** in Chinese (routine effort caps at `xhigh`; `max` is reserved for explicit user override or 2x-failed escalations):
 
 - **`eco（省钱日常）`**：各角色思考强度在合法档位下移 1 阶，L3 默认 2 席审查。
-- **`balanced（均衡主力，推荐）`**：`scout` 低/中思考、`architect` 高思考、`ui` 中/高思考、**`coder.standard` 中思考（`medium`，实测耗时降 4–5 倍且质量稳）**、`coder.heavy` 高/超高思考、`verifier` 中思考、`reviewers` 2–3 个不同家族（常规审查优先高速稳定模型 `medium/high`，深度长思考模型留给 L3 / 高危终审）。
+- **`balanced（均衡主力，推荐）`**：`scout` 低思考、`architect.primary` 旗舰模型**低思考（`low`，常规 L2/L3 提速 2–4× 且质量稳，中/高思考留给 L3 Arena 辩论池）**、`ui` 中思考、**`coder.standard` 中思考（`medium`，实测耗时降 4–5 倍且质量稳）**、`coder.heavy` 高思考（**备胎优先高速异构模型，避免把单次 >10 分钟的慢思考模型设为长切片编码备胎**）、`verifier` 低/中思考、`reviewers` 2–3 个不同家族（常规审查优先高速稳定模型 `medium`，深度模型 `low`/`medium` 按需使用）。
 - **`max（满血攻坚）`**：`architect`、`ui.heavy`、`coder.heavy`、`reviewers` 拉满至各模型合法上限（日常封顶 `xhigh`），启用完整 3 家族审查池。
 
 Display a clean Chinese table of the **6 core slots** (plus optional `judge` override) and ask the user whether to accept or adjust specific slots:
@@ -70,5 +70,5 @@ Present ONLY the conflicts relevant to the active harness surfaced by `doctor` /
 ## Step 5: Optional Project Contract, `verify-<app>` Skill & Summary
 
 1. If inside a git repo without `<repo>/.agents/zee.project.json`, ask in Chinese whether to generate it with discovered `testCmds`, `buildCmd`, `lintCmd`, `riskPaths`, `uiGlobs`, and `denyCommands`.
-2. If the repo is a real UI, CLI/TUI, game, desktop, or service app without `<projectSkillsDir>/verify-<app>/SKILL.md`, offer in Chinese to run `disciplines/verification-skill.md` (`verify-init` / `verify-maintain`) to generate and **live-prove** a committed project verification skill + `features/` map.
-3. Summarize the saved config path, active harness, `doctor` health status, budget preset, and usage examples in Chinese (`/zee-plan`、`/zee-init`、`/zee <需求>`、`/zee-review`、`/zee-arch`、`/zee-retro`、`/zee-night`).
+2. If the repo is a real UI, CLI/TUI, game, desktop, or service app without `<projectSkillsDir>/verify-<app>/SKILL.md`, offer in Chinese to run `/zee-verify init` (`disciplines/verification-skill.md`) to generate and **live-prove** a committed project verification skill + `features/` map.
+3. Summarize the saved config path, active harness, `doctor` health status, budget preset, and usage examples in Chinese (`/zee-plan`、`/zee-init`、`/zee <需求>`、`/zee-review`、`/zee-verify`、`/zee-arch`、`/zee-retro`、`/zee-night`).

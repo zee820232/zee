@@ -68,7 +68,8 @@ export function isAllowedZeeTmpPath(targetPath, repoCwd = "") {
     const rel = path.relative(root, resolved);
     if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
     const firstSeg = rel.split(path.sep)[0];
-    if (firstSeg && /^zee-(?:probe|mut|rev|review|retro|doc|note|tmp|sandbox|verify|bench|proto)(?:[-_]|$)/.test(firstSeg)) {
+    // 统一放行所有合法 /tmp/zee-* 沙盒目录（与报错提示保持一致；第 65 行仍严禁逃逸进仓库目录）
+    if (firstSeg && /^zee-[a-z0-9][a-z0-9_.-]*$/i.test(firstSeg)) {
       return true;
     }
   }
@@ -163,6 +164,7 @@ export function tokenizeShell(segment) {
   let current = "";
   let quote = null;
   let escaping = false;
+  let substParenDepth = 0;
 
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i];
@@ -190,6 +192,18 @@ export function tokenizeShell(segment) {
       escaping = true;
       continue;
     }
+    if (ch === "$" && segment[i + 1] === "(") {
+      substParenDepth += 1;
+      current += "$(";
+      i += 1;
+      continue;
+    }
+    if (substParenDepth > 0) {
+      if (ch === "(") substParenDepth += 1;
+      else if (ch === ")") substParenDepth -= 1;
+      current += ch;
+      continue;
+    }
     if (ch === "'" || ch === '"') {
       quote = ch;
       continue;
@@ -208,13 +222,21 @@ export function tokenizeShell(segment) {
 }
 
 /**
- * 按未加引号的 shell 控制操作符（&&, ||, ;, |, &, \n）拆分单层命令片段
+ * 按未加引号的 shell 控制操作符（&&, ||, ;, |, &, \n）以及分组边界（独立 ( ) { }）拆分单层命令片段
+ * 保留 $(...) 命令替换、${...} 参数展开与词内 {a,b} 花括号展开
  */
 export function splitShellSegments(command) {
   const segments = [];
   let current = "";
   let quote = null;
   let escaping = false;
+  let substParenDepth = 0;
+  let substBraceDepth = 0;
+
+  const flush = () => {
+    if (current.trim()) segments.push(current.trim());
+    current = "";
+  };
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
@@ -244,9 +266,55 @@ export function splitShellSegments(command) {
       current += ch;
       continue;
     }
+
+    // 保留 $(...) 命令替换整体（内部命令由 getAllNestedCommands 递归抽查）
+    if (ch === "$" && command[i + 1] === "(") {
+      substParenDepth += 1;
+      current += "$(";
+      i += 1;
+      continue;
+    }
+    if (substParenDepth > 0) {
+      if (ch === "(") substParenDepth += 1;
+      else if (ch === ")") substParenDepth -= 1;
+      current += ch;
+      continue;
+    }
+
+    // 保留 ${...} 参数展开整体
+    if (ch === "$" && command[i + 1] === "{") {
+      substBraceDepth += 1;
+      current += "${";
+      i += 1;
+      continue;
+    }
+    if (substBraceDepth > 0) {
+      if (ch === "{") substBraceDepth += 1;
+      else if (ch === "}") substBraceDepth -= 1;
+      current += ch;
+      continue;
+    }
+
+    // 剥离独立子 shell 括号 ( ... )，防止 (rm -rf /) / (pnpm add ...) 绕过
+    if (ch === "(" || ch === ")") {
+      flush();
+      continue;
+    }
+
+    // 剥离独立命令分组花括号 { ...; }（保留词内花括号展开如 foo/{a,b}）
+    if (ch === "{" || ch === "}") {
+      const prev = command[i - 1];
+      const next = command[i + 1];
+      const prevBoundary = prev === undefined || /[\s;|&(\n{]/.test(prev);
+      const nextBoundary = next === undefined || /[\s;|&)\n};]/.test(next);
+      if (prevBoundary && nextBoundary) {
+        flush();
+        continue;
+      }
+    }
+
     if (ch === ";" || ch === "\n") {
-      if (current.trim()) segments.push(current.trim());
-      current = "";
+      flush();
       continue;
     }
     if (ch === "|" || ch === "&") {
@@ -257,23 +325,94 @@ export function splitShellSegments(command) {
         current += ch;
         continue;
       }
-      if (current.trim()) segments.push(current.trim());
-      current = "";
+      flush();
       if (next === ch) i += 1;
       continue;
     }
     current += ch;
   }
-  if (current.trim()) segments.push(current.trim());
+  flush();
   return segments;
 }
 
 /**
- * 递归剥离 sh/bash/zsh/dash/ksh（含前置选项如 -e / --norc / -o pipefail） -c 与 eval 嵌套子命令（最大深度 5）
+ * 提取命令中的 $(...) 命令替换体（跳过单引号内字面量与 $((...)) 算术展开）
+ */
+function extractCommandSubstitutions(command) {
+  const subs = [];
+  let quote = null;
+  let escaping = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (ch === "\\") {
+      escaping = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+        continue;
+      }
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === "$" && command[i + 1] === "(") {
+      if (command[i + 2] === "(") continue; // 跳过算术 $((...))
+      let depth = 1;
+      let j = i + 2;
+      let innerQuote = null;
+      let innerEsc = false;
+      while (j < command.length && depth > 0) {
+        const c = command[j];
+        if (innerEsc) {
+          innerEsc = false;
+        } else if (innerQuote === "'") {
+          if (c === "'") innerQuote = null;
+        } else if (innerQuote === '"') {
+          if (c === "\\") innerEsc = true;
+          else if (c === '"') innerQuote = null;
+        } else if (c === "\\") {
+          innerEsc = true;
+        } else if (c === "'" || c === '"') {
+          innerQuote = c;
+        } else if (c === "(") {
+          depth += 1;
+        } else if (c === ")") {
+          depth -= 1;
+        }
+        j += 1;
+      }
+      if (depth === 0) {
+        const inner = command.slice(i + 2, j - 1).trim();
+        if (inner) subs.push(inner);
+        i = j - 1;
+      }
+    }
+  }
+  return subs;
+}
+
+/**
+ * 递归剥离 sh/bash/zsh/dash/ksh（含前置选项如 -e / --norc / -o pipefail） -c、eval 与 $(...) 嵌套子命令（最大深度 5）
  */
 export function getAllNestedCommands(command, maxDepth = 5) {
   const results = [String(command || "")];
   if (maxDepth <= 0 || !command) return results;
+
+  for (const sub of extractCommandSubstitutions(command)) {
+    results.push(...getAllNestedCommands(sub, maxDepth - 1));
+  }
 
   const segments = splitShellSegments(command);
   for (const seg of segments) {
@@ -579,8 +718,45 @@ function getExecutableDenyCandidate(seg) {
   return seg;
 }
 
+function matchesDenyEntry(segment, rawEntry) {
+  const entry = String(rawEntry || "").trim();
+  if (!entry) return false;
+  const entryTokens = tokenizeShell(entry);
+  const segTokens = tokenizeShell(segment);
+  if (entryTokens.length === 0 || segTokens.length === 0) return false;
+
+  const tokenMatches = (segTok, entryTok) => {
+    if (segTok === entryTok) return true;
+    // 支持 --flag=value 命中 --flag
+    if (entryTok.startsWith("-") && segTok.startsWith(`${entryTok}=`)) return true;
+    // 路径红线（如 "/" 或 "~"）命中 "/*" 或 "~/*"，但不误杀 "/tmp/..."
+    if ((entryTok === "/" || entryTok === "~") && segTok === `${entryTok}*`) return true;
+    if (entryTok === "~" && (segTok === "~/" || segTok === "~/*")) return true;
+    return false;
+  };
+
+  for (let i = 0; i <= segTokens.length - entryTokens.length; i++) {
+    let matched = true;
+    for (let j = 0; j < entryTokens.length; j++) {
+      if (!tokenMatches(segTokens[i + j], entryTokens[j])) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return true;
+  }
+
+  // 对非路径结尾的单子串模式（如自定义 URL/关键字），保留带边界的子串兜底，但绝不用以 "/" 或 "~" 结尾的条目做裸前缀匹配
+  if (entryTokens.length === 1 && !entry.endsWith("/") && !entry.endsWith("~")) {
+    const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?:^|[\\s"'=;|&])${escaped}(?:$|[\\s"'=;|&*])`);
+    if (re.test(segment)) return true;
+  }
+  return false;
+}
+
 /**
- * 检查项目级 .agents/zee.project.json 中的 denyCommands（先剥 Heredoc、穿透嵌套子 shell、排除只读搜索与 commit 消息）
+ * 检查项目级 .agents/zee.project.json 中的 denyCommands（先剥 Heredoc、穿透嵌套子 shell、词法 token 边界匹配，避免 "rm -rf /" 误杀 "/tmp/..."）
  */
 export function checkProjectDenyCommands(command, cwd) {
   if (!command || !cwd) return null;
@@ -607,7 +783,7 @@ export function checkProjectDenyCommands(command, cwd) {
 
   for (const entry of denies) {
     if (typeof entry !== "string" || !entry.trim()) continue;
-    if (checkableSegments.some((s) => s.includes(entry))) {
+    if (checkableSegments.some((s) => matchesDenyEntry(s, entry))) {
       return `命中项目安全红线（.agents/zee.project.json denyCommands: "${entry}"），已硬拦截该命令。`;
     }
   }
@@ -782,7 +958,33 @@ function expandStaticVars(str, staticVars) {
   });
 }
 
-function recordLeadingStaticVars(rawTokens, staticVars) {
+function resolveControlledMktempSandbox(val, repoCwd) {
+  const m = String(val || "")
+    .trim()
+    .match(/^\$\(\s*mktemp\s+([^)]+)\)$/);
+  if (!m) return null;
+  const args = tokenizeShell(m[1]);
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-p" || a === "--tmpdir") {
+      if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        positionals.push(args[i + 1]);
+        i += 1;
+      }
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    positionals.push(a);
+  }
+  const tpl = positionals[positionals.length - 1];
+  if (!tpl) return null;
+  const materialized = tpl.replace(/X{3,}$/g, "sandbox");
+  const resolved = normalizeToolPath(materialized, "/tmp");
+  return isAllowedZeeTmpPath(resolved, repoCwd) ? resolved : null;
+}
+
+function recordLeadingStaticVars(rawTokens, staticVars, repoCwd = "") {
   let idx = 0;
   if (rawTokens[0] === "export" || rawTokens[0] === "local" || rawTokens[0] === "readonly") {
     idx = 1;
@@ -792,11 +994,16 @@ function recordLeadingStaticVars(rawTokens, staticVars) {
     const m = rawTokens[idx].match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     if (!m) break;
     const [, name, val] = m;
-    // 仅记录不含命令替换的纯字面量赋值
+    // 记录不含命令替换的纯字面量赋值，或受控的 $(mktemp -d /tmp/zee-...) 沙盒路径绑定
     if (!val.includes("$(") && !val.includes("`")) {
       const expanded = expandStaticVars(val, staticVars);
       if (!/\$[A-Za-z_{]/.test(expanded)) {
         staticVars.set(name, expanded);
+      }
+    } else {
+      const sandboxPath = resolveControlledMktempSandbox(val, repoCwd);
+      if (sandboxPath) {
+        staticVars.set(name, sandboxPath);
       }
     }
     idx += 1;
@@ -942,7 +1149,53 @@ function extractHeredocBodyText(command) {
   return bodies.join("\n");
 }
 
-function checkInterpreterInlineWrite(verb, tokens, rawCommand) {
+function isInlineCodeConfinedToAllowedPaths(code, repoCwd, virtualCwd, gateMode, extraAllowedDirs) {
+  const inSandbox = isAllowedZeeTmpPath(virtualCwd, repoCwd);
+  const absRepo = path.resolve(repoCwd);
+
+  // 检查内联代码中的显式写入调用是否全部使用静态字面量路径且落在允许目录内
+  const writeCallRes = [
+    /\bopen\s*\(\s*(['"])([^'"\n]+)\1\s*,\s*['"][wax+]/gi,
+    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|rmSync|unlinkSync|mkdirSync|createWriteStream)\s*\(\s*(['"])([^'"\n]+)\1/g,
+    /\bPath\s*\(\s*(['"])([^'"\n]+)\1\s*\)\.(?:write_text|write_bytes)\s*\(/g,
+  ];
+  const literalPaths = [];
+  for (const re of writeCallRes) {
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      literalPaths.push(m[2]);
+    }
+  }
+
+  // 若显式抽到了写入路径，全部必须落在允许目录内（且若在沙盒外，必须覆盖所有写调用）
+  if (literalPaths.length > 0) {
+    const allAllowed = literalPaths.every((p) => {
+      const resolved = normalizeToolPath(p, virtualCwd);
+      return isWriteAllowedUnderGate(resolved, repoCwd, gateMode, extraAllowedDirs);
+    });
+    if (!allAllowed) return false;
+  }
+
+  if (inSandbox) {
+    // 沙盒 cwd 内禁止脚本显式引用仓库绝对路径或上级逃逸 ".."
+    if (code.includes(absRepo) || /(?:^|['"`\s/])\.\.(?:\/|['"`\s]|$)/.test(code)) {
+      return false;
+    }
+    return true;
+  }
+
+  // 非沙盒（仓库 cwd）：仅当所有写调用都可静态证明落入白名单文件（如 docs/adr/、GLOSSARY.md）且没有变量型写调用时放行
+  if (literalPaths.length === 0) return false;
+  // 统计总写入原语出现次数，确保没有藏匿的动态路径写调用（如 open(var, 'w')）
+  const totalWriteOps = (
+    code.match(
+      /\b(?:open\s*\([^)]*['"][wax+]|(?:writeFileSync|writeFile|appendFileSync|appendFile|rmSync|unlinkSync|renameSync|mkdirSync|cpSync|createWriteStream)\s*\(|\.(?:write_text|write_bytes)\s*\(|shutil\.(?:copy|copy2|copytree|move|rmtree)\s*\(|os\.(?:remove|unlink|rename|replace|makedirs|mkdir)\s*\()/gi,
+    ) || []
+  ).length;
+  return totalWriteOps > 0 && literalPaths.length >= totalWriteOps;
+}
+
+function checkInterpreterInlineWrite(verb, tokens, rawCommand, repoCwd, virtualCwd, gateMode, extraAllowedDirs) {
   if (!INLINE_INTERPRETERS.has(verb)) return null;
   const family = verb.startsWith("python") ? "python" : verb;
   const patterns = INTERPRETER_WRITE_PATTERNS[family] || [];
@@ -963,6 +1216,9 @@ function checkInterpreterInlineWrite(verb, tokens, rawCommand) {
 
   for (const code of snippets) {
     if (patterns.some((re) => re.test(code))) {
+      if (isInlineCodeConfinedToAllowedPaths(code, repoCwd, virtualCwd, gateMode, extraAllowedDirs)) {
+        continue;
+      }
       return `解释器内联文件写入命令 (${verb})`;
     }
   }
@@ -970,9 +1226,9 @@ function checkInterpreterInlineWrite(verb, tokens, rawCommand) {
 }
 
 /**
- * 基于词法 token 精确识别变更类命令（彻底消除 git merge-base 与引号内参数误拦）
+ * 基于词法 token 精确识别变更类命令（彻底消除 git merge-base、perl -0pi 与引号内参数误拦/绕过）
  */
-function checkBlockedMutatingVerb(verb, tokens) {
+function checkBlockedMutatingVerb(verb, tokens, repoCwd = "", virtualCwd = "") {
   if (verb === "node" && tokens.length >= 3 && path.basename(tokens[1] || "") === "zee-tool.mjs") {
     const sub = tokens[2] || "";
     if (sub === "cleanup-worktrees" && tokens.includes("--prune-safe")) {
@@ -1052,14 +1308,37 @@ function checkBlockedMutatingVerb(verb, tokens) {
     for (let i = 1; i < tokens.length; i++) {
       const arg = tokens[i];
       if (arg === "--") break;
-      if (arg === "--in-place" || arg.startsWith("--in-place=") || arg === "-i" || /^-[a-zA-Z]*i/.test(arg)) {
+      if (arg === "--in-place" || arg.startsWith("--in-place=") || arg === "-i" || /^-[a-zA-Z0-9]*i/.test(arg)) {
         return "原地修改文件命令 (sed -i / perl -i)";
       }
     }
     return null;
   }
 
+  const isPkgTargetInSandbox = (dirOverrideOpts) => {
+    let targetDir = virtualCwd;
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (dirOverrideOpts.has(tok) && i + 1 < tokens.length) {
+        targetDir = normalizeToolPath(tokens[i + 1], virtualCwd);
+        if (!isAllowedZeeTmpPath(targetDir, repoCwd)) return false;
+        i += 1;
+      } else {
+        for (const opt of dirOverrideOpts) {
+          if (opt.startsWith("--") && tok.startsWith(`${opt}=`)) {
+            targetDir = normalizeToolPath(tok.slice(opt.length + 1), virtualCwd);
+            if (!isAllowedZeeTmpPath(targetDir, repoCwd)) return false;
+          }
+        }
+      }
+    }
+    // 禁止 -g / --global 在沙盒中误改全局环境
+    if (tokens.includes("-g") || tokens.includes("--global")) return false;
+    return isAllowedZeeTmpPath(targetDir, repoCwd);
+  };
+
   if (BLOCKED_JS_PKG_VERBS.has(verb)) {
+    const dirOpts = new Set(["--prefix", "-C", "--cwd", "--dir"]);
     const valueOpts = new Set(["-F", "--filter", "--prefix", "-C", "--cwd", "--dir", "--workspace", "-w", "--config"]);
     let idx = 1;
     while (idx < tokens.length && tokens[idx].startsWith("-")) {
@@ -1068,12 +1347,16 @@ function checkBlockedMutatingVerb(verb, tokens) {
     }
     const sub = tokens[idx] || "";
     if (BLOCKED_JS_PKG_SUBCMDS.has(sub)) {
+      if (sub !== "publish" && isPkgTargetInSandbox(dirOpts)) {
+        return null;
+      }
       return "包管理变更命令";
     }
     return null;
   }
 
   if (BLOCKED_OTHER_PKG_VERBS.has(verb)) {
+    const dirOpts = new Set(["-C", "--directory", "--project", "--manifest-path"]);
     const valueOpts = new Set(["-C", "--directory", "--project", "--manifest-path"]);
     let idx = 1;
     while (idx < tokens.length && tokens[idx].startsWith("-")) {
@@ -1082,6 +1365,9 @@ function checkBlockedMutatingVerb(verb, tokens) {
     }
     const sub = tokens[idx] || "";
     if (BLOCKED_OTHER_PKG_SUBCMDS.has(sub)) {
+      if (verb !== "brew" && isPkgTargetInSandbox(dirOpts)) {
+        return null;
+      }
       return "依赖安装或修改命令";
     }
     return null;
@@ -1099,9 +1385,9 @@ function checkBlockedMutatingVerb(verb, tokens) {
 
 /**
  * 在 plan / review / init-design 保护锁下校验 Shell 命令：
- * - 先剥离 Heredoc 正文，再递归拆解 sh/bash/zsh -c 与 eval
- * - 追踪同命令静态变量赋值（$B/$Z）与 cd 虚拟目录切换
- * - 词法级校验重定向、zee-tool.mjs、白名单 mkdir/cp/touch/tee 及变更类命令动词
+ * - 先剥离 Heredoc 正文，再递归拆解 sh/bash/zsh -c、eval 与 $(...)
+ * - 追踪同命令静态变量赋值（$B/$Z 与受控 $(mktemp -d /tmp/zee-...)）及 cd 虚拟目录切换
+ * - 词法级校验重定向、zee-tool.mjs、白名单 mkdir/cp/touch/tee、/tmp/zee-* 沙盒探针及变更类命令动词
  */
 export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []) {
   const trimmed = String(command || "").trim();
@@ -1120,7 +1406,7 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
       const rawTokens = tokenizeShell(seg);
       if (rawTokens.length === 0) continue;
 
-      recordLeadingStaticVars(rawTokens, staticVars);
+      recordLeadingStaticVars(rawTokens, staticVars, effectiveCwd);
 
       // 词法提取未加引号的输出重定向（展开静态变量，相对 virtualCwd 解析并锚定 repo effectiveCwd 白名单）
       for (const rawTarget of extractOutputRedirects(seg)) {
@@ -1159,12 +1445,20 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
         return `当前处于 zee ${modeLabel}模式，已拦截文件增删改命令 (${verb})。`;
       }
 
-      const interpBlocked = checkInterpreterInlineWrite(verb, stripped, trimmed);
+      const interpBlocked = checkInterpreterInlineWrite(
+        verb,
+        stripped,
+        trimmed,
+        effectiveCwd,
+        virtualCwd,
+        gateMode,
+        extraAllowedDirs,
+      );
       if (interpBlocked) {
         return `当前处于 zee ${modeLabel}模式，已拦截${interpBlocked}。`;
       }
 
-      const blockedLabel = checkBlockedMutatingVerb(verb, stripped);
+      const blockedLabel = checkBlockedMutatingVerb(verb, stripped, effectiveCwd, virtualCwd);
       if (blockedLabel) {
         return `当前处于 zee ${modeLabel}模式，已拦截${blockedLabel}。`;
       }

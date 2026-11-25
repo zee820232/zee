@@ -8,19 +8,20 @@ Do not start unattended execution until all 5 invariants are locked (confirm wit
 2. **Open Decisions Cleared**: run final `grilling` round in Chinese on any genuine product/preference forks before the user leaves.
 3. **Isolated Integration Branch**: switch/create branch `zee/<slug>` (never commit unattended work directly onto `main`/trunk).
 4. **Domain Redlines Verified**: confirm `denyCommands` in `zee.project.json` blocks `--live`, signing, deploys, and secrets.
-5. **Hard Budget Caps Recorded in `state.json`**: default `maxUnits: 12`, `maxDelegates: 40`, `maxHeavyEscalations: 6`, `maxConsecutiveParked: 2`, plus **70% cutoff threshold**.
+5. **Hard Budget Caps Recorded in `state.json`**: default `maxUnits: 12`, `maxDelegates: 40`, `maxHeavyEscalations: 6`, `maxConsecutiveParked: 2`, plus **70% cutoff threshold** (`zee-tool.mjs update-state "<busDir>" --budget '{"maxUnits":12,"maxDelegates":40,"maxHeavyEscalations":6,"maxConsecutiveParked":2,"cutoffRatio":0.7}'`).
 
 ## 2. Unit 0 (Harness, Verify Skill & Baseline) + Unit 1 (Canary)
 - **Unit 0**: verify an automated Verification Harness (or `<projectSkillsDir>/verify-<app>/SKILL.md`) exists; if missing, build a minimal runnable verification harness and capture pre-change Baseline (test counts, metrics, or baseline UI screenshots). Log baseline row to `decisions.tsv` and ONLY AFTER Pre-Launch Trust Gate approval transition state to `running` via:
   `zee-tool.mjs update-state "<busDir>" --mode night --status running --conversation-id "<cid>"`
   *(On Antigravity, the bundled `Stop` hook guards ONLY `status === "running"` bound to `<cid>`, so waiting for human approval during `initialized` never triggers premature continuation.)*
-- **Unit 1 (Canary)**: run the first vertical slice end-to-end by itself before enabling any parallel fan-out. Confirm atomic worktree checkout, bus reads, Gate 1 `Verifier` `PASS` -> Gate 2 `Reviewer` `PASS`, and merge work cleanly.
+- **Unit 1 (Canary)**: run the first vertical slice end-to-end by itself before enabling any parallel fan-out. Confirm atomic worktree checkout (never nest unit branch names under the integration branch ref — e.g. use `zee/night-u1`, not `zee/<slug>/u1`), bus reads, Gate 1 `Verifier` `PASS` -> Gate 2 `Reviewer` `PASS`, and merge work cleanly.
 
-## 3. Execution Loop, 70% Cutoff, Context Hygiene & Idempotency
+## 3. Execution Loop, 70% Cutoff, UI Visual Gate, Context Hygiene & Idempotency
 - Run each DAG unit through **Gate 1 (`Verifier`) `PASS` -> Gate 2 (`Reviewer`)** strictly serially, committing each verified unit onto `zee/<slug>`.
-- **70% Budget / Wall-Clock Cutoff**: once elapsed time OR `delegatesDispatched` crosses **70%** of the configured budget, STOP opening new units; finish merging verified work, run the Cross-Family Trail Audit, update `state.json`, and deliver the Chinese Morning Report before hitting wall-clock timeout!
+- **Mandatory `uiGlobs` Visual Screenshot Gate (Non-Negotiable)**: whenever a unit diff touches any path matching `.agents/zee.project.json` `uiGlobs` (or UI/HUD/render/screen code), **Gate 1 `Verifier` MUST capture fresh post-change PNG screenshots into `<busDir>/screenshots/`**, and **Gate 2 `Reviewer` AND/OR the Cross-Family Audit Judge MUST open and visually inspect every new PNG** to confirm every newly added UI element is actually drawn and unobstructed (layout unit tests or keyboard-state E2E tests alone NEVER prove pixel visibility!).
+- **70% Budget / Wall-Clock Cutoff**: once elapsed time OR `delegatesDispatched` crosses **70%** of the configured budget (or `zee_subagent` emits `[ZEE_BUDGET_CUTOFF]`), STOP opening new units; finish merging verified work, run `cleanup-worktrees --prune-safe`, run the Cross-Family Trail Audit, update `state.json`, and deliver the Chinese Morning Report before hitting wall-clock timeout!
 - Record every meaningful decision/unit/pivot/revert atomically:
-  - `node "<zeeDir>/scripts/zee-tool.mjs" update-state "<busDir>" --status running --resume-next "<nextUnit>" --unit-upsert '{"id":"U1","status":"done","sha":"..."}' --inc-delegates`
+  - `node "<zeeDir>/scripts/zee-tool.mjs" update-state "<busDir>" --status running --resume-next "<nextUnit>" --unit-upsert '{"id":"U1","status":"done","sha":"..."}' --inc-delegates 1`
   - `node "<zeeDir>/scripts/zee-tool.mjs" log-decision --bus "<busDir>" --unit "<unit>" --phase "<phase>" --decision "<decision>" --why "<why>" --evidence "<evidence>" --result "<result>"`
 - **Decision Self-Correction (`phase=supersede`)**: never silently edit or delete old rows in `decisions.tsv`. If an earlier decision is overturned, append a new row with `phase=supersede` naming the superseded decision and concrete counter-evidence.
 - **Context-Rot Defense**: keep main thread lean — read only ≤30-line worker receipts, never full logs. On every wakeup or post-compaction resume, re-read `references/overnight.md`, `<busDir>/state.json`, and the last 10 lines of `decisions.tsv`.

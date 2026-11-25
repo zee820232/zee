@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Verify"
+  short_description: "项目实机验证技能全生命周期：生成 verify-<app>（init）、防腐维护（maintain）或冷启动实机验收（run）"
+policy:
+  allow_implicit_invocation: false

@@ -306,6 +306,46 @@ first
     const rev2Res = runTool(["resolve-model", "--harness", "pi", "--role", "reviewer.2", "--config", ecoCfg]);
     assert.equal(rev2Res.json.resolved.family, "gemini");
     assert.equal(rev2Res.json.resolved.effort, "medium");
+
+    // 5. v4.1.1: update-state --budget / 多次 --inc-delegates 累加 / --inc-aborted、check-plan 悬空依赖 & --strict-budget、嵌套分支扁平化
+    const updV411 = runTool([
+      "update-state",
+      busDir,
+      "--budget",
+      JSON.stringify({ maxUnits: 4, maxDelegates: 12, cutoffRatio: 0.7 }),
+      "--inc-delegates",
+      "--inc-delegates",
+      "--inc-aborted",
+      "2",
+    ]);
+    assert.equal(updV411.json.state.budget.maxDelegates, 12);
+    assert.equal(updV411.json.state.delegatesDispatched, 2);
+    assert.equal(updV411.json.state.abortedDelegates, 2);
+
+    const danglingPlan = path.join(tmpRepo, "dangling.md");
+    fs.writeFileSync(
+      danglingPlan,
+      `# Plan\n## 目标与 Out-of-Scope\n明确不做\n## 数据形状与契约\nA\n## Test Seam 与 Done Predicate\ntest\n## Throughput Checkpoint\nfirst\n## 垂直切片\n- Slice 1 (2 files, 100 LOC, blockedBy: Slice 99)\n`,
+    );
+    const dangRes = runTool(["check-plan", danglingPlan], false);
+    assert.equal(dangRes.status, 1);
+    assert.ok(dangRes.json.missing.some((m) => m.includes("悬空依赖") && m.includes("SLICE99")));
+
+    const overBudgetPlan = path.join(tmpRepo, "over.md");
+    fs.writeFileSync(
+      overBudgetPlan,
+      `# Plan\n## 目标与 Out-of-Scope\n明确不做\n## 数据形状与契约\nA\n## Test Seam 与 Done Predicate\ntest\n## Throughput Checkpoint\nfirst\n## 垂直切片\n- Slice 1 (8 files, 200 LOC, blockedBy: none)\n`,
+    );
+    const strictRes = runTool(["check-plan", overBudgetPlan, "--strict-budget"], false);
+    assert.equal(strictRes.status, 1);
+    assert.ok(strictRes.json.missing.some((m) => m.includes("--strict-budget")));
+
+    execFileSync("git", ["-C", tmpRepo, "branch", "zee/night-demo"], { stdio: "ignore" });
+    const flatWt = runTool(["worktree-create", tmpRepo, "v411-wt", "u1", "HEAD", "--branch", "zee/night-demo/u1"]);
+    assert.equal(flatWt.json.branch, "zee/night-demo-u1");
+    assert.equal(flatWt.json.flattened, true);
+    execFileSync("git", ["-C", tmpRepo, "worktree", "remove", "--force", flatWt.json.worktreePath], { stdio: "ignore" });
+    fs.rmSync(path.dirname(path.dirname(path.dirname(flatWt.json.worktreePath))), { recursive: true, force: true });
   } finally {
     fs.rmSync(tmpRepo, { recursive: true, force: true });
     if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });

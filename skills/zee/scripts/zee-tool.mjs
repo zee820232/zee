@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v4.1.0 — 零依赖纯 Node 多模型工作流辅助引擎
+ * zee-tool.mjs v4.1.1 — 零依赖纯 Node 多模型工作流辅助引擎
  *
  * 子命令：
  *   validate [configPath] [--check-live]
  *   audit-rules [--all | --harness <name>]
  *   symlinks [--apply]
  *   init-run <repoRoot> <slug> [--conversation-id <cid>]
- *   update-state <busDir> [--status ...] [--mode ...] [--level ...] [--predicate ...] [--resume-next ...] [--conversation-id <cid>] [--unit-upsert '<json>'] [--inc-delegates] [--fallback '<str>']
+ *   update-state <busDir> [--status ...] [--mode ...] [--level ...] [--predicate ...] [--resume-next ...] [--conversation-id <cid>] [--budget '<json>'] [--unit-upsert '<json>'] [--inc-delegates [N]] [--inc-aborted [N]] [--fallback '<str>']
  *   list-runs [repoRoot | --all]
  *   log-decision <busDir> <unit> <phase> <decision> <why> <evidence> <result>
  *   log-decision --bus <dir> --unit <u> --phase <p> --decision <d> --why <w> --evidence <e> --result <r>
  *   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
  *   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
- *   check-plan <planPath>
+ *   check-plan <planPath> [--strict-budget]
  *   resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <role> [--config <path>]
  *   doctor [--harness <name>] [--repo <path>] [--all]
  */
@@ -31,7 +31,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE_SKILLS_DIR = path.resolve(SCRIPT_DIR, "..", "..");
 const REPO_ROOT = path.resolve(SOURCE_SKILLS_DIR, "..");
 const RUNS_ROOT = path.join(HOME, ".local", "state", "zee", "runs");
-const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-night", "zee-arch", "zee-retro"];
+const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-verify", "zee-night", "zee-arch", "zee-retro"];
 
 const HARNESS_TARGETS = [
   { name: "agents", dir: path.join(HOME, ".agents", "skills"), parentMustExist: path.join(HOME, ".agents") },
@@ -79,6 +79,7 @@ const KNOWN_VALUE_FLAGS = new Set([
   "predicate",
   "resume-next",
   "conversation-id",
+  "budget",
   "unit-upsert",
   "fallback",
   "unit",
@@ -94,7 +95,7 @@ const KNOWN_VALUE_FLAGS = new Set([
   "config",
 ]);
 
-const KNOWN_BOOLEAN_FLAGS = new Set(["check-live", "all", "apply", "prune-safe", "help"]);
+const KNOWN_BOOLEAN_FLAGS = new Set(["check-live", "all", "apply", "prune-safe", "strict-budget", "help"]);
 
 function parseFlags(args) {
   const flags = {};
@@ -113,7 +114,13 @@ function parseFlags(args) {
     if (token.startsWith("--")) {
       const eqIdx = token.indexOf("=");
       if (eqIdx > 2) {
-        flags[token.slice(2, eqIdx)] = token.slice(eqIdx + 1);
+        const key = token.slice(2, eqIdx);
+        const val = token.slice(eqIdx + 1);
+        if (key === "inc-delegates" || key === "inc-aborted") {
+          flags[key] = (Number(flags[key]) || 0) + (Number(val) || 1);
+        } else {
+          flags[key] = val;
+        }
       } else {
         const key = token.slice(2);
         const next = args[i + 1];
@@ -126,12 +133,12 @@ function parseFlags(args) {
           } else {
             flags[key] = true;
           }
-        } else if (key === "inc-delegates") {
+        } else if (key === "inc-delegates" || key === "inc-aborted") {
           if (next !== undefined && /^\d+$/.test(next)) {
-            flags[key] = next;
+            flags[key] = (Number(flags[key]) || 0) + Number(next);
             i += 1;
           } else {
-            flags[key] = true;
+            flags[key] = (Number(flags[key]) || 0) + 1;
           }
         } else if (next !== undefined && !next.startsWith("--")) {
           flags[key] = next;
@@ -148,11 +155,11 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v4.1.0 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v4.1.1 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
 
 可用命令：
   validate [配置文件] [--check-live]
-                                 校验 zee-config.json 结构、家族多样性，--check-live 联检 Pi enabledModels 漂移
+                                 校验 zee-config.json 结构、家族多样性，--check-live 联检 Pi enabledModels 漂移（含 backup 槽位）
   audit-rules [--all | --harness <名>]
                                  默认仅审计当前安装宿主的常驻规则冲突；加 --all 审计全机
   doctor [--harness <名>] [--repo <路径>] [--all]
@@ -160,17 +167,19 @@ function usage() {
   symlinks [--apply]             （仅用户显式要求同步多端时使用）检查或创建跨宿主软链
   init-run <仓库路径> <任务名>    创建仓库外运行总线（~/.local/state/zee/runs/...）
   update-state <总线目录> [--status <s>] [--mode <m>] [--level <l>] [--predicate <p>]
-                          [--resume-next <r>] [--unit-upsert '<json>'] [--inc-delegates] [--fallback '<str>']
+                          [--resume-next <r>] [--budget '<json>'] [--unit-upsert '<json>']
+                          [--inc-delegates [N]] [--inc-aborted [N]] [--fallback '<str>']
                                  以 tmp+rename 原子更新 state.json 并刷新 updatedAt
   list-runs [仓库路径 | --all]    列出当前仓库（或全部）的活跃/暂停任务总线，用于跨会话一键续跑
   log-decision <总线> <单元> <阶段> <决策> <原因> <证据> <结果>
   log-decision --bus <总线> --unit <单元> --phase <阶段> --decision <决策> --why <原因> --evidence <证据> --result <结果>
                                  安全追加一行决策记录到 decisions.tsv（兼容位置参数与具名参数）
   worktree-create <仓库> <slug> <lane> <baseRef> [--branch <分支名>]
-                                 在 ~/.local/state/zee/runs/.../worktrees/<lane> 原子创建隔离 worktree
+                                 在 ~/.local/state/zee/runs/.../worktrees/<lane> 原子创建隔离 worktree（自动规避嵌套 ref 冲突）
   cleanup-worktrees [仓库路径] [--base <基准分支>] [--prune-safe]
                                  分级体检 worktree（含 squash-merge/patch-id 识别、wip vs scratch、干净 detached 识别），加 --prune-safe 执行安全回收
-  check-plan <plan.md 路径>       静态校验计划文档必备章节与单切片预算（≤5 文件 / ≤400 LOC）
+  check-plan <plan.md 路径> [--strict-budget]
+                                 静态校验计划文档必备章节、切片环/悬空依赖与单切片预算（≤5 文件 / ≤400 LOC）
   resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <角色> [--config <路径>]
                                  按目标执行面确定性翻译角色模型标识
 `);
@@ -232,19 +241,37 @@ function collectModelHintsFromConfig(cfg) {
   const add = (spec, slot) => {
     if (spec?.modelHint) hints.push({ slot, modelHint: String(spec.modelHint) });
   };
+  const addSlot = (slotObj, label) => {
+    if (!slotObj || typeof slotObj !== "object") return;
+    add(slotObj.prefer, `${label}.prefer`);
+    add(slotObj.backup, `${label}.backup`);
+  };
   const r = cfg?.roles || {};
-  add(r.scout?.prefer, "scout.prefer");
-  add(r.architect?.primary?.prefer, "architect.primary.prefer");
+  addSlot(r.scout, "scout");
+  addSlot(r.architect?.primary, "architect.primary");
   if (Array.isArray(r.architect?.arenaPool)) {
-    r.architect.arenaPool.forEach((e, i) => add(e.prefer || e, `architect.arenaPool[${i}]`));
+    r.architect.arenaPool.forEach((e, i) => {
+      add(e.prefer || e, `architect.arenaPool[${i}]`);
+      add(e.backup, `architect.arenaPool[${i}].backup`);
+    });
   }
-  add(r.ui?.standard?.prefer, "ui.standard.prefer");
-  add(r.ui?.heavy?.prefer, "ui.heavy.prefer");
-  add(r.coder?.standard?.prefer, "coder.standard.prefer");
-  add(r.coder?.heavy?.prefer, "coder.heavy.prefer");
-  add(r.verifier?.prefer, "verifier.prefer");
+  addSlot(r.ui?.standard, "ui.standard");
+  addSlot(r.ui?.heavy, "ui.heavy");
+  addSlot(r.coder?.standard, "coder.standard");
+  addSlot(r.coder?.heavy, "coder.heavy");
+  addSlot(r.verifier, "verifier");
   if (Array.isArray(r.reviewers)) {
-    r.reviewers.forEach((rev, i) => add(rev.prefer || rev, `reviewers[${i}]`));
+    r.reviewers.forEach((rev, i) => {
+      add(rev.prefer || rev, `reviewers[${i}].prefer`);
+      add(rev.backup, `reviewers[${i}].backup`);
+    });
+  }
+  if (r.judge) {
+    if (Array.isArray(r.judge)) {
+      r.judge.forEach((j, i) => addSlot(j, `judge[${i}]`));
+    } else {
+      addSlot(r.judge, "judge");
+    }
   }
   return hints;
 }
@@ -721,8 +748,26 @@ function cmdUpdateState(args) {
     st.resumeNext = flags["resume-next"] === "null" ? null : flags["resume-next"];
   }
   if (flags["inc-delegates"]) {
-    const inc = typeof flags["inc-delegates"] === "string" ? Number(flags["inc-delegates"]) || 1 : 1;
+    const inc = Number(flags["inc-delegates"]) || 1;
     st.delegatesDispatched = (Number(st.delegatesDispatched) || 0) + inc;
+  }
+  if (flags["inc-aborted"]) {
+    const inc = Number(flags["inc-aborted"]) || 1;
+    st.abortedDelegates = (Number(st.abortedDelegates) || 0) + inc;
+  }
+  if (typeof flags.budget === "string") {
+    let budgetObj;
+    try {
+      budgetObj = JSON.parse(flags.budget);
+    } catch (e) {
+      console.error(`--budget 不是合法 JSON：${e.message}`);
+      process.exit(1);
+    }
+    if (!budgetObj || typeof budgetObj !== "object" || Array.isArray(budgetObj)) {
+      console.error("--budget 必须是 JSON 对象（如 '{\"maxUnits\":4,\"maxDelegates\":12,\"cutoffRatio\":0.7}'）");
+      process.exit(1);
+    }
+    st.budget = { ...(st.budget && typeof st.budget === "object" ? st.budget : {}), ...budgetObj };
   }
   if (typeof flags.fallback === "string" && flags.fallback.trim()) {
     if (!Array.isArray(st.fallbacksUsed)) st.fallbacksUsed = [];
@@ -834,6 +879,35 @@ function cmdListRuns(repoPath) {
   console.log(JSON.stringify({ ok: true, count: runs.length, runs }, null, 2));
 }
 
+function resolveSafeBranchName(absRepo, rawBranch) {
+  let candidate = String(rawBranch || "").trim().replace(/^refs\/heads\//, "").replace(/^\/+|\/+$/g, "");
+  const refExists = (refName) => {
+    try {
+      execFileSync("git", ["-C", absRepo, "show-ref", "--verify", "--quiet", refName], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (let guard = 0; guard < 8; guard++) {
+    const parts = candidate.split("/").filter(Boolean);
+    let collidedIdx = -1;
+    for (let i = 1; i < parts.length; i++) {
+      if (refExists(`refs/heads/${parts.slice(0, i).join("/")}`)) {
+        collidedIdx = i;
+        break;
+      }
+    }
+    if (collidedIdx > 0) {
+      const merged = `${parts[collidedIdx - 1]}-${parts[collidedIdx]}`;
+      candidate = [...parts.slice(0, collidedIdx - 1), merged, ...parts.slice(collidedIdx + 1)].join("/");
+      continue;
+    }
+    break;
+  }
+  return candidate;
+}
+
 function cmdWorktreeCreate(args) {
   const { flags, positional } = parseFlags(args);
   const [repoPath, slug, lane, baseRef] = positional;
@@ -856,7 +930,8 @@ function cmdWorktreeCreate(args) {
   }
 
   const gitArgs = ["-C", absRepo, "worktree", "add"];
-  const branch = typeof flags.branch === "string" && flags.branch.trim() ? flags.branch.trim() : null;
+  const rawBranch = typeof flags.branch === "string" && flags.branch.trim() ? flags.branch.trim() : null;
+  const branch = rawBranch ? resolveSafeBranchName(absRepo, rawBranch) : null;
   if (branch) {
     let exists = false;
     try {
@@ -871,7 +946,13 @@ function cmdWorktreeCreate(args) {
 
   execFileSync("git", gitArgs, { encoding: "utf8" });
   const head = execFileSync("git", ["-C", wtPath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  console.log(JSON.stringify({ ok: true, repoRoot: absRepo, worktreePath: wtPath, branch: branch || "(detached)", head }, null, 2));
+  console.log(
+    JSON.stringify(
+      { ok: true, repoRoot: absRepo, worktreePath: wtPath, branch: branch || "(detached)", flattened: Boolean(rawBranch && branch !== rawBranch), head },
+      null,
+      2,
+    ),
+  );
 }
 
 function isSquashMergedByPatchId(absRepo, baseRef, branchRef) {
@@ -1053,9 +1134,11 @@ function cmdCleanupWorktrees(args) {
 }
 
 function cmdCheckPlan(args) {
-  const planPath = args[0];
+  const { flags, positional } = parseFlags(args);
+  const planPath = positional[0];
+  const strictBudget = Boolean(flags["strict-budget"]);
   if (!planPath || !fs.existsSync(planPath)) {
-    console.error(`用法：check-plan <plan.md 路径>（未找到文件：${planPath || ""}）`);
+    console.error(`用法：check-plan <plan.md 路径> [--strict-budget]（未找到文件：${planPath || ""}）`);
     process.exit(1);
   }
   const text = fs.readFileSync(planPath, "utf8");
@@ -1078,13 +1161,16 @@ function cmdCheckPlan(args) {
   const warnings = [];
   const lines = text.split(/\r?\n/);
   let inSliceSection = false;
+  const declaredSlices = new Set();
   const sliceDeps = new Map();
   for (const line of lines) {
     if (/^#{1,4}\s+/.test(line)) {
       inSliceSection = /(vertical\s+slice|垂直切片|roadmap|里程碑|切片清单|slices?)/i.test(line);
+      const headingSlice = line.match(/\b((?:Slice|M|U|S)\s*\d+)\b/i);
+      if (headingSlice) declaredSlices.add(headingSlice[1].replace(/\s+/g, "").toUpperCase());
       continue;
     }
-    const isSliceBullet = /^\s*[-*]\s*(?:\*\*)?(?:Slice|M|U|S)\s*\d+/i.test(line) || /\bblockedBy\b/i.test(line);
+    const isSliceBullet = /^\s*[-*|]\s*(?:\*\*)?(?:Slice|M|U|S)\s*\d+/i.test(line) || /\bblockedBy\b/i.test(line);
     if (!inSliceSection && !isSliceBullet) continue;
 
     const fm = line.match(/(\d+)\s*(?:个?文件|files)/i);
@@ -1102,19 +1188,35 @@ function cmdCheckPlan(args) {
       }
     }
 
-    // 提取切片 ID 与 blockedBy 依赖，用于环检测
+    // 提取切片 ID 与 blockedBy 依赖，用于环检测与悬空依赖检测
     const idMatch = line.match(/\b((?:Slice|M|U|S)\s*\d+)\b/i);
-    const depMatch = line.match(/blockedBy\s*[:=]\s*([^)\n;]+)/i);
-    if (idMatch && depMatch) {
+    if (idMatch) {
       const nodeId = idMatch[1].replace(/\s+/g, "").toUpperCase();
-      const rawDeps = depMatch[1];
-      if (!/^\s*(none|无|-)\s*$/i.test(rawDeps)) {
-        const deps = (rawDeps.match(/(?:Slice|M|U|S)\s*\d+/gi) || []).map((d) => d.replace(/\s+/g, "").toUpperCase());
-        sliceDeps.set(nodeId, deps);
-      } else {
-        sliceDeps.set(nodeId, []);
+      declaredSlices.add(nodeId);
+      const depMatch = line.match(/blockedBy\s*[:=]\s*([^)\n;|]+)/i);
+      if (depMatch) {
+        const rawDeps = depMatch[1];
+        if (!/^\s*(none|无|-)\s*$/i.test(rawDeps)) {
+          const deps = (rawDeps.match(/(?:Slice|M|U|S)\s*\d+/gi) || []).map((d) => d.replace(/\s+/g, "").toUpperCase());
+          sliceDeps.set(nodeId, deps);
+        } else {
+          sliceDeps.set(nodeId, []);
+        }
       }
     }
+  }
+
+  // 悬空依赖检测：blockedBy 引用了切片清单中未声明的 ID
+  const dangling = [];
+  for (const [node, deps] of sliceDeps.entries()) {
+    for (const dep of deps) {
+      if (!declaredSlices.has(dep)) {
+        dangling.push(`${node} -> ${dep}`);
+      }
+    }
+  }
+  if (dangling.length > 0) {
+    missing.push(`切片 blockedBy 引用了未定义切片（悬空依赖）: ${dangling.join(", ")}`);
   }
 
   // DFS 检测 blockedBy 依赖环
@@ -1139,8 +1241,13 @@ function cmdCheckPlan(args) {
     missing.push(`切片 blockedBy 存在循环依赖: ${cycles.join("; ")}`);
   }
 
+  const dedupWarnings = [...new Set(warnings)];
+  if (strictBudget && dedupWarnings.length > 0) {
+    missing.push(`开启 --strict-budget 时存在超预算切片告警（${dedupWarnings.length} 条）`);
+  }
+
   const ok = missing.length === 0;
-  console.log(JSON.stringify({ ok, planPath, passed, missing, warnings: [...new Set(warnings)] }, null, 2));
+  console.log(JSON.stringify({ ok, planPath, strictBudget, passed, missing, warnings: dedupWarnings }, null, 2));
   process.exit(ok ? 0 : 1);
 }
 

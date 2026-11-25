@@ -21,7 +21,7 @@ const HOME = os.homedir();
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GITHUB_HTTPS = "https://github.com/zee820232/zee";
 const PI_GIT_SOURCE = "git:github.com/zee820232/zee";
-const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-night", "zee-arch", "zee-retro"];
+const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-verify", "zee-night", "zee-arch", "zee-retro"];
 
 function isEphemeralSource(forceRemote) {
   if (forceRemote) return true;
@@ -83,11 +83,11 @@ function installPi(dryRun, useRemote) {
   }
   const piSource = useRemote ? PI_GIT_SOURCE : REPO_ROOT;
   runCmd("pi", ["install", piSource], dryRun);
-  console.log("✅ Pi 安装完成！进入 Pi 后可直接使用 /zee-mode auto、/zee、/zee-plan、/zee-arch、/zee-retro、/zee-setup。");
+  console.log("✅ Pi 安装完成！进入 Pi 后可直接使用 /zee-mode auto、/zee、/zee-plan、/zee-verify、/zee-arch、/zee-retro、/zee-setup。");
 }
 
 function installAgy(dryRun, useRemote) {
-  console.log("\n=== 安装目标：Google Antigravity (agy) 原生插件（8 技能 + 7 代理 + 安全/规划 Hook） ===");
+  console.log("\n=== 安装目标：Google Antigravity (agy) 原生插件（9 技能 + 7 代理 + 安全/规划 Hook） ===");
   if (!hasBinary("agy")) {
     console.error("未检测到 agy 命令。请先安装 Google Antigravity CLI，或手动执行：");
     console.error(`  agy plugin install ${GITHUB_HTTPS}`);
@@ -110,7 +110,7 @@ function installAgy(dryRun, useRemote) {
   runCmd("agy", ["plugin", "install", agySource], dryRun);
   console.log("✅ Google Antigravity 安装完成！");
   console.log("   - 启动专属总控代理：agy --agent zee（或在 CLI 输入 /agents 选择 zee）");
-  console.log("   - 直接调用斜杠命令：/zee、/zee-plan、/zee-init、/zee-review、/zee-night、/zee-arch、/zee-retro、/zee-setup");
+  console.log("   - 直接调用斜杠命令：/zee、/zee-plan、/zee-init、/zee-review、/zee-verify、/zee-night、/zee-arch、/zee-retro、/zee-setup");
 }
 
 function installUniversalSkills(dryRun) {
@@ -119,7 +119,7 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee v4.1.0 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
+  console.log(`zee v4.1.1 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
 
 用法：
   npx github:zee820232/zee                       无需克隆，交互式选择宿主安装

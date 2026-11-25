@@ -234,3 +234,60 @@ test("v4.1 回归 [H3]：denyCommands 放行只读搜索与 commit 消息；词�
     fs.rmSync(tmpRepo, { recursive: true, force: true });
   }
 });
+
+test("v4.1.1 回归 [P0-1/P0-2/P0-3]：封堵括号/花括号/perl -0pi/$(...) 绕过，解开 /tmp/zee-* 沙盒与 denyCommands 边界误杀", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v411-guard-"));
+  try {
+    fs.mkdirSync(path.join(tmpRepo, ".agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRepo, ".agents", "zee.project.json"),
+      JSON.stringify({ denyCommands: ["rm -rf /", "rm -rf ~", "--live", "playwright install"] }),
+    );
+
+    // P0-1: 括号子 shell、命令分组花括号、$(...) 命令替换、perl -0pi 必须全部硬拦截！
+    assert.ok(evaluateDestructiveCommand("(rm -rf /)", tmpRepo));
+    assert.ok(evaluateDestructiveCommand("{ rm -rf /; }", tmpRepo));
+    assert.ok(evaluateDestructiveCommand("echo $(rm -rf /)", tmpRepo));
+    assert.ok(checkBashUnderGate("(pnpm add vite)", tmpRepo, "init-design"));
+    assert.ok(checkBashUnderGate("{ pnpm add vite; }", tmpRepo, "review"));
+    assert.ok(checkBashUnderGate("perl -0pi -e 's/a/b/g' src/app.ts", tmpRepo, "plan"));
+    assert.ok(checkBashUnderGate("perl -i.bak -pe 's/a/b/' src/app.ts", tmpRepo, "init-design"));
+
+    // P0-2: 0→1 Scout 在 /tmp/zee-probe-* 沙盒内使用 $(mktemp) + pnpm add + 探针脚本必须放行；但逃逸至仓库必须硬拦
+    const scoutProbeCmd = `T=$(mktemp -d /tmp/zee-probe-XXXXXX); cd "$T" && pnpm add -D playwright && node -e "require('fs').writeFileSync('probe.mjs', 'console.log(1)')"`;
+    assert.equal(checkBashUnderGate(scoutProbeCmd, tmpRepo, "review"), null);
+    assert.equal(checkBashUnderGate(scoutProbeCmd, tmpRepo, "init-design"), null);
+    // 逃逸企图：在沙盒内试图指向仓库目录或 -C 指向仓库或 -g 全局装包，仍必须硬拦截！
+    assert.ok(checkBashUnderGate(`T=$(mktemp -d /tmp/zee-probe-XXXXXX); cd "$T" && pnpm -C "${tmpRepo}" add evil`, tmpRepo, "review"));
+    assert.ok(checkBashUnderGate(`T=$(mktemp -d /tmp/zee-probe-XXXXXX); cd "$T" && npm install -g evil`, tmpRepo, "review"));
+    assert.ok(
+      checkBashUnderGate(
+        `T=$(mktemp -d /tmp/zee-probe-XXXXXX); cd "$T" && node -e "require('fs').writeFileSync('${tmpRepo}/src/hack.ts','x')"`,
+        tmpRepo,
+        "review",
+      ),
+    );
+
+    // P0-3: /tmp/zee-sim-* 等通用前缀必须放行；plan 锁内显式针对白名单 docs/adr/ 的内联 python 放行，但写 src/ 或动态变量仍硬拦
+    assert.equal(checkBashUnderGate("mkdir -p /tmp/zee-sim-1 && echo ok > /tmp/zee-sim-1/out.txt", tmpRepo, "plan"), null);
+    assert.equal(
+      checkBashUnderGate(`python3 -I - <<'EOF'\nopen("docs/adr/0002-weather.md", "w").write("# ADR\\n")\nEOF`, tmpRepo, "plan"),
+      null,
+    );
+    assert.ok(
+      checkBashUnderGate(`python3 -I - <<'EOF'\np = "src/core.ts"\nopen(p, "w").write("hack")\nEOF`, tmpRepo, "plan"),
+    );
+
+    // P0-3: denyCommands "rm -rf /" 必须拦截 rm -rf / 与 rm -rf /*，但绝不误杀 rm -rf /tmp/zee-retro-*！
+    assert.ok(checkProjectDenyCommands("rm -rf /", tmpRepo));
+    assert.ok(checkProjectDenyCommands("rm -rf /*", tmpRepo));
+    assert.ok(checkProjectDenyCommands("rm -rf ~", tmpRepo));
+    assert.ok(checkProjectDenyCommands("(rm -rf /)", tmpRepo));
+    assert.equal(checkProjectDenyCommands("rm -rf /tmp/zee-retro-KPzm9g", tmpRepo), null);
+    assert.equal(checkProjectDenyCommands("rm -rf /tmp/zee-retro-*", tmpRepo), null);
+    assert.equal(checkProjectDenyCommands("node run.js --livestream", tmpRepo), null);
+    assert.ok(checkProjectDenyCommands("node run.js --live=true", tmpRepo));
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});

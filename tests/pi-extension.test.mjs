@@ -66,7 +66,9 @@ module.registerHooks({
   },
 });
 
-const { default: zeeExtension } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "index.ts")).href);
+const { default: zeeExtension, resolvePiProviderModel, resolveSafeWorktreeBranch } = await import(
+  pathToFileURL(path.join(REPO_ROOT, "pi-extension", "index.ts")).href
+);
 const { default: zeeWorkerGuard } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "worker-guard.ts")).href);
 
 function createMockPi() {
@@ -139,10 +141,15 @@ test("行为测试 [H5]：/zee plan 空格子命令正确上锁、init-design �
     zeeExtension(mock.pi);
     const ctx = mock.makeCtx(tmpRepo, true);
 
-    // 1. /zee 快捷命令支持 8 个技能入口
-    for (const cmd of ["zee", "zee-plan", "zee-init", "zee-review", "zee-arch", "zee-retro", "zee-night", "zee-setup", "zee-mode"]) {
+    // 1. /zee 快捷命令支持 9 个技能入口（含新增 /zee-verify）+ /zee-mode
+    for (const cmd of ["zee", "zee-plan", "zee-init", "zee-review", "zee-verify", "zee-arch", "zee-retro", "zee-night", "zee-setup", "zee-mode"]) {
       assert.ok(mock.commands.has(cmd), `缺少命令 /${cmd}`);
     }
+    // /zee-verify run 启用只读 review 锁，/zee-verify init 放行写验证技能
+    await mock.commands.get("zee-verify").handler("run", ctx);
+    assert.equal(mock.emit("tool_call", { toolName: "write", input: { path: "src/app.ts" } }, ctx)?.block, true);
+    await mock.commands.get("zee-verify").handler("init", ctx);
+    assert.equal(mock.emit("tool_call", { toolName: "write", input: { path: ".agents/skills/verify-demo/SKILL.md" } }, ctx), undefined);
 
     // 2. /zee plan 设计新特性 -> 必须启用 plan 写锁
     await mock.commands.get("zee").handler("plan 设计新特性", ctx);
@@ -165,6 +172,7 @@ test("行为测试 [H5]：/zee plan 空格子命令正确上锁、init-design �
     assert.ok(startEvt.systemPromptOptions.sections.zee.includes(path.join(REPO_ROOT, "skills", "zee")));
     assert.ok(startEvt.systemPromptOptions.sections.zee.includes("zee-arch"));
     assert.ok(startEvt.systemPromptOptions.sections.zee.includes("zee-retro"));
+    assert.ok(startEvt.systemPromptOptions.sections.zee.includes("zee-verify"));
   } finally {
     fs.rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -328,5 +336,166 @@ if (scenario === "stream_rescue") {
     else process.env.FAKE_ARGS_DUMP = prevArgsDump;
     fs.rmSync(tmpRepo, { recursive: true, force: true });
     fs.rmSync(metaDir, { recursive: true, force: true });
+  }
+});
+
+test("v4.1.1 回归 [P1-1/P1-2/P1-3/P2-1/P2-2]：provider 自动归一、嵌套分支扁平化、预挂 node_modules 零误报、70% 截断与 >2KB 抢救落盘", async () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v411-pi-"));
+  const metaDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v411-meta-"));
+  const fakeCfg = path.join(metaDir, "zee-config.json");
+  const fakeBin = path.join(metaDir, "fake-pi.mjs");
+  const busDir = path.join(metaDir, "bus");
+  const prevBin = process.env.ZEE_PI_BIN;
+  const prevScenario = process.env.FAKE_SCENARIO;
+  let wtPathToClean = "";
+
+  try {
+    // 1. P1-2: resolvePiProviderModel 自动归一 remote-magpie + vm/... 与单模型名补全
+    fs.writeFileSync(
+      fakeCfg,
+      JSON.stringify({
+        version: 2,
+        roles: {
+          coder: {
+            standard: {
+              bindings: {
+                pi: {
+                  prefer: { providerInstanceId: "magpie", model: "remote-magpie/vm/claude-sonnet-5-5" },
+                },
+              },
+            },
+          },
+          scout: {
+            bindings: {
+              pi: {
+                prefer: { providerInstanceId: "magpie", model: "remote-magpie/devin/gemini-4-hydrogen" },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const norm1 = resolvePiProviderModel("remote-magpie", "vm/claude-sonnet-5-5", fakeCfg);
+    assert.equal(norm1.provider, "magpie");
+    assert.equal(norm1.model, "remote-magpie/vm/claude-sonnet-5-5");
+    assert.equal(norm1.normalized, true);
+
+    const norm2 = resolvePiProviderModel(undefined, "gemini-4-hydrogen", fakeCfg);
+    assert.equal(norm2.provider, "magpie");
+    assert.equal(norm2.model, "remote-magpie/devin/gemini-4-hydrogen");
+    assert.equal(norm2.normalized, true);
+
+    assert.throws(() => resolvePiProviderModel("remote-unknown", "vm/foo", fakeCfg), /Pi provider ID/);
+
+    // 2. 初始化带 node_modules/ 尾斜杠 .gitignore 和嵌套冲突分支的真实仓库
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(tmpRepo, ".gitignore"), "node_modules/\n");
+    fs.writeFileSync(path.join(tmpRepo, "index.ts"), "export const x = 1;\n");
+    fs.mkdirSync(path.join(tmpRepo, "node_modules", "pkg"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, "node_modules", "pkg", "index.js"), "module.exports = 42;\n");
+    execFileSync("git", ["-C", tmpRepo, "add", ".gitignore", "index.ts"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "branch", "zee/night-polish"], { stdio: "ignore" });
+
+    // P2-1: 嵌套分支 zee/night-polish/u1 必须自动扁平化为 zee/night-polish-u1
+    const safeBr = resolveSafeWorktreeBranch(tmpRepo, "zee/night-polish/u1");
+    assert.equal(safeBr.branch, "zee/night-polish-u1");
+    assert.equal(safeBr.flattened, true);
+
+    // 3. 构造总线 state.json（预算 maxDelegates=3，70% 截断线为 3 -> 设 maxDelegates=4 截断线为 3，预置 dispatched=2 跑 1 次即触发！）
+    fs.mkdirSync(path.join(busDir, "artifacts"), { recursive: true });
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({
+        slug: "v411-test",
+        mode: "night",
+        status: "running",
+        delegatesDispatched: 2,
+        budget: { maxDelegates: 4, cutoffRatio: 0.7 },
+      }),
+    );
+
+    fs.writeFileSync(
+      fakeBin,
+      `#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
+if (process.env.FAKE_SCENARIO === "verifier_ok") {
+  const hasNm = fs.existsSync(path.join(process.cwd(), "node_modules", "pkg", "index.js"));
+  emit({ type: "message_end", message: { role: "assistant", content: "NODE_MODULES_READY=" + hasNm, stopReason: "stop" } });
+  process.exit(0);
+}
+if (process.env.FAKE_SCENARIO === "big_partial") {
+  emit({ type: "message_start", message: { role: "assistant" } });
+  emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "SALVAGE_HEAD\\n" + "A".repeat(2500) } });
+  setTimeout(() => {}, 30000);
+}
+`,
+      { mode: 0o755 },
+    );
+
+    const mock = createMockPi();
+    zeeExtension(mock.pi);
+    const subTool = mock.tools.get("zee_subagent");
+    const ctx = mock.makeCtx(tmpRepo, true);
+
+    // P1-3 + P1-1: Verifier detached worktree 预挂 node_modules（零 ROLE_VIOLATION）+ 触发 70% [ZEE_BUDGET_CUTOFF] + delegatesDispatched 自动 +1
+    process.env.ZEE_PI_BIN = fakeBin;
+    process.env.FAKE_SCENARIO = "verifier_ok";
+    const verRes = await subTool.execute(
+      "call-v411-ver",
+      {
+        role: "verifier",
+        busDir,
+        worktree: { repoRoot: tmpRepo, slug: "v411-wt", lane: "verify-nm", baseRef: "HEAD" },
+        task: "[zee-worker] verify",
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    assert.ok(verRes.content[0].text.includes("NODE_MODULES_READY=true"), "worktree 必须自动预挂只读 node_modules");
+    assert.equal(verRes.details.roleViolation, undefined, "只读预挂 node_modules 绝不得触发 ROLE_VIOLATION 误报");
+    assert.equal(verRes.details.worktreeCleaned, true, "detached worktree 结束后必须干净自动回收");
+    assert.equal(verRes.details.budgetCutoffTriggered, true, "跨过 70% 预算必须触发截断标志");
+    assert.ok(verRes.content[0].text.includes("[ZEE_BUDGET_CUTOFF]"));
+    const stAfter = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
+    assert.equal(stAfter.delegatesDispatched, 3);
+
+    // P2-2: >2KB 流式抢救正文自动落盘到 busDir/artifacts/partial-*.md，并记录 abortedDelegates
+    process.env.FAKE_SCENARIO = "big_partial";
+    const partRes = await subTool.execute(
+      "call-v411-part",
+      {
+        role: "architect",
+        busDir,
+        task: "[zee-worker] design",
+        timeoutMs: 5000,
+      },
+      AbortSignal.timeout(700),
+      undefined,
+      ctx,
+    );
+    assert.ok(partRes.details.partialArtifactPath && fs.existsSync(partRes.details.partialArtifactPath));
+    assert.ok(fs.readFileSync(partRes.details.partialArtifactPath, "utf8").includes("SALVAGE_HEAD"));
+    assert.ok(partRes.content[0].text.includes("[已落盘完整抢救稿]"));
+    const stAfterAbort = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
+    assert.equal(stAfterAbort.abortedDelegates, 1);
+
+    // 清理测试创建的 runs 目录
+    wtPathToClean = verRes.details.worktreePath || "";
+  } finally {
+    if (prevBin === undefined) delete process.env.ZEE_PI_BIN;
+    else process.env.ZEE_PI_BIN = prevBin;
+    if (prevScenario === undefined) delete process.env.FAKE_SCENARIO;
+    else process.env.FAKE_SCENARIO = prevScenario;
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(metaDir, { recursive: true, force: true });
+    if (wtPathToClean) {
+      fs.rmSync(path.dirname(path.dirname(path.dirname(wtPathToClean))), { recursive: true, force: true });
+    }
   }
 });

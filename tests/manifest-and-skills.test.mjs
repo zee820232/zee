@@ -23,7 +23,7 @@ const VALID_ONEHARNESS_TOOLS = new Set([
   "finish",
 ]);
 
-const EXPECTED_SKILLS = ["zee", "zee-arch", "zee-init", "zee-night", "zee-plan", "zee-retro", "zee-review", "zee-setup"];
+const EXPECTED_SKILLS = ["zee", "zee-arch", "zee-init", "zee-night", "zee-plan", "zee-retro", "zee-review", "zee-setup", "zee-verify"];
 const ROLE_SUBAGENTS = ["zee-scout", "zee-architect", "zee-ui", "zee-coder", "zee-verifier", "zee-reviewer"];
 const EXPECTED_DISCIPLINES = [
   "code-smells.md",
@@ -47,7 +47,7 @@ test("package.json 与 .antigravity-plugin/plugin.json 版本严格一致", () =
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
 });
 
-test("8 个技能目录完整、保持 disable-model-invocation: true、无 /swarm 命名冲突且含 openai.yaml 与 6 份纪律文件", () => {
+test("9 个技能目录完整（含 zee-verify）、保持 disable-model-invocation: true、无 /swarm 命名冲突且含 openai.yaml 与 6 份纪律文件", () => {
   const actualDirs = fs
     .readdirSync(path.join(REPO_ROOT, "skills"))
     .filter((d) => fs.statSync(path.join(REPO_ROOT, "skills", d)).isDirectory())

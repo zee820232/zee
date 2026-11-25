@@ -5,10 +5,10 @@ description: >-
 disable-model-invocation: true
 ---
 
-# zee — Universal Multi-Model Autonomous Workflow (v4.1)
+# zee — Universal Multi-Model Autonomous Workflow (v4.1.1)
 
-Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | arch | retro | investigate | perf | loop | prototype | sweep | verify-init | verify-maintain | resume | night]`
-Shortcuts (8 User-Invoked Skills): `zee`, `zee-plan`, `zee-init`, `zee-review`, `zee-arch`, `zee-retro`, `zee-night`, `zee-setup` (plus Pi `/zee-mode` auto-routing switch and Antigravity `agy --agent zee` primary agent).
+Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | verify-init | verify-maintain | arch | retro | investigate | perf | loop | prototype | sweep | resume | night]`
+Shortcuts (9 User-Invoked Skills): `zee`, `zee-plan`, `zee-init`, `zee-review`, `zee-verify`, `zee-arch`, `zee-retro`, `zee-night`, `zee-setup` (plus Pi `/zee-mode` auto-routing switch and Antigravity `agy --agent zee` primary agent).
 Current session acts as **Orchestrator** on whichever harness `zee` is installed in. Never delegate orchestration itself, and only manage the active harness where this skill lives (`<zeeDir>` = parent directory of this `SKILL.md`).
 
 ## User-Facing Language Policy (Mandatory)
@@ -43,6 +43,7 @@ Classify unknowns before asking: **code facts -> Scout**; **observable tech fork
     - `plan` (or `/zee-plan`): load `<zeeDir>/references/plan-mode.md` + `disciplines/domain-modeling.md`. Runs `Scout` -> multi-round Chinese **Grilling + inline `GLOSSARY.md` / 3-condition ADR** (cross-turn write lock active) -> `Architect` (+ `UI`, optional dual-mode `prototype` / L3 Arena) -> `zee-tool.mjs check-plan` -> writes finalized `plan.md` and **stops without editing production code**.
     - `debate`: stops after L3 Arena + cross-vendor Judge ADR/decision report.
     - `review` (or `/zee-review`): initializes an independent run bus and runs cross-family `Reviewers` read-only on target diff/SHA **or uncommitted workspace changes** without editing.
+    - `verify` (or `/zee-verify [init|maintain|run]`): project-local `verify-<app>` verification skill lifecycle (generate & live-prove on existing/new repos, anti-rot maintenance, or read-only live verification run).
     - `arch` (or `/zee-arch`): deep-module churn hotspot audit (`disciplines/deep-modules.md`) emitting a Before/After HTML report without editing production code.
     - `retro` (or `/zee-retro`): session retrospective & 4-level error hardening (mechanical checks proven to bite on historical failures).
     - `investigate` / `perf` (`hillclimb`) / `loop` / `prototype` / `sweep` / `verify-init` / `verify-maintain`: load `<zeeDir>/references/specialized.md` (and `disciplines/verification-skill.md` for `verify-*`).

@@ -18,8 +18,9 @@ Read sibling `../zee/SKILL.md`, `../zee/disciplines/deep-modules.md`, and `../ze
    - Missing Test Seams forcing brittle internal mocks.
    - Overloaded domain terms needing `GLOSSARY.md` / ADR clarification.
 4. **Visual Before/After Audit Report**:
-   - Emit a clean self-contained HTML report (`<busDir>/artifacts/arch-audit.html`, or render inline via `html_preview` -> `html_render` on T3 Code) showing each candidate's **Before vs After module boundary**, **Leverage / Effort badge**, affected files, and proposed **Test Seam**.
+   - Emit a clean self-contained HTML report (`<busDir>/artifacts/arch-audit.html`, or render inline via `html_preview` -> `html_render` on T3 Code) showing each candidate's **Before vs After module boundary**, **Leverage / Effort badge**, exact repo-relative affected file paths (never prepend `src/` onto `tests/` or root paths!), and proposed **Test Seam**.
    - Present a crisp Chinese summary table (top 2–4 candidates with `➡️ 推荐` priority).
-5. **Clean Stop & Seamless Plan Handoff**:
+5. **Clean Bus Closeout & Seamless Plan Handoff**:
    - Touch zero production source files.
+   - Mark the audit bus complete via `zee-tool.mjs update-state "<busDir>" --status completed` and log a concise summary row to `decisions.tsv`.
    - Ask which candidate (if any) the user wants to deepen; on selection, hand off directly into `/zee-plan` (including **Design-It-Twice** orthogonal interface exploration + `domain-modeling`).

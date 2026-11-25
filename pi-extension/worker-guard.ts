@@ -1,12 +1,12 @@
 /**
- * zee Worker Guard Extension (v4.1.0)
+ * zee Worker Guard Extension (v4.1.1)
  *
  * 专供 zee_subagent 启动的 Pi 子进程通过 `-ne -e worker-guard.ts` 挂载：
  * - 零自动路由、零斜杠命令、零 zee_subagent 工具、零系统提示词注入
  * - 仅注册单一 tool_call 守卫，彻底堵死 `-ne` 带来的子进程安全真空：
- *   1. 对所有角色（含 coder / ui）无条件执行项目 denyCommands 与破坏性命令拦截
+ *   1. 对所有角色（含 coder / ui）无条件执行项目 denyCommands（token 边界匹配）与破坏性命令拦截（含括号子 shell）
  *   2. 对只读/门禁角色（scout / architect / judge / verifier / reviewer）在事前拦截对仓库源码的 write/edit
- *   3. 对纯只读角色（scout / architect / judge）额外执行只读 review 级 Bash 词法拦截
+ *   3. 对纯只读角色（scout / architect / judge）额外执行只读 review 级 Bash 词法拦截（放行 /tmp/zee-* 沙盒内探针与装包）
  */
 
 import { type ExtensionAPI, isToolCallEventType } from "@earendil-works/pi-coding-agent";

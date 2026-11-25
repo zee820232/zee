@@ -148,7 +148,7 @@ function parseUserIntent(lastUserInput) {
   ) {
     return { kind: "set", gate: "plan", mode: "standard" };
   }
-  if (/^\/zee-review\b/i.test(trimmed) || /^\/zee\s+review\b/i.test(trimmed)) {
+  if (/^\/zee-review\b/i.test(trimmed) || /^\/zee\s+review\b/i.test(trimmed) || /^\/zee-verify\s+run\b/i.test(trimmed)) {
     return { kind: "set", gate: "review", mode: "standard" };
   }
   if (/^\/zee-init\b/i.test(trimmed) || /^\/zee\s+init\b/i.test(trimmed)) {
@@ -157,7 +157,7 @@ function parseUserIntent(lastUserInput) {
   if (/^\/zee-night\b/i.test(trimmed) || /^\/zee\s+night\b/i.test(trimmed)) {
     return { kind: "set", gate: "none", mode: "night" };
   }
-  if (/^\/zee(?:-(?:setup|retro))?\b/i.test(trimmed)) {
+  if (/^\/zee(?:-(?:setup|retro|verify))?\b/i.test(trimmed)) {
     return { kind: "clear" };
   }
   if (/^(解锁|解除锁定|开始写代码|开始实现|执行计划)\b/.test(trimmed)) {

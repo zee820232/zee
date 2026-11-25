@@ -4,7 +4,7 @@ When `zee` is installed as a native Google Antigravity plugin (`agy plugin insta
 
 ## 1. Zero-Hijack Entry Points & Lifecycle Hooks (`hooks.json`)
 - **Dedicated Primary Agent (Equivalent to Pi `/zee-mode auto`)**: launch `agy --agent zee` from the terminal, or pick **`zee`** via `/agents` in CLI / agent selector in Antigravity App.
-- **Explicit Slash Commands**: `/zee`, `/zee-plan`, `/zee-init`, `/zee-review`, `/zee-arch`, `/zee-retro`, `/zee-night`, `/zee-setup` work natively in chat with zero hijacking of ordinary non-zee chats.
+- **Explicit Slash Commands**: `/zee`, `/zee-plan`, `/zee-init`, `/zee-review`, `/zee-verify`, `/zee-arch`, `/zee-retro`, `/zee-night`, `/zee-setup` work natively in chat with zero hijacking of ordinary non-zee chats.
 - **Optional User-Level Auto-Route**: `/zee-setup` offers an **opt-in (default OFF)** toggle to write a ≤15-line rule at `~/.gemini/config/rules/zee-auto.md` if the user wants automatic routing in default chats.
 - **Bundled 3-Event Lifecycle Hooks (`hooks.json` -> `scripts/agy-guard.mjs`)**:
   1. **`PreInvocation`**: persists cross-turn lock/mode state (`plan`, `review`, `init-design`, `night`) by `conversationId` in `$PLUGIN_DATA/sessions/<cid>.json` (auto-prunes >7d files and automatically clears `night` mode once a completed/paused run moves into a new interactive turn). Ordinary chats create 0 files and receive `{}` (0 token injection).

@@ -29,15 +29,15 @@ Audit a specific **Pinned SHA** from a fresh context using a **different underly
 - **Drop everything unproven on Axis 3**: omit speculative "might break someday" risks and pure formatting/naming preferences.
 
 ## Multimodal UI & Gate Tampering Checks
-- **UI Visual Audit** (when screenshots exist): open every `verify-*.png` image directly and flag visual defects (overflow, broken dark mode, poor contrast, layout collisions, HUD overlap) citing image + region.
+- **UI Visual Audit** (when screenshots exist or diff hits `uiGlobs`): open every `verify-*.png` / `<busDir>/screenshots/*.png` image directly and verify that EVERY newly added or modified UI element is actually drawn and unobstructed (flag missing elements, overflow, broken dark mode, poor contrast, layout collisions, HUD overlap) citing image + region.
 - **Gate Tampering Audit**: inspect any diff touching existing tests, snapshots, baselines, lint/CI config, or pinned hashes. Emit an explicit `GATE_AUDIT: COUNTERSIGNED | REJECTED (<reason>)`.
 
 ## Required Output
-Write detailed report to `<busDir>/artifacts/review-<family>-r<N>.md` (never inside repo) and return ≤30 lines:
+Write detailed report to `<busDir>/artifacts/review-<reviewer-family>-r<N>.md` (use **YOUR OWN model family**, e.g. `gemini` / `claude` / `openai`, NEVER `authorFamily`; never write inside repo) and return ≤30 lines:
 ```text
 VERDICT: PASS | REVISE
 PINNED_SHA: <sha>
-FAMILY: <your-model-family>
+FAMILY: <your-own-reviewer-model-family>
 BLAST_RADIUS_LEVEL: L3 | L4 | L5 (<load-bearing fact>)
 GATE_AUDIT: NOT_APPLICABLE | COUNTERSIGNED | REJECTED
 P0_P1_BLOCKERS:

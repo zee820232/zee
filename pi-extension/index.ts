@@ -1,16 +1,19 @@
 /**
- * zee Pi Extension — 常驻自动路由 (/zee-mode)、短命令转发、规划/审查路径锁与内置子代理工具
+ * zee Pi Extension v4.0.0 — 常驻自动路由 (/zee-mode)、短命令转发、跨回合路径锁、共享安全核与 zee_subagent v2
  *
- * 设计原则（严格对齐 Pi v1.6.0 源码）：
+ * 设计原则（严格对齐 Pi v1.6.0 源码 + v3.2/v4 实测优化）：
  * 1. 不写死任何第三方技能/扩展；所有领域技能由 Pi 原生 <available_skills> 自动发现。
- * 2. 状态通过 pi.appendEntry("zee-mode", { mode }) 持久化，并仅从 ctx.sessionManager.getBranch() 逆序恢复。
- * 3. 在 before_agent_start 中无条件写入 event.systemPromptOptions.sections.zee（避免 user/custom 补丁抖动）。
+ * 2. mode 与 gate 均通过 pi.appendEntry 持久化并仅从 ctx.sessionManager.getBranch() 逆序恢复，
+ *    彻底修复 /zee-plan 第 2 轮 Grill 访谈掉锁与 /zee-init Stage 1–2 裸奔问题。
+ * 3. 与 AGY 共用 skills/zee/scripts/lib/guard-core.mjs：无条件执行项目 denyCommands 与破坏性命令拦截，
+ *    并在锁态下精准放行白名单目录上的 mkdir/cp/touch/tee 与 zee-tool.mjs。
  * 4. 四层防递归：默认 off + !ctx.hasUI + ZEE_WORKER=1 + [zee-worker] 首消息哨兵。
- * 5. Plan / Review 防改锁采用 tool_call 路径白名单拦截（绝不使用 setActiveTools），agent_settled 自动解锁。
- * 6. 内置 zee_subagent 工具支持动态 provider/model/thinkingLevel/tools/cwd 与并行执行，子进程强制 -ne + ZEE_WORKER=1。
+ * 5. zee_subagent v2：角色分级超时 + 120s 空闲看门狗 + StagnancyTracker 4 连错早停 + 超时/中止必返 PARTIAL_RECEIPT
+ *    + 声明式原子 worktree 托管 + 按角色硬裁剪 --tools 与事后脏区审计 + authorFamily 同家族硬拦截。
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,12 +28,25 @@ import {
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	RUNS_ROOT,
+	checkBashUnderGate as sharedCheckBashUnderGate,
+	checkProjectDenyCommands,
+	enforcePiRoleTools,
+	evaluateDestructiveCommand,
+	extractModelFamily,
+	isWriteAllowedUnderGate as sharedIsWriteAllowedUnderGate,
+} from "../skills/zee/scripts/lib/guard-core.mjs";
 
 type ZeeMode = "off" | "auto" | "strict";
-type GateMode = "none" | "plan" | "review";
+type GateMode = "none" | "plan" | "review" | "init-design";
 
 interface ZeeModeEntry {
 	mode: ZeeMode;
+}
+
+interface ZeeGateEntry {
+	gate: GateMode;
 }
 
 interface SubagentUsage {
@@ -50,17 +66,36 @@ interface SubagentDetails {
 	thinkingLevel?: string;
 	tools?: string[];
 	cwd: string;
-	status: "running" | "completed" | "failed" | "aborted" | "timeout";
+	worktreePath?: string;
+	worktreeCleaned?: boolean;
+	status: "running" | "completed" | "failed" | "aborted" | "timeout" | "idle_timeout" | "stagnancy_loop";
 	exitCode: number | null;
 	stopReason?: string;
 	errorMessage?: string;
+	roleViolation?: boolean;
+	lastActions: string[];
 	usage: SubagentUsage;
 }
 
 const VALID_MODES = new Set<ZeeMode>(["off", "auto", "strict"]);
-const RUNS_ROOT = path.join(os.homedir(), ".local", "state", "zee", "runs");
+const VALID_GATES = new Set<GateMode>(["none", "plan", "review", "init-design"]);
+
+const ROLE_DEFAULT_TIMEOUT_MS: Record<string, number> = {
+	scout: 240_000,
+	judge: 240_000,
+	verifier: 300_000,
+	reviewer: 480_000,
+	architect: 600_000,
+	coder: 600_000,
+	ui: 600_000,
+};
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 300_000;
 const MAX_SUBAGENT_TIMEOUT_MS = 1_800_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_REPEAT_ERRORS = 4;
+
+const READ_ONLY_AUDIT_ROLES = new Set(["scout", "architect", "judge", "verifier", "reviewer"]);
+
 const WORKER_SENTINELS = [
 	"[zee-worker]",
 	"# zee Worker Standing Contract",
@@ -69,6 +104,10 @@ const WORKER_SENTINELS = [
 
 function isValidMode(value: unknown): value is ZeeMode {
 	return typeof value === "string" && VALID_MODES.has(value as ZeeMode);
+}
+
+function isValidGate(value: unknown): value is GateMode {
+	return typeof value === "string" && VALID_GATES.has(value as GateMode);
 }
 
 function containsWorkerSentinel(text: string): boolean {
@@ -107,80 +146,100 @@ function isSubagentContext(event: BeforeAgentStartEvent, ctx: ExtensionContext):
 	return false;
 }
 
-function normalizeToolPath(rawPath: string, cwd: string): string {
-	let cleaned = rawPath.trim();
-	if (cleaned.startsWith("@")) cleaned = cleaned.slice(1);
-	if (cleaned === "~") {
-		cleaned = os.homedir();
-	} else if (cleaned.startsWith("~/") || cleaned.startsWith("~\\")) {
-		cleaned = path.join(os.homedir(), cleaned.slice(2));
-	}
-	return path.resolve(cwd, cleaned);
-}
-
-function isWithinDir(targetPath: string, parentDir: string): boolean {
-	const rel = path.relative(path.resolve(parentDir), path.resolve(targetPath));
-	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
 export function isWriteAllowedUnderGate(rawPath: string, cwd: string, gateMode: Exclude<GateMode, "none">): boolean {
-	const target = normalizeToolPath(rawPath, cwd);
-	if (isWithinDir(target, RUNS_ROOT)) return true;
-	if (gateMode === "plan") {
-		if (isWithinDir(target, path.join(cwd, ".scratch"))) return true;
-		if (isWithinDir(target, path.join(cwd, "docs", "plans"))) return true;
-	}
-	return false;
+	return sharedIsWriteAllowedUnderGate(rawPath, cwd, gateMode);
 }
 
-const BLOCKED_BASH_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-	{
-		pattern:
-			/\bgit\s+(add|commit|push|merge|rebase|cherry-pick|reset|checkout|switch|restore|clean|am|apply|stash\s+(push|pop|drop|apply)|branch\s+-[dDmM])\b/,
-		label: "修改 Git 工作区或提交历史的命令",
-	},
-	{
-		pattern: /(^|[;&|]\s*)(rm|mv|cp|chmod|chown|truncate|dd|mkfs|tee|patch)\b/,
-		label: "文件增删改或重定向落盘命令",
-	},
-	{
-		pattern: /\bsed\s+-[^\s]*i|\bperl\s+-[^\s]*i/,
-		label: "原地修改文件命令 (sed -i / perl -i)",
-	},
-	{
-		pattern: /\b(npm|pnpm|yarn|bun)\s+(install|i|add|remove|rm|uninstall|update|up|ci|publish)\b/,
-		label: "包管理变更命令",
-	},
-	{
-		pattern: /\b(pip|pip3|uv|poetry|cargo|brew)\s+(install|add|remove|uninstall|upgrade)\b|\bgo\s+(get|mod\s+tidy)\b/,
-		label: "依赖安装或修改命令",
-	},
-];
+export function checkBashUnderGate(command: string, gateMode: Exclude<GateMode, "none">, cwd = process.cwd()): string | null {
+	return sharedCheckBashUnderGate(command, cwd, gateMode);
+}
 
-export function checkBashUnderGate(command: string, gateMode: Exclude<GateMode, "none">): string | null {
-	const trimmed = command.trim();
-	if (!trimmed) return null;
+function sanitizeSlug(s: string): string {
+	return String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "task";
+}
 
-	for (const { pattern, label } of BLOCKED_BASH_PATTERNS) {
-		if (pattern.test(trimmed)) {
-			return `当前处于 zee ${gateMode === "plan" ? "规划保护" : "只读审查"}模式，已拦截${label}。`;
+function repoKeyFor(repoPath: string): string {
+	const absRepo = path.resolve(repoPath);
+	const hash = crypto.createHash("sha256").update(absRepo).digest("hex").slice(0, 8);
+	return `${sanitizeSlug(path.basename(absRepo))}-${hash}`;
+}
+
+function prepareAtomicWorktree(spec: {
+	repoRoot: string;
+	slug: string;
+	lane: string;
+	baseRef: string;
+	branch?: string;
+}): string {
+	const absRepo = path.resolve(spec.repoRoot);
+	const wtRoot = path.join(RUNS_ROOT, repoKeyFor(absRepo), sanitizeSlug(spec.slug), "worktrees");
+	const wtPath = path.join(wtRoot, sanitizeSlug(spec.lane));
+	fs.mkdirSync(wtRoot, { recursive: true });
+
+	// 若路径已存在且是合法干净 worktree，先移除再按最新 baseRef 重建，确保 Pinned SHA 100% 精确
+	if (fs.existsSync(wtPath)) {
+		try {
+			const st = execFileSync("git", ["-C", wtPath, "status", "--porcelain"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+			if (st) {
+				throw new Error(`目标 worktree 目录存在未提交改动，拒绝覆盖：${wtPath}`);
+			}
+			execFileSync("git", ["-C", absRepo, "worktree", "remove", "--force", wtPath], {
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (e) {
+			if (e instanceof Error && e.message.includes("存在未提交改动")) throw e;
+			fs.rmSync(wtPath, { recursive: true, force: true });
+			try {
+				execFileSync("git", ["-C", absRepo, "worktree", "prune"], { stdio: ["ignore", "ignore", "ignore"] });
+			} catch {}
 		}
 	}
 
-	// 检测输出重定向（放行 /dev/null、>&2、以及写入 zee 运行总线或计划目录）
-	const redirectRegex = /(?:^|[^0-9&>])>>?\s*(?!&\d)(\S+)/g;
-	for (const match of trimmed.matchAll(redirectRegex)) {
-		const target = match[1].replace(/^['"]|['"]$/g, "");
-		if (target === "/dev/null") continue;
-		const allowedTarget =
-			target.includes(".local/state/zee/runs") ||
-			(gateMode === "plan" && (target.startsWith(".scratch/") || target.startsWith("docs/plans/")));
-		if (!allowedTarget) {
-			return `当前处于 zee ${gateMode === "plan" ? "规划保护" : "只读审查"}模式，已拦截向 "${target}" 的 Shell 重定向写入。`;
+	const args = ["-C", absRepo, "worktree", "add"];
+	if (spec.branch && spec.branch.trim()) {
+		const branchName = spec.branch.trim();
+		// 检查分支是否已存在：存在则直接检出该分支，否则从 baseRef 创建
+		let branchExists = false;
+		try {
+			execFileSync("git", ["-C", absRepo, "show-ref", "--verify", "--quiet", `refs/heads/${branchName}`]);
+			branchExists = true;
+		} catch {
+			branchExists = false;
 		}
+		if (branchExists) {
+			args.push(wtPath, branchName);
+		} else {
+			args.push("-b", branchName, wtPath, spec.baseRef);
+		}
+	} else {
+		args.push("--detach", wtPath, spec.baseRef);
 	}
 
-	return null;
+	execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	return wtPath;
+}
+
+function readGitSnapshot(cwd: string): { isGit: boolean; head: string; statusLines: string[] } {
+	try {
+		const head = execFileSync("git", ["-C", cwd, "rev-parse", "--short", "HEAD"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		const stRaw = execFileSync("git", ["-C", cwd, "status", "--porcelain"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		return {
+			isGit: true,
+			head,
+			statusLines: stRaw ? stRaw.split(/\r?\n/).filter(Boolean) : [],
+		};
+	} catch {
+		return { isGit: false, head: "", statusLines: [] };
+	}
 }
 
 function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string {
@@ -193,19 +252,25 @@ function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string 
 		"## zee Auto-Routing Policy",
 		modeLine,
 		"- **Language**: All user-facing replies, questions, status updates, plans, and reports MUST be in Simplified Chinese (简体中文).",
+		"- **Global Template Isolation**: Ignore repo-irrelevant global `~/CLAUDE.md` template rules (e.g., hardcoded `pnpm test` in non-JS repos or mandatory `CHANGELOG.md` edits on parallel feature branches); follow the actual repository stack and `.agents/zee.project.json`.",
+		"- **Shared-File Single-Writer**: Parallel workers MUST NOT modify repo-wide shared index files (`CHANGELOG.md`, `README.md`, global test registries); only the Orchestrator or dedicated integration step updates them.",
 		"- **Route by Intent** (read the matching skill's `SKILL.md` from `<available_skills>` before acting):",
-		"  - Build / Bug Fix / Refactor / Multi-file change -> `zee` (Risk-routed L1/L2/L3 + `Verifier` + cross-family `Reviewer`)",
+		"  - Build / Bug Fix / Refactor / Multi-file change -> `zee` (Risk-routed L1/L2/L3 + Gate 1 `Verifier` PASS before Gate 2 cross-family `Reviewer` + 70% wall-clock cutoff)",
 		"  - Requirements Interview & Plan Only (no prod code edits) -> `zee-plan`",
 		"  - 0→1 New Project / Empty Repo -> `zee-init`",
 		"  - Code / PR / Diff Review Only -> `zee-review`",
 		"  - Overnight Autonomous Execution -> `zee-night`",
 		"  - Model / Harness Configuration -> `zee-setup`",
-		"- **Subagents & Skills**: Use `zee_subagent` (passing explicit `provider`, `model`, `thinkingLevel`, and least-privilege `tools`) for isolated worker roles. Reuse matching domain skills from `<available_skills>` by passing their absolute `location` path in Worker Briefs (`references/interop.md`).",
+		"- **Subagents & Skills**: Use `zee_subagent` with explicit `role`, `provider`, `model`, `thinkingLevel`, `worktree` (atomic out-of-tree isolation under `~/.local/state/zee/runs/.../worktrees/`), and `authorFamily` (when `role === 'reviewer'`) to prevent same-family collisions. Reuse host domain skills from `<available_skills>` via absolute `location` path (`references/interop.md`).",
 	];
 
 	if (gate === "plan") {
 		lines.push(
-			"- **ACTIVE WRITE LOCK (`plan`)**: Production code writes/edits and mutating bash commands are blocked by the runtime gate. Write ONLY to `~/.local/state/zee/runs/`, `.scratch/`, or `docs/plans/`.",
+			"- **ACTIVE WRITE LOCK (`plan`)**: Production code writes/edits and mutating bash commands are blocked across turns until `/zee` execution starts. Write ONLY to `~/.local/state/zee/runs/`, `.scratch/`, or `docs/plans/`.",
+		);
+	} else if (gate === "init-design") {
+		lines.push(
+			"- **ACTIVE WRITE LOCK (`init-design`)**: 0→1 Stage 1–2 design freeze is active. Write ONLY to `~/.local/state/zee/runs/`, `.scratch/`, `.agents/`, or root `SPEC.md`/`ARCHITECTURE.md`/`GLOSSARY.md`/`DESIGN.md` until Stage 3 M0 unlocks.",
 		);
 	} else if (gate === "review") {
 		lines.push(
@@ -257,17 +322,22 @@ const ZeeSubagentParams = Type.Object({
 	}),
 	role: Type.Optional(
 		Type.String({
-			description: "可选角色标识（如 scout / architect / ui / coder / verifier / reviewer），用于状态展示",
+			description: "角色标识（scout / architect / ui / coder / verifier / reviewer / judge），决定默认超时与最小权限裁剪",
 		}),
 	),
 	provider: Type.Optional(
 		Type.String({
-			description: "可选模型提供方 ID（如 anthropic / openai / magpie；必须与 model 同时传入）",
+			description: "可选模型提供方 ID（如 vm / codex / devin / anthropic / openai；必须与 model 同时传入）",
 		}),
 	),
 	model: Type.Optional(
 		Type.String({
 			description: "可选目标模型 ID 或 provider/model 模式（建议显式指定，避免继承父会话模型）",
+		}),
+	),
+	authorFamily: Type.Optional(
+		Type.String({
+			description: "当 role='reviewer' 时强烈建议传入作者模型底层家族（如 claude/openai/gemini/devin），用于静态拦截同家族自审",
 		}),
 	),
 	thinkingLevel: Type.Optional(
@@ -286,19 +356,48 @@ const ZeeSubagentParams = Type.Object({
 	),
 	tools: Type.Optional(
 		Type.Array(Type.String(), {
-			description: "可选最小权限工具白名单，例如只读角色使用 ['read','grep','find','ls']",
+			description: "可选最小权限工具白名单；扩展会按 role 强制兜底剥离越权工具（如 verifier/reviewer 强制剥离 edit）",
 		}),
 	),
 	cwd: Type.Optional(
 		Type.String({
-			description: "可选工作目录（如隔离 git worktree 路径，默认继承当前会话目录）",
+			description: "可选工作目录（与 worktree 二选一；传入 worktree 时自动原子创建隔离目录并作为 cwd）",
 		}),
+	),
+	worktree: Type.Optional(
+		Type.Object(
+			{
+				repoRoot: Type.String({ description: "主 Git 仓库根目录绝对路径" }),
+				slug: Type.String({ description: "当前任务总线 slug" }),
+				lane: Type.String({ description: "车道名称（如 slice-a / verify-r1 / review-gemini）" }),
+				baseRef: Type.String({ description: "基准提交或分支（如 HEAD 或精确 PINNED_SHA）" }),
+				branch: Type.Optional(Type.String({ description: "写角色分支名（如 zee/slug/slice-a）；省略则 --detach 只读检出" })),
+				autoCleanup: Type.Optional(
+					Type.Boolean({ description: "结束后工作区干净时自动删除 worktree（detached 默认 true，有 branch 默认 false）" }),
+				),
+			},
+			{ description: "声明式原子 Worktree 托管：在 spawn 子进程前创建于 ~/.local/state/zee/runs/.../worktrees/<lane>，彻底消除并发竞态" },
+		),
 	),
 	timeoutMs: Type.Optional(
 		Type.Number({
-			description: "可选超时毫秒数（默认 300000，范围 5000–1800000）",
+			description: "可选墙钟超时毫秒数（未传时按 role 默认：scout 240s / verifier 300s / reviewer 480s / coder|ui|architect 600s；上限 1800000）",
 			minimum: 5000,
 			maximum: MAX_SUBAGENT_TIMEOUT_MS,
+		}),
+	),
+	idleTimeoutMs: Type.Optional(
+		Type.Number({
+			description: "可选空闲心跳超时毫秒数（默认 120000，无新流式事件即提前熔断）",
+			minimum: 15000,
+			maximum: 600000,
+		}),
+	),
+	maxRepeatToolErrors: Type.Optional(
+		Type.Number({
+			description: "StagnancyTracker 连续相同调用或连续工具错误早停阈值（默认 4）",
+			minimum: 2,
+			maximum: 10,
 		}),
 	),
 	includeSkills: Type.Optional(
@@ -322,8 +421,17 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		const parts: string[] = [];
 		if (mode !== "off") parts.push(`zee:${mode}`);
 		if (gate === "plan") parts.push("plan🔒");
+		else if (gate === "init-design") parts.push("init🔒");
 		else if (gate === "review") parts.push("review🔒");
 		ctx.ui.setStatus("zee-mode", parts.length > 0 ? parts.join("|") : undefined);
+	};
+
+	const setGate = (next: GateMode, ctx: ExtensionContext, persist = true) => {
+		gate = next;
+		if (persist) {
+			pi.appendEntry<ZeeGateEntry>("zee-gate", { gate });
+		}
+		updateStatus(ctx);
 	};
 
 	const restoreState = (ctx: ExtensionContext) => {
@@ -337,15 +445,25 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 		// 仅读取当前活动分支（getBranch），绝不读取 getEntries() 避免串分支污染
 		const branch = ctx.sessionManager.getBranch();
+		let foundMode = false;
+		let foundGate = false;
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
-			if (entry.type === "custom" && entry.customType === "zee-mode") {
+			if (entry.type !== "custom") continue;
+			if (!foundMode && entry.customType === "zee-mode") {
 				const data = entry.data as Partial<ZeeModeEntry> | undefined;
 				if (isValidMode(data?.mode)) {
 					mode = data.mode;
-					break;
+					foundMode = true;
+				}
+			} else if (!foundGate && entry.customType === "zee-gate") {
+				const data = entry.data as Partial<ZeeGateEntry> | undefined;
+				if (isValidGate(data?.gate)) {
+					gate = data.gate;
+					foundGate = true;
 				}
 			}
+			if (foundMode && foundGate) break;
 		}
 		updateStatus(ctx);
 	};
@@ -358,31 +476,34 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		restoreState(ctx);
 	});
 
+	// 修复跨回合掉锁漏洞：仅 review 为单轮锁；plan 与 init-design 跨回合保持，直到显式执行或 M0 落盘解锁
 	pi.on("agent_settled", (_event, ctx) => {
-		if (gate !== "none") {
-			gate = "none";
-			updateStatus(ctx);
+		if (gate === "review") {
+			setGate("none", ctx);
+		} else if (gate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
+			setGate("none", ctx);
 		}
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (event.messageType === "user") {
-			const prompt = event.prompt || "";
-			// 兼容直接调用原生 /skill:zee-plan 或 /skill:zee-review 时自动挂锁
-			if (/<skill\s+name="zee-plan"\b/.test(prompt) || /^\/skill:zee-plan\b/.test(prompt.trim())) {
-				gate = "plan";
-				updateStatus(ctx);
-			} else if (/<skill\s+name="zee-review"\b/.test(prompt) || /^\/skill:zee-review\b/.test(prompt.trim())) {
-				gate = "review";
-				updateStatus(ctx);
+			const prompt = (event.prompt || "").trim();
+			// 兼容直接调用原生 /skill:zee-* 或显式解锁口令
+			if (/<skill\s+name="zee-plan"\b/.test(prompt) || /^\/skill:zee-plan\b/.test(prompt)) {
+				setGate("plan", ctx);
+			} else if (/<skill\s+name="zee-review"\b/.test(prompt) || /^\/skill:zee-review\b/.test(prompt)) {
+				setGate("review", ctx);
+			} else if (/<skill\s+name="zee-init"\b/.test(prompt) || /^\/skill:zee-init\b/.test(prompt)) {
+				const alreadyBootstrapped = fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"));
+				setGate(alreadyBootstrapped ? "none" : "init-design", ctx);
 			} else if (
-				/<skill\s+name="zee(?:-(?:init|night|setup))?"\b/.test(prompt) ||
-				/^\/skill:zee(?:-(?:init|night|setup))?\b/.test(prompt.trim())
+				/<skill\s+name="zee(?:-(?:night|setup))?"\b/.test(prompt) ||
+				/^\/skill:zee(?:-(?:night|setup))?\b/.test(prompt) ||
+				/^(解锁|解除锁定|开始写代码|开始实现|执行计划)\b/.test(prompt)
 			) {
-				if (gate !== "none") {
-					gate = "none";
-					updateStatus(ctx);
-				}
+				if (gate !== "none") setGate("none", ctx);
+			} else if (gate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
+				setGate("none", ctx);
 			}
 		}
 
@@ -397,41 +518,62 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		}
 
 		if (mode === "off" && gate !== "none") {
-			event.systemPromptOptions.sections.zee =
+			const lockDesc =
 				gate === "plan"
-					? "## zee Active Write Lock (`plan`)\nProduction code writes/edits and mutating bash commands are blocked by the runtime gate. Write ONLY to `~/.local/state/zee/runs/`, `.scratch/`, or `docs/plans/`."
-					: "## zee Active Write Lock (`review`)\nRepository writes/edits and mutating bash commands are blocked by the runtime gate. Write ONLY to `~/.local/state/zee/runs/`.";
+					? "## zee Active Write Lock (`plan`)\nProduction code writes/edits and mutating bash commands are blocked across turns until `/zee` execution starts. Write ONLY to `~/.local/state/zee/runs/`, `.scratch/`, or `docs/plans/`."
+					: gate === "init-design"
+						? "## zee Active Write Lock (`init-design`)\n0→1 Stage 1–2 design freeze is active. Write ONLY to `~/.local/state/zee/runs/`, `.scratch/`, `.agents/`, or root `SPEC.md`/`ARCHITECTURE.md`/`GLOSSARY.md`/`DESIGN.md` until M0 unlocks."
+						: "## zee Active Write Lock (`review`)\nRepository writes/edits and mutating bash commands are blocked by the runtime gate. Write ONLY to `~/.local/state/zee/runs/`.";
+			event.systemPromptOptions.sections.zee = lockDesc;
 			return undefined;
 		}
 
-		// 无论 messageType 是 "user" 还是 "custom"，激活态每次必须写入 sections.zee，避免系统提示补丁抖动
 		event.systemPromptOptions.sections.zee = buildZeeSection(mode as Exclude<ZeeMode, "off">, gate);
 		return undefined;
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		if (gate === "none") return undefined;
-
-		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-			const rawPath = event.input.path;
-			if (!isWriteAllowedUnderGate(rawPath, ctx.cwd, gate)) {
-				const allowedHint =
-					gate === "plan"
-						? "~/.local/state/zee/runs/、.scratch/ 或 docs/plans/"
-						: "~/.local/state/zee/runs/";
-				const reason = `当前处于 zee-${gate} 保护锁，禁止修改 "${rawPath}"（仅允许写入 ${allowedHint}）。如需开始写代码，请调用 /zee 执行计划。`;
+		// 1. 常驻安全红线（无论是否处于保护锁，均执行项目 denyCommands 与破坏性命令检查）
+		if (isToolCallEventType("bash", event) || isToolCallEventType("powershell", event)) {
+			const command = event.input.command;
+			const denyReason = checkProjectDenyCommands(command, ctx.cwd);
+			if (denyReason) {
+				if (ctx.hasUI) ctx.ui.notify(denyReason, "warning");
+				return { block: true, reason: denyReason };
+			}
+			const destructive = evaluateDestructiveCommand(command, ctx.cwd);
+			if (destructive) {
+				const reason = `[zee 安全护栏] ${destructive.reason}，已自动拦截。请由用户在终端亲自确认执行。`;
 				if (ctx.hasUI) ctx.ui.notify(reason, "warning");
 				return { block: true, reason };
+			}
+			if (gate !== "none") {
+				const violation = sharedCheckBashUnderGate(command, ctx.cwd, gate);
+				if (violation) {
+					if (ctx.hasUI) ctx.ui.notify(violation, "warning");
+					return { block: true, reason: violation };
+				}
 			}
 			return undefined;
 		}
 
-		if (isToolCallEventType("bash", event) || isToolCallEventType("powershell", event)) {
-			const command = event.input.command;
-			const violation = checkBashUnderGate(command, gate);
-			if (violation) {
-				if (ctx.hasUI) ctx.ui.notify(violation, "warning");
-				return { block: true, reason: violation };
+		// 2. 保护锁下拦截 write/edit
+		if (gate !== "none" && (isToolCallEventType("write", event) || isToolCallEventType("edit", event))) {
+			const rawPath = event.input.path;
+			if (!sharedIsWriteAllowedUnderGate(rawPath, ctx.cwd, gate)) {
+				const allowedHint =
+					gate === "plan"
+						? "~/.local/state/zee/runs/、.scratch/ 或 docs/plans/"
+						: gate === "init-design"
+							? "~/.local/state/zee/runs/、.scratch/、.agents/ 或 SPEC/ARCHITECTURE/DESIGN.md"
+							: "~/.local/state/zee/runs/";
+				const reason = `当前处于 zee-${gate} 保护锁，禁止修改 "${rawPath}"（仅允许写入 ${allowedHint}）。如需开始写代码，请调用 /zee 执行计划。`;
+				if (ctx.hasUI) ctx.ui.notify(reason, "warning");
+				return { block: true, reason };
+			}
+			// 写入 .agents/zee.project.json 标志着 M0 启程，自动解除 init-design 锁
+			if (gate === "init-design" && path.resolve(ctx.cwd, rawPath) === path.join(ctx.cwd, ".agents", "zee.project.json")) {
+				setGate("none", ctx);
 			}
 			return undefined;
 		}
@@ -455,7 +597,14 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const target = args.trim().toLowerCase();
 			if (!target || target === "status") {
-				const lockLabel = gate === "none" ? "无" : gate === "plan" ? "plan（仅限计划与总线写入）" : "review（只读）";
+				const lockLabel =
+					gate === "none"
+						? "无"
+						: gate === "plan"
+							? "plan（跨回合锁定，仅限计划与总线写入）"
+							: gate === "init-design"
+								? "init-design（0→1 Stage 1–2 设计冻结锁）"
+								: "review（只读）";
 				if (ctx.hasUI) {
 					ctx.ui.notify(
 						`当前 zee-mode：${mode}｜保护锁：${lockLabel}（切换用法：/zee-mode auto | strict | off）`,
@@ -473,9 +622,12 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			}
 
 			mode = target;
-			if (mode === "off") gate = "none";
 			pi.appendEntry<ZeeModeEntry>("zee-mode", { mode });
-			updateStatus(ctx);
+			if (mode === "off" && gate !== "none") {
+				setGate("none", ctx);
+			} else {
+				updateStatus(ctx);
+			}
 
 			const descMap: Record<ZeeMode, string> = {
 				off: "已关闭 zee 常驻自动路由（仍可随时通过 /zee、/zee-plan 等命令手动触发）",
@@ -491,15 +643,15 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		name: string,
 		skillName: string,
 		description: string,
-		nextGate: GateMode,
+		nextGate: GateMode | ((ctx: ExtensionContext) => GateMode),
 		lockNotice?: string,
 	) => {
 		pi.registerCommand(name, {
 			description,
 			handler: async (args, ctx) => {
-				gate = nextGate;
-				updateStatus(ctx);
-				if (lockNotice && ctx.hasUI) {
+				const resolvedGate = typeof nextGate === "function" ? nextGate(ctx) : nextGate;
+				setGate(resolvedGate, ctx);
+				if (lockNotice && resolvedGate !== "none" && ctx.hasUI) {
 					ctx.ui.notify(lockNotice, "info");
 				}
 				const trimmed = args.trim();
@@ -518,15 +670,16 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	registerShortcut(
 		"zee-plan",
 		"zee-plan",
-		"先 Grill 深度访谈再沉淀计划文档（自动启用写保护锁，禁止修改业务代码）",
+		"先 Grill 深度访谈再沉淀计划文档（跨回合启用写保护锁，禁止修改业务代码）",
 		"plan",
-		"已启用 zee-plan 规划保护锁：仅允许写入计划文档与运行总线，禁止修改业务代码。",
+		"已启用 zee-plan 跨回合规划保护锁：仅允许写入计划文档与运行总线，禁止修改业务代码（直到调用 /zee 执行）。",
 	);
 	registerShortcut(
 		"zee-init",
 		"zee-init",
 		"项目 0→1 建项模式：从需求访谈到可运行且验收通过的 v1",
-		"none",
+		(ctx) => (fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json")) ? "none" : "init-design"),
+		"已启用 zee-init Stage 1–2 设计保护锁：在 M0 写入 .agents/zee.project.json 前仅允许写设计文档与运行总线。",
 	);
 	registerShortcut(
 		"zee-review",
@@ -544,17 +697,18 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	registerShortcut(
 		"zee-setup",
 		"zee-setup",
-		"配置 zee 六大角色模型、思考强度与备胎，并审计当前 Pi 宿主冲突",
+		"配置 zee 六大角色模型、思考强度与备胎，并执行当前 Pi 宿主全面体检",
 		"none",
 	);
 
-	// 3. 内置独立子代理工具 zee_subagent（支持动态模型/思考强度/最小工具集/并行执行）
+	// 3. 内置独立子代理工具 zee_subagent v2
 	pi.registerTool({
 		name: "zee_subagent",
-		label: "zee 子代理",
+		label: "zee 子代理 v2",
 		description:
-			"在独立隔离的 Pi 子进程中执行单个 zee 角色任务（强制关闭扩展与递归保护，支持动态指定 provider/model/thinkingLevel/tools/cwd，支持同一回合内并行调用多个角色）。",
-		promptSnippet: "Delegate an isolated zee role worker with explicit provider, model, thinkingLevel, tools, and cwd",
+			"在独立隔离的 Pi 子进程中执行单个 zee 角色任务（强制 -ne + ZEE_WORKER=1、按角色分级超时与硬最小权限裁剪、120s 空闲看门狗、StagnancyTracker 循环早停、超时/中止必返 PARTIAL_RECEIPT、支持声明式原子 worktree 托管与同家族 Reviewer 硬拦截）。",
+		promptSnippet:
+			"Delegate an isolated zee role worker with explicit role, provider, model, thinkingLevel, atomic worktree, authorFamily, and least-privilege tools",
 		executionMode: "parallel",
 		parameters: ZeeSubagentParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -565,16 +719,40 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				throw new Error("参数错误：指定 provider 时必须同时提供 model。");
 			}
 
-			const role = params.role?.trim() || "worker";
-			const effectiveCwd = path.resolve(ctx.cwd, params.cwd ?? ".");
+			const role = (params.role?.trim() || "worker").toLowerCase();
+
+			// 同家族 Reviewer 静态硬拦截
+			if (role === "reviewer" && params.authorFamily && params.model) {
+				const authorFam = params.authorFamily.trim().toLowerCase();
+				const reviewerFam = extractModelFamily(params.model);
+				if (authorFam && reviewerFam && authorFam === reviewerFam) {
+					throw new Error(
+						`[zee_subagent:reviewer] 跨家族拦截：审查员模型 "${params.model}"（家族 ${reviewerFam}）与作者家族 "${authorFam}" 相同，禁止同源审查！请切换为其他家族审查员（如 gemini / openai / claude / devin）。`,
+					);
+				}
+			}
+
+			// 声明式原子 Worktree 托管（spawn 之前同步就绪，消灭 0ms 并发竞态）
+			let createdWorktreePath: string | undefined;
+			let effectiveCwd = path.resolve(ctx.cwd, params.cwd ?? ".");
+			if (params.worktree) {
+				createdWorktreePath = prepareAtomicWorktree(params.worktree);
+				effectiveCwd = createdWorktreePath;
+			}
 			if (!fs.existsSync(effectiveCwd)) {
 				throw new Error(`工作目录不存在：${effectiveCwd}`);
 			}
 
+			const roleDefaultTimeout = ROLE_DEFAULT_TIMEOUT_MS[role] ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
 			const timeoutMs = Math.min(
 				MAX_SUBAGENT_TIMEOUT_MS,
-				Math.max(5000, params.timeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS),
+				Math.max(5000, params.timeoutMs ?? roleDefaultTimeout),
 			);
+			const idleTimeoutMs = Math.min(600_000, Math.max(15_000, params.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS));
+			const maxRepeatErrors = Math.min(10, Math.max(2, params.maxRepeatToolErrors ?? DEFAULT_MAX_REPEAT_ERRORS));
+
+			// 按角色硬收敛最小权限 --tools（防止 verifier/reviewer 拿到 edit 改脏源码）
+			const effectiveTools = enforcePiRoleTools(role, params.tools);
 
 			const cliArgs: string[] = ["--mode", "json", "-p", "--no-session", "-ne", "--no-mcp"];
 			if (!params.includeSkills) {
@@ -587,8 +765,8 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			if (params.thinkingLevel) {
 				cliArgs.push("--thinking", params.thinkingLevel);
 			}
-			if (params.tools && params.tools.length > 0) {
-				cliArgs.push("--tools", params.tools.join(","));
+			if (effectiveTools && effectiveTools.length > 0) {
+				cliArgs.push("--tools", effectiveTools.join(","));
 			}
 
 			const workerPrompt = containsWorkerSentinel(params.task)
@@ -596,15 +774,21 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				: `[zee-worker]\n${params.task}`;
 			cliArgs.push("--", workerPrompt);
 
+			// 只读/验证角色派发前快照工作区状态，用于事后越权脏区审计
+			const preSnapshot = READ_ONLY_AUDIT_ROLES.has(role) ? readGitSnapshot(effectiveCwd) : null;
+
+			const startedAt = Date.now();
 			const details: SubagentDetails = {
 				role,
 				provider: params.provider,
 				model: params.model,
 				thinkingLevel: params.thinkingLevel,
-				tools: params.tools,
+				tools: effectiveTools ?? undefined,
 				cwd: effectiveCwd,
+				worktreePath: createdWorktreePath,
 				status: "running",
 				exitCode: null,
+				lastActions: [],
 				usage: {
 					turns: 0,
 					input: 0,
@@ -619,19 +803,31 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			let latestAssistantText = "";
 			let stderrText = "";
 			let timedOut = false;
+			let idleTimedOut = false;
+			let stagnancyTripped = false;
+			let stagnancyDetail = "";
 			let aborted = false;
 
+			// StagnancyTracker 状态
+			let lastToolSig = "";
+			let repeatSigCount = 0;
+			let consecutiveToolErrors = 0;
+			let lastToolLabel = "init";
+
+			const recordAction = (label: string) => {
+				lastToolLabel = label;
+				details.lastActions.push(label);
+				if (details.lastActions.length > 5) details.lastActions.shift();
+			};
+
 			const emitProgress = () => {
+				const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+				const modelLabel = details.model || params.model || "default";
+				const header = `[zee_subagent:${role}] model=${modelLabel} | ${elapsedSec}s | turns=${details.usage.turns} | last=${lastToolLabel}`;
+				const body = latestAssistantText ? `\n${truncateSubagentOutput(latestAssistantText.slice(0, 600))}` : "";
 				onUpdate?.({
-					content: [
-						{
-							type: "text",
-							text: latestAssistantText
-								? truncateSubagentOutput(latestAssistantText)
-								: `[zee_subagent:${role}] 正在运行（turns=${details.usage.turns}）...`,
-						},
-					],
-					details: { ...details, usage: { ...details.usage } },
+					content: [{ type: "text", text: `${header}${body}` }],
+					details: { ...details, lastActions: [...details.lastActions], usage: { ...details.usage } },
 				});
 			};
 
@@ -653,16 +849,100 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				let buffer = "";
 				let killTimer: ReturnType<typeof setTimeout> | undefined;
 				let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+				let idleTimer: ReturnType<typeof setTimeout> | undefined;
 				let proc: ReturnType<typeof spawn>;
 
-				const processLine = (line: string) => {
-					if (!line.trim()) return;
-					let evt: JsonAgentSessionEvent;
+				const resetIdleTimer = () => {
+					if (idleTimer) clearTimeout(idleTimer);
+					idleTimer = setTimeout(() => {
+						idleTimedOut = true;
+						terminateChild();
+					}, idleTimeoutMs);
+				};
+
+				const finish = (result: {
+					code: number | null;
+					termSignal: NodeJS.Signals | null;
+					spawnError?: Error;
+				}) => {
+					if (settled) return;
+					settled = true;
+					closed = true;
+					if (killTimer) clearTimeout(killTimer);
+					if (timeoutTimer) clearTimeout(timeoutTimer);
+					if (idleTimer) clearTimeout(idleTimer);
+					if (signal) signal.removeEventListener("abort", onAbort);
+					resolve(result);
+				};
+
+				const terminateChild = () => {
+					if (closed || exited || proc.exitCode !== null || proc.signalCode !== null) return;
 					try {
-						evt = JSON.parse(line) as JsonAgentSessionEvent;
+						proc.kill("SIGTERM");
 					} catch {
 						return;
 					}
+					killTimer = setTimeout(() => {
+						if (!closed && !exited) {
+							try {
+								proc.kill("SIGKILL");
+							} catch {}
+						}
+					}, 5000);
+				};
+
+				const processLine = (line: string) => {
+					if (!line.trim()) return;
+					let evt: JsonAgentSessionEvent & Record<string, unknown>;
+					try {
+						evt = JSON.parse(line) as JsonAgentSessionEvent & Record<string, unknown>;
+					} catch {
+						return;
+					}
+					resetIdleTimer();
+
+					// 追踪工具执行事件以驱动实时进度与 StagnancyTracker
+					if (evt.type === "tool_execution_start") {
+						const tName = String(evt.toolName ?? "tool");
+						const rawArgs = evt.args !== undefined ? JSON.stringify(evt.args) : "";
+						const shortArg = rawArgs.length > 80 ? `${rawArgs.slice(0, 77)}...` : rawArgs;
+						recordAction(`${tName}(${shortArg})`);
+
+						const sig = `${tName}:${crypto.createHash("sha1").update(rawArgs).digest("hex").slice(0, 12)}`;
+						if (sig === lastToolSig) {
+							repeatSigCount += 1;
+						} else {
+							lastToolSig = sig;
+							repeatSigCount = 1;
+						}
+						emitProgress();
+
+						if (repeatSigCount >= maxRepeatErrors) {
+							stagnancyTripped = true;
+							stagnancyDetail = `连续 ${repeatSigCount} 次重复相同调用 ${tName}(${shortArg})`;
+							terminateChild();
+						}
+						return;
+					}
+
+					if (evt.type === "tool_execution_end") {
+						const tName = String(evt.toolName ?? "tool");
+						const isErr = Boolean(evt.isError);
+						if (isErr) {
+							consecutiveToolErrors += 1;
+							recordAction(`${tName}:ERROR#${consecutiveToolErrors}`);
+							if (consecutiveToolErrors >= maxRepeatErrors) {
+								stagnancyTripped = true;
+								stagnancyDetail = `连续 ${consecutiveToolErrors} 次工具调用报错（最近：${tName}）`;
+								terminateChild();
+							}
+						} else {
+							consecutiveToolErrors = 0;
+						}
+						emitProgress();
+						return;
+					}
+
 					if (evt.type !== "message_end") return;
 					const msg = evt.message as {
 						role?: string;
@@ -699,38 +979,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					emitProgress();
 				};
 
-				const finish = (result: {
-					code: number | null;
-					termSignal: NodeJS.Signals | null;
-					spawnError?: Error;
-				}) => {
-					if (settled) return;
-					settled = true;
-					closed = true;
-					if (killTimer) clearTimeout(killTimer);
-					if (timeoutTimer) clearTimeout(timeoutTimer);
-					if (signal) signal.removeEventListener("abort", onAbort);
-					resolve(result);
-				};
-
-				const terminateChild = () => {
-					if (closed || exited || proc.exitCode !== null || proc.signalCode !== null) return;
-					try {
-						proc.kill("SIGTERM");
-					} catch {
-						return;
-					}
-					killTimer = setTimeout(() => {
-						if (!closed && !exited) {
-							try {
-								proc.kill("SIGKILL");
-							} catch {
-								/* ignore */
-							}
-						}
-					}, 5000);
-				};
-
 				const onAbort = () => {
 					aborted = true;
 					terminateChild();
@@ -741,7 +989,11 @@ export default function zeeExtension(pi: ExtensionAPI) {
 						cwd: effectiveCwd,
 						shell: false,
 						stdio: ["ignore", "pipe", "pipe"],
-						env: { ...process.env, ZEE_WORKER: "1" },
+						env: {
+							...process.env,
+							ZEE_WORKER: "1",
+							ZEE_ROLE: role,
+						},
 					});
 				} catch (error) {
 					finish({
@@ -756,6 +1008,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					timedOut = true;
 					terminateChild();
 				}, timeoutMs);
+				resetIdleTimer();
 
 				proc.stdout?.on("data", (chunk) => {
 					buffer += chunk.toString();
@@ -789,25 +1042,100 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 			details.exitCode = outcome.code;
 
-			if (aborted) {
-				details.status = "aborted";
-				throw new Error(`[zee_subagent:${role}] 子代理已中止。`);
+			// 事后越权脏区审计（堵死 -ne 子进程越权改业务码的漏洞）
+			let violationBanner = "";
+			const postSnapshot = readGitSnapshot(effectiveCwd);
+			if (preSnapshot?.isGit && postSnapshot.isGit) {
+				const preSet = new Set(preSnapshot.statusLines);
+				const newDirty = postSnapshot.statusLines.filter((line) => !preSet.has(line));
+				if (newDirty.length > 0) {
+					details.roleViolation = true;
+					try {
+						execFileSync("git", ["-C", effectiveCwd, "checkout", "--", "."], { stdio: "ignore" });
+						// 仅清理本次新增的未跟踪文件
+						for (const line of newDirty) {
+							if (line.startsWith("?? ")) {
+								const relFile = line.slice(3).trim();
+								const fullPath = path.resolve(effectiveCwd, relFile);
+								if (fullPath.startsWith(path.resolve(effectiveCwd) + path.sep)) {
+									fs.rmSync(fullPath, { recursive: true, force: true });
+								}
+							}
+						}
+					} catch {}
+					violationBanner = `\n[ROLE_VIOLATION] 只读/验收角色 (${role}) 试图修改仓库工作区文件（${newDirty.slice(0, 5).join(", ")}），已自动回滚并标记违规！\n`;
+				}
 			}
-			if (timedOut) {
-				details.status = "timeout";
-				const extra = [
-					details.model ? `model=${details.model}` : "",
-					`turns=${details.usage.turns}`,
-					stderrText.trim() ? `stderr=${stderrText.trim().slice(0, 400)}` : "",
-				]
-					.filter(Boolean)
-					.join(", ");
-				throw new Error(`[zee_subagent:${role}] 子代理执行超时（>${timeoutMs}ms${extra ? `；${extra}` : ""}）。`);
+
+			// 声明式 Worktree 自动清理（detached 默认清理，且仅在工作区干净时清理，绝不删 busDir 证据）
+			if (createdWorktreePath && params.worktree) {
+				const shouldCleanup = params.worktree.autoCleanup ?? !params.worktree.branch;
+				const curSnap = readGitSnapshot(createdWorktreePath);
+				if (shouldCleanup && (!curSnap.isGit || curSnap.statusLines.length === 0)) {
+					try {
+						execFileSync("git", ["-C", path.resolve(params.worktree.repoRoot), "worktree", "remove", "--force", createdWorktreePath], {
+							stdio: "ignore",
+						});
+						details.worktreeCleaned = true;
+					} catch {
+						details.worktreeCleaned = false;
+					}
+				}
 			}
+
 			if (outcome.spawnError) {
 				details.status = "failed";
 				throw new Error(`[zee_subagent:${role}] 启动 Pi 子进程失败：${outcome.spawnError.message}`);
 			}
+
+			const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+			const gitSummary = postSnapshot.isGit
+				? `HEAD=${postSnapshot.head || "none"} dirty=${postSnapshot.statusLines.length}`
+				: "non-git";
+			const metaLine = `\n\n---\n[zee_subagent] role=${role} status=${details.status} model=${details.model ?? "default"} elapsed=${elapsedSec}s turns=${details.usage.turns} in=${details.usage.input} out=${details.usage.output} cost=$${details.usage.cost.toFixed(4)} ${gitSummary}${createdWorktreePath ? ` worktree=${createdWorktreePath}(cleaned=${Boolean(details.worktreeCleaned)})` : ""}`;
+
+			// 中止 / 墙钟超时 / 空闲超时 / StagnancyTracker 早停：绝不空壳抛错丢弃已付费成果，强制返回 PARTIAL_RECEIPT！
+			if (aborted || timedOut || idleTimedOut || stagnancyTripped) {
+				let tag = "ABORTED_PARTIAL";
+				let reasonLine = "子代理已被外部中止";
+				if (stagnancyTripped) {
+					details.status = "stagnancy_loop";
+					details.stopReason = "stagnancy_loop";
+					tag = "STAGNANCY_LOOP_PARTIAL";
+					reasonLine = `StagnancyTracker 循环熔断早停：${stagnancyDetail}`;
+				} else if (idleTimedOut) {
+					details.status = "idle_timeout";
+					details.stopReason = "idle_timeout";
+					tag = "IDLE_TIMEOUT_PARTIAL";
+					reasonLine = `空闲看门狗超时（>${Math.round(idleTimeoutMs / 1000)}s 无新事件）`;
+				} else if (timedOut) {
+					details.status = "timeout";
+					details.stopReason = "timeout";
+					tag = "TIMEOUT_PARTIAL";
+					reasonLine = `墙钟超时（>${Math.round(timeoutMs / 1000)}s）`;
+				} else {
+					details.status = "aborted";
+					details.stopReason = "aborted";
+				}
+
+				const partialParts = [
+					`[STATUS: ${tag}] ${reasonLine}`,
+					`[进度快照] elapsed=${elapsedSec}s | turns=${details.usage.turns} | cost=$${details.usage.cost.toFixed(4)} | ${gitSummary}`,
+					details.lastActions.length > 0 ? `[最近动作] ${details.lastActions.join(" -> ")}` : "",
+					violationBanner.trim(),
+					latestAssistantText
+						? `[已抢救的部分输出]\n${truncateSubagentOutput(latestAssistantText)}`
+						: "[已抢救的部分输出] （中止前尚无最终文本输出）",
+					stderrText.trim() ? `[stderr 摘要]\n${stderrText.trim().slice(0, 400)}` : "",
+				].filter(Boolean);
+
+				const updatedMeta = metaLine.replace("status=running", `status=${details.status}`);
+				return {
+					content: [{ type: "text", text: `${partialParts.join("\n\n")}${updatedMeta}` }],
+					details,
+				};
+			}
+
 			if (outcome.code !== 0 || details.stopReason === "error" || outcome.termSignal) {
 				details.status = "failed";
 				const reasonParts = [
@@ -822,9 +1150,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 			details.status = "completed";
 			const body = truncateSubagentOutput(latestAssistantText || "(子代理未返回文本输出)");
-			const metaLine = `\n\n---\n[zee_subagent] role=${role} model=${details.model ?? "default"} turns=${details.usage.turns} in=${details.usage.input} out=${details.usage.output}`;
+			const finalMeta = metaLine.replace("status=running", "status=completed");
 			return {
-				content: [{ type: "text", text: `${body}${metaLine}` }],
+				content: [{ type: "text", text: `${violationBanner}${body}${finalMeta}` }],
 				details,
 			};
 		},

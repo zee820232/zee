@@ -32,12 +32,12 @@ npx github:zee820232/zee --target both
 pi install git:github.com/zee820232/zee
 ```
 
-一次安装自动获得：
+一次安装自动获得（v4.0.0）：
 - 6 个完整工作流技能（`zee` / `zee-plan` / `zee-init` / `zee-review` / `zee-night` / `zee-setup`）
-- **常驻自动路由开关 `/zee-mode`（`auto | strict | off`）**：按分支持久化状态，支持 4 层防子代理递归
+- **常驻自动路由开关 `/zee-mode`（`auto | strict | off`）**：按分支持久化状态，内置 4 层防子代理递归与 `~/CLAUDE.md` 冲突隔离
 - **免前缀短命令**：直接输入 `/zee`、`/zee-plan`、`/zee-init`、`/zee-review`、`/zee-night`、`/zee-setup`
-- **Plan / Review 路径级防写锁**：`/zee-plan` 自动拦截业务代码修改（仅放行计划文档与运行总线），`/zee-review` 强制只读，任务结束或按 `Esc` 自动解锁
-- **内置并行子代理工具 `zee_subagent`**：支持动态传参 `provider`、`model`、`thinkingLevel`、`tools` 与 `cwd`，子进程强制 `-ne --no-mcp -ns` + `ZEE_WORKER=1` 防递归
+- **跨回合持久化保护锁 + 共享安全核**：`/zee-plan` 与 `/zee-init`（Stage 1–2）跨多轮访谈保持防写锁（自动放行白名单目录上的 `mkdir/cp` 与 `zee-tool.mjs`），`/zee-review` 强制只读，日常编码常驻拦截 `.agents/zee.project.json` `denyCommands` 与递归子 shell 破坏性命令
+- **内置并行子代理引擎 `zee_subagent` v2**：支持角色分级超时、120s 空闲看门狗、`StagnancyTracker` 4 连错早停、超时/中止保留 `PARTIAL_RECEIPT`、声明式原子 `worktree` 托管（零竞态不污染桌面）、按角色硬剥离 `Verifier/Reviewer` 的 `edit` 权限与事后脏区审计、以及 `authorFamily` 同家族审查硬拦截
 
 ### 方式三：Google Antigravity（`agy` CLI / App / IDE 原生插件形态）
 
@@ -45,11 +45,11 @@ pi install git:github.com/zee820232/zee
 agy plugin install https://github.com/zee820232/zee
 ```
 
-一次安装自动获得：
-- **专属主控代理 `zee`**：终端运行 **`agy --agent zee`**（或在 CLI `/agents` / Antigravity App 中切换 `zee`），开箱即享自动分级路由，等价于 Pi 的 `/zee-mode auto`
-- **6 个隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 防递归防串扰，配合 `Workspace: "share"` 原生 worktree 隔离与 `flash` / `pro` 模型分档
-- **6 个原生斜杠命令**：直接输入 `/zee`、`/zee-plan`、`/zee-init`、`/zee-review`、`/zee-night`、`/zee-setup`
-- **原生 `PreToolUse` 安全与规划保护 Hook**（`hooks.json` + `scripts/agy-guard.mjs`）：`/zee-plan` 与 `/zee-review` 自动启用路径级防写锁，并强制执行 `.agents/zee.project.json` 中的 `denyCommands` 红线（非锁定场景原样透传，绝不静默跳过权限确认）
+一次安装自动获得（v4.0.0）：
+- **专属主控代理 `zee`（零劫持闲聊）**：终端运行 **`agy --agent zee`**（或在 CLI `/agents` / Antigravity App 中切换 `zee`），插件绝不内置劫持普通对话的 `rules/AGENTS.md`
+- **6 个硬权限隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 与精确 OneHarness `tools:` 白名单（硬剥离 `scout`/`verifier`/`reviewer` 的 `edit_file` 与嵌套派发权）
+- **6 个原生斜杠命令** + **AGY 原生体验满血**：支持 Brain Artifacts（`implementation_plan.md` 原生「Proceed」审批按钮、`walkthrough.md` + 截图 `carousel`、虚拟化 `decisions.tsv`）、`TimerCondition: "never"` 响应式全局看门狗、`run_workflow` 宽扇出与 429 自动降级
+- **三事件生命周期 Hook**（`hooks.json` -> `PreInvocation` + `PreToolUse` + `Stop`）：`$PLUGIN_DATA` 跨回合保持规划/初始化锁、与 Pi 共用 `guard-core.mjs` 递归子 shell 防危、`{}` 零副作用透传，以及 `Stop` 过夜防断尾兜底
 
 > ⚠️ **防冲突提示**：使用 `pi install` 或 `agy plugin install` 安装后，请勿同时在对应宿主的 `skills/` 目录保留旧的 `zee*` 手动拷贝，以免触发重名警告（`install.mjs` 会自动检测清理，也可运行 `zee-tool.mjs audit-rules` 排查）。
 

@@ -113,18 +113,19 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
+  console.log(`zee v4.0.0 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
 
 用法：
   npx github:zee820232/zee                       无需克隆，交互式选择宿主安装
   npx github:zee820232/zee --target <目标>       直接安装到指定宿主
-  node scripts/install.mjs --target <目标> [--dry-run] [--remote]
+  node scripts/install.mjs --target <目标> [--dry-run] [--remote] [--doctor]
 
 可选目标 (--target)：
   pi       安装为 Pi 完整扩展包（pi install）
   agy      安装为 Google Antigravity 原生插件（agy plugin install）
   skills   使用 npx skills add 安装到其他通用 Harness
   both     同时安装 Pi + Google Antigravity
+  --doctor 安装完成后（或单独传入时）执行 zee-tool.mjs doctor 健康体检
 `);
 }
 
@@ -135,10 +136,17 @@ async function main() {
     return;
   }
 
+  const runDoctorFlag = args.includes("--doctor");
   const dryRun = args.includes("--dry-run");
   const useRemote = isEphemeralSource(args.includes("--remote"));
   const targetIdx = args.indexOf("--target");
   let target = targetIdx >= 0 ? (args[targetIdx + 1] || "").toLowerCase() : "";
+
+  if (runDoctorFlag && !target) {
+    const toolPath = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
+    runCmd(process.execPath, [toolPath, "doctor"], dryRun);
+    return;
+  }
 
   if (!target) {
     const piDetected = hasBinary("pi") ? "已检测到" : "未检测到";
@@ -179,6 +187,12 @@ async function main() {
     default:
       console.error(`未知安装目标 "${target}"。可用值：pi | agy | skills | both`);
       process.exit(1);
+  }
+
+  if (runDoctorFlag && !process.exitCode) {
+    const toolPath = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
+    console.log("\n=== 执行安装后健康体检 (zee-tool.mjs doctor) ===");
+    runCmd(process.execPath, [toolPath, "doctor"], dryRun);
   }
 }
 

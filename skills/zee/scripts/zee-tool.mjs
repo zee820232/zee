@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v4.0.0 — 零依赖纯 Node 多模型工作流辅助引擎
+ * zee-tool.mjs v4.0.1 — 零依赖纯 Node 多模型工作流辅助引擎
  *
  * 子命令：
  *   validate [configPath] [--check-live]
@@ -96,7 +96,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v4.0.0 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v4.0.1 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
 
 可用命令：
   validate [配置文件] [--check-live]

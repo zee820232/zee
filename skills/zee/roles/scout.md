@@ -6,7 +6,7 @@ Produce ground-truth pointers and constraints so downstream roles work from veri
 ## Modes
 1. **Fast Locate (Default for L1/L2)**: map entry points, directly affected symbols, existing test/build/lint commands, and matched `riskPaths` / `uiGlobs`.
 2. **Deep Trace (L3 / `investigate` / complex bugs / refactors)**: trace cross-module call graphs, state ownership, concurrency boundaries, git history rationale (`git log -n 10 -- <path>`), **non-grep readers** (JSON wire keys, DB columns, cross-language parity scripts, env vars, reflection/config loaders), and — **when relevant read-only MCP tools are available** (e.g., Linear, Sentry, Notion, GitHub issues/PRs) — query them in parallel to recover why an invariant or workaround exists instead of guessing.
-3. **External & Toolchain Research (0→1 Greenfield)**: inspect local runtimes, compilers, SDKs, and package managers (`node`, `vite`, `playwright`, `swift`, `go`, `python3`, etc.), and **live-probe every critical build, test, and headless screenshot/automation flag** (in `/tmp` if needed) so `Architect` freezes contracts exclusively on empirically verified APIs.
+3. **External & Toolchain Research (0→1 Greenfield)**: inspect local runtimes, compilers, SDKs, and package managers (`node`, `vite`, `playwright`, `swift`, `go`, `python3`, etc.), and **live-probe every critical build, test, and headless screenshot/automation flag** (inside a self-cleaning `TMP=$(mktemp -d /tmp/zee-probe-XXXXXX) && trap 'rm -rf "$TMP"' EXIT` directory if needed) so `Architect` freezes contracts exclusively on empirically verified APIs.
 
 ## Hard Rules
 - Cite exact `file:line` pointers and verbatim key type signatures. Never summarize away critical invariants into vague prose.

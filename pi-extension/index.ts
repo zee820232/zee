@@ -1,5 +1,5 @@
 /**
- * zee Pi Extension v4.0.0 — 常驻自动路由 (/zee-mode)、短命令转发、跨回合路径锁、共享安全核与 zee_subagent v2
+ * zee Pi Extension v4.0.1 — 常驻自动路由 (/zee-mode)、短命令转发、跨回合路径锁、共享安全核与 zee_subagent v2
  *
  * 设计原则（严格对齐 Pi v1.6.0 源码 + v3.2/v4 实测优化）：
  * 1. 不写死任何第三方技能/扩展；所有领域技能由 Pi 原生 <available_skills> 自动发现。
@@ -92,6 +92,12 @@ const ROLE_DEFAULT_TIMEOUT_MS: Record<string, number> = {
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 300_000;
 const MAX_SUBAGENT_TIMEOUT_MS = 1_800_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+const ROLE_DEFAULT_IDLE_TIMEOUT_MS: Record<string, number> = {
+	reviewer: 180_000,
+};
+const TOOL_EXEC_IDLE_TIMEOUT_MS = 180_000;
+const THINKING_STREAM_TIMEOUT_MS = 240_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_MAX_REPEAT_ERRORS = 4;
 
 const READ_ONLY_AUDIT_ROLES = new Set(["scout", "architect", "judge", "verifier", "reviewer"]);
@@ -327,7 +333,8 @@ const ZeeSubagentParams = Type.Object({
 	),
 	provider: Type.Optional(
 		Type.String({
-			description: "可选模型提供方 ID（如 vm / codex / devin / anthropic / openai；必须与 model 同时传入）",
+			description:
+				"可选模型提供方 ID（必须填写 ~/.agents/zee-config.json 的 bindings.pi.*.providerInstanceId 如 magpie，或 pi --list-models 第一列，切勿传入模型路径前缀如 vm/devin/codex；必须与 model 同时传入）",
 		}),
 	),
 	model: Type.Optional(
@@ -388,7 +395,7 @@ const ZeeSubagentParams = Type.Object({
 	),
 	idleTimeoutMs: Type.Optional(
 		Type.Number({
-			description: "可选空闲心跳超时毫秒数（默认 120000，无新流式事件即提前熔断）",
+			description: "可选空闲心跳超时毫秒数（默认 reviewer 180000、其余 120000，工具执行中自动放宽至 ≥180000）",
 			minimum: 15000,
 			maximum: 600000,
 		}),
@@ -718,6 +725,16 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			if (params.provider && !params.model) {
 				throw new Error("参数错误：指定 provider 时必须同时提供 model。");
 			}
+			if (
+				params.provider &&
+				/^(vm|devin|codex)$/i.test(params.provider.trim()) &&
+				params.model &&
+				!params.model.includes("/")
+			) {
+				throw new Error(
+					`参数错误：provider="${params.provider}" 是网关模型路径前缀而非 Pi provider ID。请填写 ~/.agents/zee-config.json 的 bindings.pi.*.providerInstanceId（如 "magpie"）或 pi --list-models 第一列，并搭配完整 model（如 "remote-magpie/${params.provider}/${params.model}"）。`,
+				);
+			}
 
 			const role = (params.role?.trim() || "worker").toLowerCase();
 
@@ -748,7 +765,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				MAX_SUBAGENT_TIMEOUT_MS,
 				Math.max(5000, params.timeoutMs ?? roleDefaultTimeout),
 			);
-			const idleTimeoutMs = Math.min(600_000, Math.max(15_000, params.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS));
+			const roleDefaultIdle = ROLE_DEFAULT_IDLE_TIMEOUT_MS[role] ?? DEFAULT_IDLE_TIMEOUT_MS;
+			const idleTimeoutMs = Math.min(600_000, Math.max(15_000, params.idleTimeoutMs ?? roleDefaultIdle));
+			const toolIdleTimeoutMs = Math.max(idleTimeoutMs, TOOL_EXEC_IDLE_TIMEOUT_MS);
 			const maxRepeatErrors = Math.min(10, Math.max(2, params.maxRepeatToolErrors ?? DEFAULT_MAX_REPEAT_ERRORS));
 
 			// 按角色硬收敛最小权限 --tools（防止 verifier/reviewer 拿到 edit 改脏源码）
@@ -801,18 +820,23 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			};
 
 			let latestAssistantText = "";
+			let streamingAssistantText = "";
 			let stderrText = "";
 			let timedOut = false;
 			let idleTimedOut = false;
+			let idleReasonDetail = "";
 			let stagnancyTripped = false;
 			let stagnancyDetail = "";
 			let aborted = false;
 
-			// StagnancyTracker 状态
+			// StagnancyTracker 与实时心跳状态
 			let lastToolSig = "";
 			let repeatSigCount = 0;
 			let consecutiveToolErrors = 0;
 			let lastToolLabel = "init";
+			let inFlightTool: string | null = null;
+			let inFlightToolStartedAt = 0;
+			let thinkingStreamStartedAt = 0;
 
 			const recordAction = (label: string) => {
 				lastToolLabel = label;
@@ -823,8 +847,13 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			const emitProgress = () => {
 				const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
 				const modelLabel = details.model || params.model || "default";
-				const header = `[zee_subagent:${role}] model=${modelLabel} | ${elapsedSec}s | turns=${details.usage.turns} | last=${lastToolLabel}`;
-				const body = latestAssistantText ? `\n${truncateSubagentOutput(latestAssistantText.slice(0, 600))}` : "";
+				const inFlightPart = inFlightTool
+					? ` | inFlight=${inFlightTool}(${Math.round((Date.now() - inFlightToolStartedAt) / 1000)}s)`
+					: "";
+				const streamPart = streamingAssistantText.length > 0 ? ` | streamChars=${streamingAssistantText.length}` : "";
+				const header = `[zee_subagent:${role}] model=${modelLabel} | ${elapsedSec}s | turns=${details.usage.turns} | last=${lastToolLabel}${inFlightPart}${streamPart}`;
+				const previewSource = latestAssistantText || streamingAssistantText;
+				const body = previewSource ? `\n${truncateSubagentOutput(previewSource.slice(0, 600))}` : "";
 				onUpdate?.({
 					content: [{ type: "text", text: `${header}${body}` }],
 					details: { ...details, lastActions: [...details.lastActions], usage: { ...details.usage } },
@@ -850,14 +879,21 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				let killTimer: ReturnType<typeof setTimeout> | undefined;
 				let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 				let idleTimer: ReturnType<typeof setTimeout> | undefined;
+				let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 				let proc: ReturnType<typeof spawn>;
 
-				const resetIdleTimer = () => {
+				const resetIdleTimer = (customWindowMs?: number, reasonHint?: string) => {
 					if (idleTimer) clearTimeout(idleTimer);
+					const windowMs = customWindowMs ?? (inFlightTool ? toolIdleTimeoutMs : idleTimeoutMs);
 					idleTimer = setTimeout(() => {
 						idleTimedOut = true;
+						idleReasonDetail =
+							reasonHint ||
+							(inFlightTool
+								? `工具 ${inFlightTool} 执行超过 ${Math.round(windowMs / 1000)}s 无新事件`
+								: `空闲看门狗超时（>${Math.round(windowMs / 1000)}s 无新事件）`);
 						terminateChild();
-					}, idleTimeoutMs);
+					}, windowMs);
 				};
 
 				const finish = (result: {
@@ -871,6 +907,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					if (killTimer) clearTimeout(killTimer);
 					if (timeoutTimer) clearTimeout(timeoutTimer);
 					if (idleTimer) clearTimeout(idleTimer);
+					if (heartbeatTimer) clearInterval(heartbeatTimer);
 					if (signal) signal.removeEventListener("abort", onAbort);
 					resolve(result);
 				};
@@ -899,14 +936,17 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					} catch {
 						return;
 					}
-					resetIdleTimer();
 
-					// 追踪工具执行事件以驱动实时进度与 StagnancyTracker
+					// 追踪工具执行事件以驱动实时进度、双态看门狗与 StagnancyTracker
 					if (evt.type === "tool_execution_start") {
+						thinkingStreamStartedAt = 0;
 						const tName = String(evt.toolName ?? "tool");
 						const rawArgs = evt.args !== undefined ? JSON.stringify(evt.args) : "";
 						const shortArg = rawArgs.length > 80 ? `${rawArgs.slice(0, 77)}...` : rawArgs;
+						inFlightTool = tName;
+						inFlightToolStartedAt = Date.now();
 						recordAction(`${tName}(${shortArg})`);
+						resetIdleTimer(toolIdleTimeoutMs);
 
 						const sig = `${tName}:${crypto.createHash("sha1").update(rawArgs).digest("hex").slice(0, 12)}`;
 						if (sig === lastToolSig) {
@@ -928,6 +968,10 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					if (evt.type === "tool_execution_end") {
 						const tName = String(evt.toolName ?? "tool");
 						const isErr = Boolean(evt.isError);
+						inFlightTool = null;
+						inFlightToolStartedAt = 0;
+						resetIdleTimer(idleTimeoutMs);
+
 						if (isErr) {
 							consecutiveToolErrors += 1;
 							recordAction(`${tName}:ERROR#${consecutiveToolErrors}`);
@@ -943,7 +987,50 @@ export default function zeeExtension(pi: ExtensionAPI) {
 						return;
 					}
 
-					if (evt.type !== "message_end") return;
+					if (evt.type === "message_start") {
+						const m = evt.message as { role?: string } | undefined;
+						if (m?.role === "assistant") {
+							streamingAssistantText = "";
+							thinkingStreamStartedAt = 0;
+						}
+						resetIdleTimer(idleTimeoutMs);
+						return;
+					}
+
+					// 监听 message_update 实时抢救流式正文，并对纯 thinking_delta 设独立上限防止看门狗被无限续命
+					if (evt.type === "message_update") {
+						const ame = evt.assistantMessageEvent as
+							| { type?: string; delta?: string; content?: string }
+							| undefined;
+						if (ame?.type === "text_delta" && typeof ame.delta === "string") {
+							thinkingStreamStartedAt = 0;
+							streamingAssistantText += ame.delta;
+							resetIdleTimer(idleTimeoutMs);
+						} else if (ame?.type === "text_end" && typeof ame.content === "string" && ame.content.trim()) {
+							thinkingStreamStartedAt = 0;
+							streamingAssistantText = ame.content;
+							resetIdleTimer(idleTimeoutMs);
+						} else if (ame?.type === "thinking_delta" || ame?.type === "reasoning_delta") {
+							if (!thinkingStreamStartedAt) thinkingStreamStartedAt = Date.now();
+							const thinkingElapsed = Date.now() - thinkingStreamStartedAt;
+							if (thinkingElapsed >= THINKING_STREAM_TIMEOUT_MS) {
+								idleTimedOut = true;
+								idleReasonDetail = `连续纯思考超过 ${Math.round(THINKING_STREAM_TIMEOUT_MS / 1000)}s 未产出正文或工具调用`;
+								terminateChild();
+							} else {
+								resetIdleTimer(Math.min(idleTimeoutMs, THINKING_STREAM_TIMEOUT_MS - thinkingElapsed));
+							}
+						} else {
+							resetIdleTimer();
+						}
+						return;
+					}
+
+					if (evt.type !== "message_end") {
+						resetIdleTimer();
+						return;
+					}
+					resetIdleTimer(idleTimeoutMs);
 					const msg = evt.message as {
 						role?: string;
 						content?: unknown;
@@ -961,6 +1048,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					};
 					if (msg?.role !== "assistant") return;
 
+					thinkingStreamStartedAt = 0;
 					details.usage.turns += 1;
 					if (msg.usage) {
 						details.usage.input += msg.usage.input ?? 0;
@@ -976,6 +1064,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 					const text = extractMessageText(msg.content).trim();
 					if (text) latestAssistantText = text;
+					streamingAssistantText = "";
 					emitProgress();
 				};
 
@@ -1008,7 +1097,10 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					timedOut = true;
 					terminateChild();
 				}, timeoutMs);
-				resetIdleTimer();
+				resetIdleTimer(idleTimeoutMs);
+				heartbeatTimer = setInterval(() => {
+					if (!settled) emitProgress();
+				}, HEARTBEAT_INTERVAL_MS);
 
 				proc.stdout?.on("data", (chunk) => {
 					buffer += chunk.toString();
@@ -1107,7 +1199,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					details.status = "idle_timeout";
 					details.stopReason = "idle_timeout";
 					tag = "IDLE_TIMEOUT_PARTIAL";
-					reasonLine = `空闲看门狗超时（>${Math.round(idleTimeoutMs / 1000)}s 无新事件）`;
+					reasonLine = idleReasonDetail || `空闲看门狗超时（>${Math.round(idleTimeoutMs / 1000)}s 无新事件）`;
 				} else if (timedOut) {
 					details.status = "timeout";
 					details.stopReason = "timeout";
@@ -1118,13 +1210,18 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					details.stopReason = "aborted";
 				}
 
+				const rescuedText = (latestAssistantText || streamingAssistantText).trim();
+				const rescuedLabel = !latestAssistantText && streamingAssistantText.trim()
+					? "[已抢救的部分输出（流式未结正文）]"
+					: "[已抢救的部分输出]";
+
 				const partialParts = [
 					`[STATUS: ${tag}] ${reasonLine}`,
 					`[进度快照] elapsed=${elapsedSec}s | turns=${details.usage.turns} | cost=$${details.usage.cost.toFixed(4)} | ${gitSummary}`,
 					details.lastActions.length > 0 ? `[最近动作] ${details.lastActions.join(" -> ")}` : "",
 					violationBanner.trim(),
-					latestAssistantText
-						? `[已抢救的部分输出]\n${truncateSubagentOutput(latestAssistantText)}`
+					rescuedText
+						? `${rescuedLabel}\n${truncateSubagentOutput(rescuedText)}`
 						: "[已抢救的部分输出] （中止前尚无最终文本输出）",
 					stderrText.trim() ? `[stderr 摘要]\n${stderrText.trim().slice(0, 400)}` : "",
 				].filter(Boolean);
@@ -1149,7 +1246,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			}
 
 			details.status = "completed";
-			const body = truncateSubagentOutput(latestAssistantText || "(子代理未返回文本输出)");
+			const body = truncateSubagentOutput(latestAssistantText || streamingAssistantText.trim() || "(子代理未返回文本输出)");
 			const finalMeta = metaLine.replace("status=running", "status=completed");
 			return {
 				content: [{ type: "text", text: `${violationBanner}${body}${finalMeta}` }],

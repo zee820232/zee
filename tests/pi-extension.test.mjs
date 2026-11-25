@@ -38,3 +38,27 @@ test("pi-extension/index.ts 接入共享 guard-core、跨回合持久化 gate �
   assert.match(src, /Ignore repo-irrelevant global `~\/CLAUDE\.md`/);
   assert.match(src, /CHANGELOG\.md/);
 });
+
+test("v4.0.1 回归：pi-extension 支持 message_update 流式正文抢救、15s 心跳、双态看门狗与 provider 前缀自愈", () => {
+  const src = fs.readFileSync(PI_EXT_PATH, "utf8");
+
+  // 1. 流式正文实时累加与抢救回退
+  assert.match(src, /evt\.type === "message_update"/);
+  assert.match(src, /streamingAssistantText \+= ame\.delta/);
+  assert.match(src, /latestAssistantText \|\| streamingAssistantText/);
+
+  // 2. 15s 节流心跳与 inFlightTool 追踪
+  assert.match(src, /HEARTBEAT_INTERVAL_MS = 15_000/);
+  assert.match(src, /inFlightTool/);
+  assert.match(src, /clearInterval\(heartbeatTimer\)/);
+
+  // 3. 双态看门狗（reviewer 180s / 工具执行 180s / 纯思考 240s 上限）
+  assert.match(src, /ROLE_DEFAULT_IDLE_TIMEOUT_MS[\s\S]*reviewer:\s*180_000/);
+  assert.match(src, /TOOL_EXEC_IDLE_TIMEOUT_MS = 180_000/);
+  assert.match(src, /THINKING_STREAM_TIMEOUT_MS = 240_000/);
+
+  // 4. 修正 provider 参数说明并内置 vm/devin/codex 前缀误传拦截
+  assert.equal(/如 vm \/ codex \/ devin/.test(src), false, "provider 说明不得再误列 vm/codex/devin 示例");
+  assert.match(src, /bindings\.pi\.\*\.providerInstanceId/);
+  assert.match(src, /\/\^\(vm\|devin\|codex\)\$\/i/);
+});

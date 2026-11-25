@@ -93,6 +93,65 @@ test("checkBashUnderGate 放行允许目录的 mkdir/cp 与 zee-tool.mjs，拦�
   assert.ok(checkBashUnderGate("echo hack > src/app.ts", repo, "plan"));
 });
 
+test("v4.0.1 回归 #1：词法化 Git 校验放行 git merge-base，但仍拦截 git merge", () => {
+  const repo = "/tmp/demo-repo";
+  assert.equal(checkBashUnderGate("git merge-base main zee/fire-flower/impl", repo, "review"), null);
+  assert.equal(checkBashUnderGate("git -C /tmp/demo-repo merge-base HEAD main", repo, "plan"), null);
+  assert.equal(checkBashUnderGate("git stash list && git branch -vv", repo, "review"), null);
+
+  assert.ok(checkBashUnderGate("git merge zee/fire-flower/impl", repo, "review"));
+  assert.ok(checkBashUnderGate("git branch -D old-branch", repo, "review"));
+  assert.ok(checkBashUnderGate("git stash pop", repo, "plan"));
+});
+
+test("v4.0.1 回归 #2：静态变量 $Z 展开 + 词法动词识别放行 update-state --predicate 'npm ci && ...'，仍拦真实 npm ci", () => {
+  const repo = "/tmp/demo-repo";
+  const busDir = path.join(RUNS_ROOT, "demo-1234", "mario");
+  const cmd = `Z=/Users/zee/.pi/agent/git/github.com/zee820232/zee/skills/zee/scripts/zee-tool.mjs; B=${busDir}; node "$Z" update-state "$B" --predicate "npm ci && npm test && npm run build"`;
+  assert.equal(checkBashUnderGate(cmd, repo, "init-design"), null);
+  assert.equal(checkBashUnderGate(cmd, repo, "plan"), null);
+
+  // 真实的 npm ci / pnpm install 仍必须拦截
+  assert.ok(checkBashUnderGate("npm ci && npm test", repo, "init-design"));
+  assert.ok(checkBashUnderGate("pnpm --filter web install", repo, "plan"));
+});
+
+test("v4.0.1 回归 #3：Heredoc 正文剥离放行 Python 内嵌反引号/泛型尖括号，但仍拦重定向写源码", () => {
+  const repo = "/tmp/demo-repo";
+  const pyHeredoc = `python3 -I - <<'EOF'
+text = "Record<GameEvent['t'], () => void> -> \`code\`"
+print(len(text))
+EOF`;
+  assert.equal(checkBashUnderGate(pyHeredoc, repo, "plan"), null);
+
+  // 但 Heredoc 头本身带非法输出重定向时仍必须硬拦截
+  const evilHeredoc = `cat <<'EOF' > src/app.ts
+export const hacked = true;
+EOF`;
+  assert.ok(checkBashUnderGate(evilHeredoc, repo, "plan"));
+});
+
+test("v4.0.1 回归 #4：同命令静态变量 $B 展开精准放行总线重定向，但仍拦非法目标", () => {
+  const repo = "/tmp/demo-repo";
+  const busDir = path.join(RUNS_ROOT, "demo-1234", "mario");
+  assert.equal(checkBashUnderGate(`B=${busDir}; cat > $B/context.md`, repo, "init-design"), null);
+  assert.equal(checkBashUnderGate(`B=${busDir}; echo "hi" >> "\${B}/context.md"`, repo, "plan"), null);
+
+  // 静态变量指向业务目录时必须硬拦截
+  assert.ok(checkBashUnderGate(`B=${repo}/src; cat > $B/evil.ts`, repo, "init-design"));
+  assert.ok(checkBashUnderGate(`B=/tmp/outside; echo hack > $B/evil.ts`, repo, "plan"));
+});
+
+test("v4.0.1 回归 #5：追踪同命令 cd $B 目录切换放行总线内 cp，但仍拦业务目录内 cp", () => {
+  const repo = "/tmp/demo-repo";
+  const busDir = path.join(RUNS_ROOT, "demo-1234", "fire-flower");
+  assert.equal(checkBashUnderGate(`B=${busDir}; cd $B && cp plan.md artifacts-raw.md`, repo, "plan"), null);
+  assert.equal(checkBashUnderGate(`cd .scratch && mkdir -p sub && cp ../docs/plans/a.md sub/a.md`, repo, "plan"), null);
+
+  // 切入 src 后执行 cp 必须硬拦截
+  assert.ok(checkBashUnderGate(`cd src && cp a.ts b.ts`, repo, "plan"));
+});
+
 test("extractModelFamily 与 enforcePiRoleTools 保持最小权限与家族精准识别", () => {
   assert.equal(extractModelFamily("vm/claude-sonnet-5-5"), "claude");
   assert.equal(extractModelFamily("codex/gpt-6.1-sol"), "openai");

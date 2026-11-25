@@ -15,9 +15,9 @@ Configure `~/.agents/zee-config.json` (canonical role-model intent + runtime bin
 
 ## Step 1: Active-Harness Doctor & Live Model Probe
 
-1. Locate `<zeeDir>` (the sibling `zee` directory beside this `zee-setup/SKILL.md`). Run the one-stop single-harness diagnostic first:
+1. Resolve `<skillDir>` (the directory containing this `zee-setup/SKILL.md`). The helper script ALWAYS lives at sibling `../zee/scripts/zee-tool.mjs` (never at repo root `scripts/zee-tool.mjs`). Run the one-stop single-harness diagnostic directly:
    ```bash
-   node "<zeeDir>/scripts/zee-tool.mjs" doctor
+   node "<skillDir>/../zee/scripts/zee-tool.mjs" doctor
    ```
    *(Automatically checks config validity, Pi `enabledModels` `CONFIG_DRIFT` masking, active-harness rule/double-install conflicts, bus writability, and — on Antigravity — live synthetic Hook probe against `scripts/agy-guard.mjs`.)*
 2. Detect live available models in the active harness:

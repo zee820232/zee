@@ -478,6 +478,191 @@ export function checkProjectDenyCommands(command, cwd) {
   return null;
 }
 
+/**
+ * 剥离 Shell 命令中的 Heredoc 正文（保留命令行头，防止 Python/Markdown 正文触发误拦）
+ */
+export function stripHeredocBodies(command) {
+  const lines = String(command || "").split(/\r?\n/);
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    out.push(line);
+
+    // 仅在未加引号区域内查找 << 或 <<- 引导的 heredoc 分隔符
+    let quote = null;
+    let escaping = false;
+    const delims = [];
+    for (let j = 0; j < line.length; j++) {
+      const ch = line[j];
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+      if (quote === "'") {
+        if (ch === "'") quote = null;
+        continue;
+      }
+      if (quote === '"') {
+        if (ch === "\\") escaping = true;
+        else if (ch === '"') quote = null;
+        continue;
+      }
+      if (ch === "\\") {
+        escaping = true;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch === "<" && line[j + 1] === "<" && line[j + 2] !== "<") {
+        let k = j + 2;
+        const stripTabs = line[k] === "-";
+        if (stripTabs) k += 1;
+        while (k < line.length && (line[k] === " " || line[k] === "\t")) k += 1;
+        const rest = line.slice(k);
+        const m = rest.match(/^(?:'([^']+)'|"([^"]+)"|\\([A-Za-z0-9_.-]+)|([A-Za-z0-9_.-]+))/);
+        if (m) {
+          const delim = m[1] || m[2] || m[3] || m[4];
+          delims.push({ delim, stripTabs });
+          j = k + m[0].length - 1;
+        }
+      }
+    }
+
+    i += 1;
+    for (const { delim, stripTabs } of delims) {
+      while (i < lines.length) {
+        const candidate = stripTabs ? lines[i].replace(/^\t+/, "") : lines[i];
+        i += 1;
+        if (candidate === delim) break;
+      }
+    }
+  }
+
+  return out.join("\n");
+}
+
+/**
+ * 词法提取单段命令中的未加引号输出重定向目标（忽略引号内 > / 2>&1 / <<）
+ */
+function extractOutputRedirects(seg) {
+  const targets = [];
+  let quote = null;
+  let escaping = false;
+
+  for (let i = 0; i < seg.length; i++) {
+    const ch = seg[i];
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\") escaping = true;
+      else if (ch === '"') quote = null;
+      continue;
+    }
+    if (ch === "\\") {
+      escaping = true;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === ">") {
+      // 跳过 >&2 / &> 中的 &<fd>
+      let k = i + 1;
+      if (seg[k] === ">") k += 1;
+      if (seg[k] === "&") {
+        // 如 >&2 或 >&- 则非文件重定向；若 &后跟非数字（极少）忽略
+        if (seg[k + 1] && /[0-9-]/.test(seg[k + 1])) {
+          i = k + 1;
+          continue;
+        }
+      }
+      while (k < seg.length && /\s/.test(seg[k])) k += 1;
+      if (k >= seg.length) break;
+
+      // 读取紧随其后的单个路径 token（支持带引号）
+      let target = "";
+      let tq = null;
+      let tEsc = false;
+      while (k < seg.length) {
+        const c = seg[k];
+        if (tEsc) {
+          target += c;
+          tEsc = false;
+          k += 1;
+          continue;
+        }
+        if (tq === "'") {
+          if (c === "'") tq = null;
+          else target += c;
+          k += 1;
+          continue;
+        }
+        if (tq === '"') {
+          if (c === "\\") tEsc = true;
+          else if (c === '"') tq = null;
+          else target += c;
+          k += 1;
+          continue;
+        }
+        if (c === "\\") {
+          tEsc = true;
+          k += 1;
+          continue;
+        }
+        if (c === "'" || c === '"') {
+          tq = c;
+          k += 1;
+          continue;
+        }
+        if (/[\s;|&<>]/.test(c)) break;
+        target += c;
+        k += 1;
+      }
+      if (target) targets.push(target);
+      i = k - 1;
+    }
+  }
+  return targets;
+}
+
+function expandStaticVars(str, staticVars) {
+  if (!str || typeof str !== "string") return "";
+  return str.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (full, braced, bare) => {
+    const key = braced || bare;
+    if (key === "HOME") return os.homedir();
+    if (staticVars.has(key)) return staticVars.get(key);
+    return full;
+  });
+}
+
+function recordLeadingStaticVars(rawTokens, staticVars) {
+  let idx = 0;
+  while (idx < rawTokens.length) {
+    const m = rawTokens[idx].match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!m) break;
+    const [, name, val] = m;
+    // 仅记录不含命令替换的纯字面量赋值
+    if (!val.includes("$(") && !val.includes("`")) {
+      const expanded = expandStaticVars(val, staticVars);
+      if (!/\$[A-Za-z_{]/.test(expanded)) {
+        staticVars.set(name, expanded);
+      }
+    }
+    idx += 1;
+  }
+}
+
 function isSafeZeeToolInvocation(tokens) {
   if (tokens.length < 2) return false;
   const prog = path.basename(tokens[0]);
@@ -499,8 +684,7 @@ function isSafeZeeToolInvocation(tokens) {
   ]).has(sub);
 }
 
-function checkAllowlistedFileOp(verb, tokens, cwd, gateMode, extraAllowedDirs) {
-  // 去掉选项参数提取位置参数
+function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, extraAllowedDirs) {
   const args = [];
   let endOfOpts = false;
   for (let i = 1; i < tokens.length; i++) {
@@ -514,13 +698,18 @@ function checkAllowlistedFileOp(verb, tokens, cwd, gateMode, extraAllowedDirs) {
   }
   if (args.length === 0) return false;
 
+  const isAllowed = (rawTarget) => {
+    const resolved = normalizeToolPath(rawTarget, virtualCwd);
+    return isWriteAllowedUnderGate(resolved, repoCwd, gateMode, extraAllowedDirs);
+  };
+
   if (verb === "mkdir" || verb === "touch" || verb === "tee") {
-    return args.every((t) => isWriteAllowedUnderGate(t, cwd, gateMode, extraAllowedDirs));
+    return args.every(isAllowed);
   }
   if (verb === "cp") {
     if (args.length < 2) return false;
     const dst = args[args.length - 1];
-    return isWriteAllowedUnderGate(dst, cwd, gateMode, extraAllowedDirs);
+    return isAllowed(dst);
   }
   return false;
 }
@@ -531,34 +720,137 @@ const GATE_LABELS = {
   "init-design": "0→1 设计冻结保护",
 };
 
-const ALWAYS_BLOCKED_IN_GATE = [
-  {
-    pattern:
-      /\bgit\s+(?:-[Cc]\s+\S+\s+)*(add|commit|push|merge|rebase|cherry-pick|reset|checkout|switch|restore|clean|am|apply|stash\s+(push|pop|drop|apply)|branch\s+-[dDmM])\b/,
-    label: "修改 Git 工作区或提交历史的命令",
-  },
-  {
-    pattern: /\bsed\s+-[^\s]*i|\bperl\s+-[^\s]*i/,
-    label: "原地修改文件命令 (sed -i / perl -i)",
-  },
-  {
-    pattern: /\b(npm|pnpm|yarn|bun)\s+(install|i|add|remove|rm|uninstall|update|up|ci|publish)\b/,
-    label: "包管理变更命令",
-  },
-  {
-    pattern: /\b(pip|pip3|uv|poetry|cargo|brew)\s+(install|add|remove|uninstall|upgrade)\b|\bgo\s+(get|mod\s+tidy)\b/,
-    label: "依赖安装或修改命令",
-  },
-];
+const BLOCKED_GIT_SUBCMDS = new Set([
+  "add",
+  "commit",
+  "push",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "reset",
+  "checkout",
+  "switch",
+  "restore",
+  "clean",
+  "am",
+  "apply",
+]);
+
+const BLOCKED_JS_PKG_VERBS = new Set(["npm", "pnpm", "yarn", "bun"]);
+const BLOCKED_JS_PKG_SUBCMDS = new Set([
+  "install",
+  "i",
+  "add",
+  "remove",
+  "rm",
+  "uninstall",
+  "update",
+  "up",
+  "ci",
+  "publish",
+]);
+
+const BLOCKED_OTHER_PKG_VERBS = new Set(["pip", "pip3", "uv", "poetry", "cargo", "brew"]);
+const BLOCKED_OTHER_PKG_SUBCMDS = new Set(["install", "add", "remove", "uninstall", "upgrade"]);
 
 const MUTATING_FILE_VERBS = new Set(["rm", "mv", "chmod", "chown", "truncate", "dd", "mkfs", "patch"]);
 const ALLOWLISTABLE_FILE_VERBS = new Set(["mkdir", "cp", "touch", "tee"]);
 
 /**
+ * 基于词法 token 精确识别变更类命令（彻底消除 git merge-base 与引号内参数误拦）
+ */
+function checkBlockedMutatingVerb(verb, tokens) {
+  if (verb === "git") {
+    let subIdx = 1;
+    while (subIdx < tokens.length && tokens[subIdx].startsWith("-")) {
+      const opt = tokens[subIdx];
+      if (["-C", "-c", "--git-dir", "--work-tree", "--namespace"].includes(opt) && subIdx + 1 < tokens.length) {
+        subIdx += 2;
+      } else {
+        subIdx += 1;
+      }
+    }
+    const sub = tokens[subIdx] || "";
+    if (BLOCKED_GIT_SUBCMDS.has(sub)) {
+      return "修改 Git 工作区或提交历史的命令";
+    }
+    if (sub === "stash") {
+      const next = tokens[subIdx + 1] || "push";
+      if (["push", "pop", "drop", "apply", "clear", "save"].includes(next)) {
+        return "修改 Git 工作区或提交历史的命令";
+      }
+    }
+    if (sub === "branch") {
+      const rest = tokens.slice(subIdx + 1);
+      if (
+        rest.some(
+          (a) =>
+            a === "--delete" ||
+            a === "--move" ||
+            a === "--copy" ||
+            (/^-[a-zA-Z]*[dDmM]/.test(a) && !a.startsWith("--")),
+        )
+      ) {
+        return "修改 Git 工作区或提交历史的命令";
+      }
+    }
+    return null;
+  }
+
+  if (verb === "sed" || verb === "perl") {
+    for (let i = 1; i < tokens.length; i++) {
+      const arg = tokens[i];
+      if (arg === "--") break;
+      if (arg === "--in-place" || arg.startsWith("--in-place=") || arg === "-i" || /^-[a-zA-Z]*i/.test(arg)) {
+        return "原地修改文件命令 (sed -i / perl -i)";
+      }
+    }
+    return null;
+  }
+
+  if (BLOCKED_JS_PKG_VERBS.has(verb)) {
+    const valueOpts = new Set(["-F", "--filter", "--prefix", "-C", "--cwd", "--dir", "--workspace", "-w", "--config"]);
+    let idx = 1;
+    while (idx < tokens.length && tokens[idx].startsWith("-")) {
+      const opt = tokens[idx];
+      idx += valueOpts.has(opt) && idx + 1 < tokens.length ? 2 : 1;
+    }
+    const sub = tokens[idx] || "";
+    if (BLOCKED_JS_PKG_SUBCMDS.has(sub)) {
+      return "包管理变更命令";
+    }
+    return null;
+  }
+
+  if (BLOCKED_OTHER_PKG_VERBS.has(verb)) {
+    const valueOpts = new Set(["-C", "--directory", "--project", "--manifest-path"]);
+    let idx = 1;
+    while (idx < tokens.length && tokens[idx].startsWith("-")) {
+      const opt = tokens[idx];
+      idx += valueOpts.has(opt) && idx + 1 < tokens.length ? 2 : 1;
+    }
+    const sub = tokens[idx] || "";
+    if (BLOCKED_OTHER_PKG_SUBCMDS.has(sub)) {
+      return "依赖安装或修改命令";
+    }
+    return null;
+  }
+
+  if (verb === "go") {
+    const sub = tokens[1] || "";
+    if (sub === "get" || (sub === "mod" && tokens[2] === "tidy")) {
+      return "依赖安装或修改命令";
+    }
+  }
+
+  return null;
+}
+
+/**
  * 在 plan / review / init-design 保护锁下校验 Shell 命令：
- * - 递归拆解 sh/bash/zsh -c 与 eval
- * - 精准放行 zee-tool.mjs 与目标位于允许目录的 mkdir/cp/touch/tee
- * - 拦截其他任何修改业务代码、Git 状态、依赖或非白名单重定向的命令
+ * - 先剥离 Heredoc 正文，再递归拆解 sh/bash/zsh -c 与 eval
+ * - 追踪同命令静态变量赋值（$B/$Z）与 cd 虚拟目录切换
+ * - 词法级校验重定向、zee-tool.mjs、白名单 mkdir/cp/touch/tee 及变更类命令动词
  */
 export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []) {
   const trimmed = String(command || "").trim();
@@ -566,30 +858,47 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
 
   const effectiveCwd = cwd || process.cwd();
   const modeLabel = GATE_LABELS[gateMode] || gateMode;
-  const allCmds = getAllNestedCommands(trimmed, 5);
+  const cleanedCommand = stripHeredocBodies(trimmed);
+  const allCmds = getAllNestedCommands(cleanedCommand, 5);
 
   for (const cmd of allCmds) {
+    const staticVars = new Map();
+    let virtualCwd = effectiveCwd;
+
     for (const seg of splitShellSegments(cmd)) {
-      const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
-      if (tokens.length === 0) continue;
+      const rawTokens = tokenizeShell(seg);
+      if (rawTokens.length === 0) continue;
 
-      // 放行合法 zee-tool.mjs 总线/校验命令（仅限不含非法重定向）
-      const verb = path.basename(tokens[0]);
+      recordLeadingStaticVars(rawTokens, staticVars);
 
-      // 检测输出重定向（放行 /dev/null、>&2、以及写入允许目录）
-      const redirectRegex = /(?:^|[^0-9&>])>>?\s*(?!&\d)(\S+)/g;
-      for (const match of seg.matchAll(redirectRegex)) {
-        const rawTarget = match[1].replace(/^['"]|['"]$/g, "");
-        if (rawTarget === "/dev/null") continue;
-        if (!isWriteAllowedUnderGate(rawTarget, effectiveCwd, gateMode, extraAllowedDirs)) {
-          return `当前处于 zee ${modeLabel}模式，已拦截向 "${rawTarget}" 的 Shell 重定向写入。`;
+      // 词法提取未加引号的输出重定向（展开静态变量，相对 virtualCwd 解析并锚定 repo effectiveCwd 白名单）
+      for (const rawTarget of extractOutputRedirects(seg)) {
+        const expandedTarget = expandStaticVars(rawTarget, staticVars);
+        if (expandedTarget === "/dev/null") continue;
+        const resolvedTarget = normalizeToolPath(expandedTarget, virtualCwd);
+        if (!isWriteAllowedUnderGate(resolvedTarget, effectiveCwd, gateMode, extraAllowedDirs)) {
+          return `当前处于 zee ${modeLabel}模式，已拦截向 "${expandedTarget}" 的 Shell 重定向写入。`;
         }
       }
 
-      if (isSafeZeeToolInvocation(tokens)) continue;
+      const stripped = stripLeadingEnvAssignments(rawTokens).map((t) => expandStaticVars(t, staticVars));
+      if (stripped.length === 0) continue;
+
+      const verb = path.basename(stripped[0]);
+
+      // 追踪同命令内的 cd <dir>（仅影响后续片段的虚拟工作目录）
+      if (verb === "cd") {
+        const dirArg = stripped[1] && !stripped[1].startsWith("-") ? stripped[1] : os.homedir();
+        if (dirArg !== "-") {
+          virtualCwd = normalizeToolPath(dirArg, virtualCwd);
+        }
+        continue;
+      }
+
+      if (isSafeZeeToolInvocation(stripped)) continue;
 
       if (ALLOWLISTABLE_FILE_VERBS.has(verb)) {
-        if (!checkAllowlistedFileOp(verb, tokens, effectiveCwd, gateMode, extraAllowedDirs)) {
+        if (!checkAllowlistedFileOp(verb, stripped, effectiveCwd, virtualCwd, gateMode, extraAllowedDirs)) {
           return `当前处于 zee ${modeLabel}模式，已拦截目标不在允许目录内的 ${verb} 命令。`;
         }
         continue;
@@ -599,10 +908,9 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
         return `当前处于 zee ${modeLabel}模式，已拦截文件增删改命令 (${verb})。`;
       }
 
-      for (const { pattern, label } of ALWAYS_BLOCKED_IN_GATE) {
-        if (pattern.test(seg)) {
-          return `当前处于 zee ${modeLabel}模式，已拦截${label}。`;
-        }
+      const blockedLabel = checkBlockedMutatingVerb(verb, stripped);
+      if (blockedLabel) {
+        return `当前处于 zee ${modeLabel}模式，已拦截${blockedLabel}。`;
       }
     }
   }

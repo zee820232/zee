@@ -17,7 +17,7 @@ Audit a specific **Pinned SHA** from a fresh context using a **different underly
 - **Lint & Type Suppression Audit**: flag any newly added `@ts-ignore`, `@ts-expect-error`, `as any`, `eslint-disable`, `# noqa`, `#[allow(...)]`, or `//nolint` lacking a concrete, unavoidable justification.
 
 ### Axis 3 · Adversarial Break & 5-Level Blast-Radius Certainty (Evidence = Actual Executed Command + Real Output)
-- Actively try to break the change with edge inputs, race conditions, malformed data, or boundary tests inside a `/tmp` scratch copy (`TMP=$(mktemp -d /tmp/zee-rev-XXXXXX) && git archive <PINNED_SHA> | tar -x -C "$TMP"`).
+- Actively try to break the change with edge inputs, race conditions, malformed data, or boundary tests inside a `/tmp` scratch copy that always self-cleans on exit (`TMP=$(mktemp -d /tmp/zee-rev-XXXXXX) && trap 'rm -rf "$TMP"' EXIT && git archive <PINNED_SHA> | tar -x -C "$TMP"`).
 - For high-risk changes (`riskPaths` or L3), identify **the single load-bearing safety fact** this change relies on and classify your verification certainty explicitly on the **5-Level Blast-Radius Ladder**:
   - `L1 Guess` / `L2 Doc-only` (insufficient for high-risk -> flag or probe deeper)
   - `L3 Static/Code Trace` (traced all callers + non-grep wire/config readers)

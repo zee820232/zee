@@ -14,18 +14,19 @@ Orchestrator works directly with the user in Chinese (never delegate user interv
    - **MVP vs Out-of-Scope**: explicitly list tempting features cut from v1 so autonomous slices do not bloat.
    - **Stack, Data & Runtime Shape**: CLI / Web / API / Game / Bot, language/framework, persistence, auth/config model.
    - **Visual Tone** (if UI): product personality, density, dark/light support, reference direction.
-2. Write `<busDir>/SPEC.md` (and on AGY mirror `<artifactDir>/implementation_plan.md` with `RequestFeedback: true` when awaiting sign-off).
+2. Write `<busDir>/SPEC.md` (and on AGY mirror `<artifactDir>/implementation_plan.md` with `RequestFeedback: true` when awaiting sign-off), then record Stage 1 completion via `zee-tool.mjs update-state "<busDir>" --mode init --status stage1-spec` and `zee-tool.mjs log-decision`.
 3. **Default Product Sign-Off Gate**: pause once and present a concise Chinese summary of `SPEC.md` (核心流程 + 明确砍掉的 Out-of-Scope + 技术栈) for user approval before building. Skip this pause only if the user supplied a complete spec or explicitly granted full autonomy ("全权交给你").
 
 ## Stage 2 · Technical & Design Foundation (Mandatory Two-Beat Serialization)
 **Never run `Scout ∥ UI ∥ Architect` blindly in a single beat!** Architect MUST consume Scout's live-verified toolchain and acceptance APIs before freezing contracts:
 1. **Beat 1 (`Scout ∥ UI` in parallel)**:
-   - **`Scout` (0→1 Research & Live Probe Mode)**: inspect local runtimes, compilers, SDKs, package managers, and **live-verify every critical build/test/headless-screenshot/automation API** (running a tiny probe in `/tmp` if needed) so downstream slices never build against broken flags or stale library APIs.
+   - **`Scout` (0→1 Research & Live Probe Mode)**: inspect local runtimes, compilers, SDKs, package managers, and **live-verify every critical build/test/headless-screenshot/automation API** (running a self-cleaning `/tmp` probe with `trap 'rm -rf "$TMP"' EXIT` if needed) so downstream slices never build against broken flags or stale library APIs.
    - **`UI`** (if visual): produces `<busDir>/DESIGN.md` (Design Read 3 dials, palette/type/spacing tokens, component rules) and `<busDir>/ui-spec.md` (including visual rubric & exact screenshot states).
+   - After Beat 1 completes, record the checkpoint with `zee-tool.mjs update-state "<busDir>" --status stage2-beat1 --inc-delegates 2` and `zee-tool.mjs log-decision`.
 2. **Beat 2 (`Architect` — consumes Beat 1 outputs)**:
    - Consumes `<busDir>/context.md` (Scout's verified toolchain + APIs) and `<busDir>/DESIGN.md` / `ui-spec.md` to emit ONE clean, single-source `<busDir>/ARCHITECTURE.md`, `<busDir>/GLOSSARY.md`, and a **Vertical Milestone Roadmap** (`M0 -> M1 -> M2..Mk -> M_final`).
    - **Slice Hard Budget**: every slice MUST stay **≤5 files and ≤400 LOC** so `Coder` completes cleanly without hitting wall-clock timeouts.
-   - **No Dual-Truth Patching**: never append trailing `cat >>` amendments onto `ARCHITECTURE.md`; update the single canonical contract cleanly and validate with `zee-tool.mjs check-plan`.
+   - **No Dual-Truth Patching**: never append trailing `cat >>` amendments onto `ARCHITECTURE.md`; update the single canonical contract cleanly, validate with `zee-tool.mjs check-plan`, and immediately update the bus via `zee-tool.mjs update-state "<busDir>" --status stage2-planned --inc-delegates` + `log-decision`.
 
 ## Stage 3 · M0 Foundation Commit + M1 Walking Skeleton
 1. **M0 · Bootstrap Foundation** (single `Coder`, before any worktree fan-out):

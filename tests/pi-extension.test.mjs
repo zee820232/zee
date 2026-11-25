@@ -156,12 +156,16 @@ module.registerHooks({
 
 const {
   default: zeeExtension,
+  expandBundledZeeSkill,
   resolvePiProviderModel,
   resolveSafeWorktreeBranch,
   recordSubagentBudgetAndCutoff,
   getPiInvocation,
 } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "index.ts")).href);
 const { default: zeeWorkerGuard } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "worker-guard.ts")).href);
+const { getModelCooldown, recordModelCooldown } = await import(
+  pathToFileURL(path.join(REPO_ROOT, "skills", "zee", "scripts", "lib", "provider-health.mjs")).href
+);
 const { Key } = await import("@earendil-works/pi-tui");
 
 function createMockPi() {
@@ -812,5 +816,216 @@ process.exit(0);
     else process.env.FAKE_SCENARIO = prevScenario;
     fs.rmSync(tmpRepo, { recursive: true, force: true });
     fs.rmSync(metaDir, { recursive: true, force: true });
+  }
+});
+
+test("v4.2.1 回归：菜单去重展开 bundled skill、/zee-review --strict/--quick、429 熔断切备免扣预算、mode=off 全局规则隔离", async () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-pi-"));
+  const metaDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-meta-"));
+  const healthPath = path.join(metaDir, "provider-health.json");
+  const cfgPath = path.join(metaDir, "zee-config.json");
+  const busDir = path.join(metaDir, "bus");
+  const fakeBin = path.join(metaDir, "fake-pi-429.mjs");
+
+  const prevBin = process.env.ZEE_PI_BIN;
+  const prevHealth = process.env.ZEE_PROVIDER_HEALTH_PATH;
+  const prevCfg = process.env.ZEE_CONFIG_PATH;
+  let strictBusDirToClean = "";
+
+  try {
+    process.env.ZEE_PROVIDER_HEALTH_PATH = healthPath;
+    process.env.ZEE_CONFIG_PATH = cfgPath;
+
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "t@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(tmpRepo, "README.md"), "# repo\n");
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        version: 2,
+        budget: "balanced",
+        roles: {
+          scout: {
+            prefer: { family: "devin", modelHint: "devin/only-model", tier: "fast", effort: "low" },
+            bindings: { pi: { providerInstanceId: "magpie", model: "remote-magpie/devin/only-model" } },
+          },
+          reviewers: [
+            {
+              prefer: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "fast", effort: "medium" },
+              backup: { family: "openai", modelHint: "gpt-6.1-sol", tier: "pro", effort: "medium" },
+              bindings: {
+                pi: {
+                  prefer: { providerInstanceId: "magpie", model: "remote-magpie/devin/gemini-4-hydrogen" },
+                  backup: { providerInstanceId: "magpie", model: "remote-magpie/codex/gpt-6.1-sol" },
+                },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const mock = createMockPi();
+    zeeExtension(mock.pi);
+    const tuiCtx = mock.makeCtx(tmpRepo, true, "tui");
+    mock.emit("session_start", {}, tuiCtx);
+
+    // 1. 仅注册 11 个干净命令且短命令内置展开 <skill name="...">（不再发 /skill:zee*）
+    assert.equal(mock.commands.size, 11);
+    await mock.commands.get("zee-plan").handler("新增模块", tuiCtx);
+    const planSent = mock.messages.at(-1);
+    assert.match(planSent.msg, /^<skill name="zee-plan"/);
+    assert.equal(planSent.opts.expandPromptTemplates, false);
+    assert.ok(planSent.msg.includes("新增模块"));
+
+    // 2. /zee-mode off 时普通问答零注入；显式运行 /zee-retro 时仍注入全局模板隔离与中文Policy
+    await mock.commands.get("zee-mode").handler("off", tuiCtx);
+    // 解除 plan 锁回到 idle
+    mock.emit("before_agent_start", { messageType: "user", prompt: "/zee done", systemPromptOptions: { sections: {} } }, tuiCtx);
+
+    const casualEvt = { messageType: "user", prompt: "你好解释下闭包", systemPromptOptions: { sections: { zee: "stale" } } };
+    mock.emit("before_agent_start", casualEvt, tuiCtx);
+    assert.equal(casualEvt.systemPromptOptions.sections.zee, undefined);
+
+    const retroExpanded = expandBundledZeeSkill("zee-retro", "");
+    const retroEvt = { messageType: "user", prompt: retroExpanded, systemPromptOptions: { sections: {} } };
+    mock.emit("before_agent_start", retroEvt, tuiCtx);
+    assert.ok(retroEvt.systemPromptOptions.sections.zee.includes("Global Template Isolation"));
+    assert.ok(retroEvt.systemPromptOptions.sections.zee.includes("AGENTS.md"));
+
+    // 3. /zee-review --strict 自动预建独立总线；未派 Reviewer 结算时记录 G-02 告警；--quick 走轻量提示
+    await mock.commands.get("zee-review").handler("", tuiCtx);
+    const strictMsg = mock.messages.at(-1).msg;
+    assert.ok(strictMsg.includes("[ZEE_REVIEW_MODE: strict]"));
+    const busMatch = strictMsg.match(/\[MANDATORY_BUS_DIR:\s*([^\]]+)\]/);
+    assert.ok(busMatch, "strict review 必须机械创建并注入 MANDATORY_BUS_DIR");
+    strictBusDirToClean = busMatch[1].trim();
+    assert.equal(fs.existsSync(path.join(strictBusDirToClean, "state.json")), true);
+    assert.equal(fs.existsSync(path.join(strictBusDirToClean, "decisions.tsv")), true);
+
+    mock.emit("agent_settled", {}, tuiCtx);
+    const latestAfterStrictSkip = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data;
+    assert.equal(latestAfterStrictSkip.violations.at(-1).guard, "G-02");
+    assert.equal(latestAfterStrictSkip.violations.at(-1).severity, "warn");
+
+    await mock.commands.get("zee-review").handler("--quick", tuiCtx);
+    assert.ok(mock.messages.at(-1).msg.includes("[ZEE_REVIEW_MODE: quick]"));
+
+    // 4. zee_subagent 429 建连即败：免扣预算 + 写入冷却 + 二次呼叫 0ms 自动切备（遵守 authorFamily）
+    fs.writeFileSync(
+      fakeBin,
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const mIdx = args.indexOf("--model");
+const model = mIdx >= 0 ? args[mIdx + 1] : "";
+const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+if (model.includes("gemini-4-hydrogen")) {
+  emit({ type: "message_end", message: { role: "assistant", content: "", stopReason: "error", errorMessage: "HTTP 429 quota_exhausted" } });
+  process.exit(1);
+}
+emit({ type: "message_end", message: { role: "assistant", content: "VERDICT: PASS\\nHEALTHY_ALT", stopReason: "stop", usage: { input: 100, output: 20, cost: { total: 0.05 } } } });
+process.exit(0);
+`,
+      { mode: 0o755 },
+    );
+    process.env.ZEE_PI_BIN = fakeBin;
+
+    fs.mkdirSync(busDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({ slug: "cd-test", mode: "night", level: "L2", delegatesDispatched: 0, budget: { maxDelegates: 4, cutoffRatio: 0.7 } }),
+    );
+
+    const subTool = mock.tools.get("zee_subagent");
+    await assert.rejects(
+      () =>
+        subTool.execute(
+          "call-429-fail",
+          {
+            role: "reviewer",
+            provider: "magpie",
+            model: "remote-magpie/devin/gemini-4-hydrogen",
+            authorFamily: "claude",
+            busDir,
+            cwd: tmpRepo,
+            task: "[zee-worker] review",
+          },
+          undefined,
+          undefined,
+          tuiCtx,
+        ),
+      /\[BUDGET_EXEMPT:/,
+    );
+
+    const stAfter429 = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
+    assert.equal(stAfter429.delegatesDispatched, 0, "429 建连即败绝不扣减 delegatesDispatched");
+    assert.equal(getModelCooldown("magpie", "remote-magpie/devin/gemini-4-hydrogen").active, true);
+
+    const updates = [];
+    const altRes = await subTool.execute(
+      "call-alt-switch",
+      {
+        role: "reviewer",
+        provider: "magpie",
+        model: "remote-magpie/devin/gemini-4-hydrogen",
+        authorFamily: "claude",
+        busDir,
+        cwd: tmpRepo,
+        task: "[zee-worker] review",
+      },
+      undefined,
+      (u) => updates.push(u.content[0].text),
+      tuiCtx,
+    );
+    assert.equal(altRes.details.status, "completed");
+    assert.equal(altRes.details.model, "remote-magpie/codex/gpt-6.1-sol");
+    assert.equal(altRes.details.cooldownSwitchedFrom, "magpie/remote-magpie/devin/gemini-4-hydrogen");
+    assert.ok(altRes.content[0].text.includes("0ms 自动切备"));
+    assert.ok(updates.some((t) => t.includes("cost=$")), "实时心跳必须包含 cost");
+
+    const stAfterAlt = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
+    assert.equal(stAfterAlt.delegatesDispatched, 1, "成功切换并执行完成后仅计 1 次预算");
+
+    // 5. 无可用健康备胎时命中冷却直接拒发（零 subprocess 等待、零扣预算）
+    recordModelCooldown(
+      "magpie",
+      "remote-magpie/devin/only-model",
+      { kind: "rate_limit", reason: "HTTP 429", ttlMs: 60_000 },
+      healthPath,
+    );
+    await assert.rejects(
+      () =>
+        subTool.execute(
+          "call-no-alt",
+          {
+            role: "scout",
+            provider: "magpie",
+            model: "remote-magpie/devin/only-model",
+            busDir,
+            cwd: tmpRepo,
+            task: "[zee-worker] scout",
+          },
+          undefined,
+          undefined,
+          tuiCtx,
+        ),
+      /处于 429\/5xx 熔断冷却期[\s\S]*未扣减预算/,
+    );
+  } finally {
+    if (prevBin === undefined) delete process.env.ZEE_PI_BIN;
+    else process.env.ZEE_PI_BIN = prevBin;
+    if (prevHealth === undefined) delete process.env.ZEE_PROVIDER_HEALTH_PATH;
+    else process.env.ZEE_PROVIDER_HEALTH_PATH = prevHealth;
+    if (prevCfg === undefined) delete process.env.ZEE_CONFIG_PATH;
+    else process.env.ZEE_CONFIG_PATH = prevCfg;
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(metaDir, { recursive: true, force: true });
+    if (strictBusDirToClean) {
+      fs.rmSync(path.dirname(strictBusDirToClean), { recursive: true, force: true });
+    }
   }
 });

@@ -12,8 +12,8 @@ Read sibling `../zee/SKILL.md`, `../zee/disciplines/verification-skill.md`, and 
 > **Zero-Config Standalone（单兵开箱即用）**：若未配置 `~/.agents/zee-config.json`，调用 `zee-tool.mjs resolve-model --allow-standalone --role verifier` 优雅退化为当前会话模型执行（向用户输出一句简短中文提示即可，绝不阻塞）。
 
 ## Mandatory Output Isolation & `verify-ctl` Contract
-- **Zero Repo Scratch**：ALL test outputs, temp dirs, Playwright reports/traces, and build/test scratch MUST live in `/tmp/zee-verify-*` or `<busDir>`. **NEVER** create or `rm -rf` `test-results`, `playwright-report`, or `dist` inside the repository during `review🔒` locked `/zee-verify run`.
-- **Control Script**：every `verify-<app>` skill MUST ship `<projectSkillsDir>/verify-<app>/scripts/verify-ctl.(mjs|py|sh)` exposing deterministic `launch / doctor / snapshot / evidence / cleanup` commands.
+- **Zero Repo Scratch**: ALL test outputs, temp dirs, Playwright reports/traces, and build/test scratch MUST live in `/tmp/zee-verify-*` or `<busDir>` whenever possible. In brownfield repos whose existing scripts still emit standard `.gitignore`-ignored, zero-tracked build/test folders (e.g., `test-results/`, `playwright-report/`, `dist/`, `coverage/`), `guard-core.mjs` safely allowlists cleaning those ignored artifact dirs under `review🔒` without touching tracked files, `node_modules`, `.git`, or `.env*`.
+- **Control Script**: every `verify-<app>` skill MUST ship `<projectSkillsDir>/verify-<app>/scripts/verify-ctl.(mjs|py|sh)` exposing deterministic `launch / doctor / snapshot / evidence / cleanup` commands.
 
 ## Mode Dispatch
 

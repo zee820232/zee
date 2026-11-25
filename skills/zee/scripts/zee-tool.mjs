@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v4.2.0 — 零依赖纯 Node 多模型工作流辅助引擎
+ * zee-tool.mjs v4.2.1 — 零依赖纯 Node 多模型工作流辅助引擎
  *
  * 子命令：
  *   validate [configPath] [--check-live]
@@ -14,7 +14,7 @@
  *   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
  *   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
  *   check-plan <planPath> [--strict-budget]
- *   resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <role> [--config <path>] [--allow-standalone]
+ *   resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
  *   doctor [--harness <name>] [--repo <path>] [--all]
  *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
  *   sandbox-clean <sandboxDir>
@@ -24,6 +24,7 @@
  *   list-findings --repo <repoRoot> [--min-count 1]
  *   readiness [repoRoot]
  *   match-skills --repo <repoRoot> --files <csv> [--role <role>]
+ *   provider-health [--clear [modelKey]]
  */
 
 import fs from "node:fs";
@@ -33,6 +34,12 @@ import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isAllowedZeeTmpPath } from "./lib/guard-core.mjs";
+import {
+  clearModelCooldown,
+  getModelCooldown,
+  listActiveCooldowns,
+  resolveProviderHealthPath,
+} from "./lib/provider-health.mjs";
 
 const HOME = os.homedir();
 const DEFAULT_CONFIG = path.join(HOME, ".agents", "zee-config.json");
@@ -127,6 +134,8 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "strict-budget",
   "working-tree",
   "allow-standalone",
+  "clear",
+  "ignore-cooldown",
   "help",
 ]);
 
@@ -188,7 +197,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v4.2.0 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v4.2.1 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
 
 可用命令：
   validate [配置文件] [--check-live]
@@ -196,7 +205,7 @@ function usage() {
   audit-rules [--all | --harness <名>]
                                  默认仅审计当前安装宿主的常驻规则冲突；加 --all 审计全机
   doctor [--harness <名>] [--repo <路径>] [--all]
-                                 一站式健康体检：配置校验 + 冲突审计 + 目录可写 + AGY Hook 实发载荷探活 + 仓库就绪度
+                                 一站式健康体检：配置校验 + 冲突审计 + 目录可写 + AGY Hook 探活 + 仓库就绪度 + 429/5xx 冷却状态
   symlinks [--apply]             （仅用户显式要求同步多端时使用）检查或创建跨宿主软链
   init-run <仓库路径> <任务名>    创建仓库外运行总线（~/.local/state/zee/runs/...）
   update-state <总线目录> [--status <s>] [--mode <m>] [--level <l>] [--predicate <p>]
@@ -210,11 +219,11 @@ function usage() {
   worktree-create <仓库> <slug> <lane> <baseRef> [--branch <分支名>]
                                  在 ~/.local/state/zee/runs/.../worktrees/<lane> 原子创建隔离 worktree（自动规避嵌套 ref 冲突）
   cleanup-worktrees [仓库路径] [--base <基准分支>] [--prune-safe]
-                                 分级体检 worktree（含 squash-merge/patch-id 识别、wip vs scratch、干净 detached 识别），加 --prune-safe 执行安全回收
+                                 分级体检 worktree（未指定 --base 时同时比对当前 HEAD 与默认主干；含 squash-merge/patch-id 识别），加 --prune-safe 安全回收
   check-plan <plan.md 路径> [--strict-budget]
                                  静态校验计划文档必备章节、切片环/悬空依赖与单切片预算（≤5 文件 / ≤400 LOC）
-  resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <角色> [--config <路径>] [--allow-standalone]
-                                 按目标执行面确定性翻译角色模型标识（--allow-standalone 支持零配置单兵兜底）
+  resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <角色> [--config <路径>] [--allow-standalone] [--ignore-cooldown]
+                                 按目标执行面确定性翻译角色模型标识（命中 429/5xx 冷却时自动切健康 backup，--allow-standalone 支持零配置单兵兜底）
   sandbox-export --repo <仓库路径> [--sha <sha> | --working-tree] [--prefix rev|mut]
                                  在 os.tmpdir()/zee-<prefix>-* 导出只读快照或工作区脏状态用于零污染验证/审查
   sandbox-clean <sandboxDir>
@@ -231,6 +240,8 @@ function usage() {
                                  检查仓库 .agents/zee.project.json 与 verify-* 就绪度并计算有效信任等级 (T1/T2/T3)
   match-skills --repo <仓库路径> --files <csv> [--role <角色>]
                                  按 .agents/zee.project.json pathSkills 规则精准匹配受影响文件对应的项目技能
+  provider-health [--clear [模型键]]
+                                 查看当前 429/5xx 模型熔断冷却清单，或清理指定/全部冷却缓存
 `);
 }
 
@@ -611,20 +622,32 @@ function runAuditRules(args) {
   }
 
   if (shouldCheck("pi") || shouldCheck("claude")) {
-    const homeClaude = path.join(HOME, "CLAUDE.md");
-    if (fs.existsSync(homeClaude)) {
-      const body = fs.readFileSync(homeClaude, "utf8");
+    const homeBase = process.env.HOME || HOME;
+    const ambientRuleFiles = [
+      path.join(homeBase, "CLAUDE.md"),
+      path.join(homeBase, ".claude", "CLAUDE.md"),
+      path.join(homeBase, ".pi", "agent", "AGENTS.md"),
+    ];
+    for (const ruleFile of ambientRuleFiles) {
+      if (!fs.existsSync(ruleFile)) continue;
+      let body = "";
+      try {
+        body = fs.readFileSync(ruleFile, "utf8");
+      } catch {
+        continue;
+      }
       const hits = [];
       if (/pnpm test/i.test(body)) hits.push("写死了 pnpm test");
       if (/超过\s*3\s*个文件|more than 3 files/i.test(body)) hits.push("限制一次重构不超过 3 个文件");
       if (/CHANGELOG/i.test(body)) hits.push("强制更新 CHANGELOG");
+      if (/oh-my-claudecode|OMC/i.test(body)) hits.push("包含 oh-my-claudecode (OMC) 编排规则");
       findings.push({
         harness: activeHarness === "pi" ? "pi" : "pi/claude",
-        file: homeClaude,
+        file: ruleFile,
         severity: hits.length ? "medium" : "info",
         status: hits.length ? "潜在冲突" : "正常",
         detail: hits.length
-          ? `家目录 CLAUDE.md 包含项目级硬编码规则（${hits.join("、")}），可能干扰非 JS 项目（zee v4 扩展已注入隔离指令，但仍建议清理）`
+          ? `全局规则文件包含冲突硬限制（${hits.join("、")}），zee v4.2.1 已在父编排器注入优先级隔离指令，但仍建议清理`
           : "存在且未发现明显硬编码冲突",
       });
     }
@@ -686,8 +709,8 @@ function runAuditRules(args) {
   }
 
   if (shouldCheck("claude")) {
-    const dotClaude = path.join(HOME, ".claude", "CLAUDE.md");
-    if (fs.existsSync(dotClaude)) {
+    const dotClaude = path.join(process.env.HOME || HOME, ".claude", "CLAUDE.md");
+    if (fs.existsSync(dotClaude) && !findings.some((f) => f.file === dotClaude)) {
       const body = fs.readFileSync(dotClaude, "utf8");
       if (/oh-my-claudecode|OMC/i.test(body)) {
         findings.push({
@@ -1092,7 +1115,34 @@ function cmdCleanupWorktrees(args) {
   const { flags, positional } = parseFlags(args);
   const absRepo = path.resolve(positional[0] || process.cwd());
   const pruneSafe = Boolean(flags["prune-safe"]);
-  const baseRef = typeof flags.base === "string" && flags.base.trim() ? flags.base.trim() : detectDefaultBaseRef(absRepo);
+  const explicitBase = typeof flags.base === "string" && flags.base.trim() ? flags.base.trim() : null;
+  const defaultBase = detectDefaultBaseRef(absRepo);
+  const baseRefs = [];
+  if (explicitBase) {
+    baseRefs.push(explicitBase);
+  } else {
+    let headSha = "";
+    let defaultSha = "";
+    try {
+      headSha = execFileSync("git", ["-C", absRepo, "rev-parse", "--verify", "--quiet", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {}
+    try {
+      defaultSha = execFileSync("git", ["-C", absRepo, "rev-parse", "--verify", "--quiet", defaultBase], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {}
+    if (headSha && (!defaultSha || headSha !== defaultSha)) {
+      baseRefs.push("HEAD");
+    }
+    if (!baseRefs.includes(defaultBase)) {
+      baseRefs.push(defaultBase);
+    }
+  }
+  const baseRef = explicitBase || defaultBase;
 
   let porcelain;
   try {
@@ -1131,15 +1181,22 @@ function cmdCleanupWorktrees(args) {
 
     let isMerged = false;
     let mergeMethod = null;
+    let mergedInto = null;
     if (idx > 0 && head) {
-      try {
-        execFileSync("git", ["-C", absRepo, "merge-base", "--is-ancestor", head, baseRef], { stdio: "ignore" });
-        isMerged = true;
-        mergeMethod = "ancestor";
-      } catch {
-        if (!isDetached && isSquashMergedByPatchId(absRepo, baseRef, branch)) {
+      for (const ref of baseRefs) {
+        try {
+          execFileSync("git", ["-C", absRepo, "merge-base", "--is-ancestor", head, ref], { stdio: "ignore" });
           isMerged = true;
-          mergeMethod = "squash-patch-id";
+          mergeMethod = "ancestor";
+          mergedInto = ref;
+          break;
+        } catch {
+          if (!isDetached && isSquashMergedByPatchId(absRepo, ref, branch)) {
+            isMerged = true;
+            mergeMethod = "squash-patch-id";
+            mergedInto = ref;
+            break;
+          }
         }
       }
     }
@@ -1176,6 +1233,7 @@ function cmdCleanupWorktrees(args) {
       wipFiles,
       scratchFiles,
       mergedIntoBase: isMerged,
+      mergedInto,
       mergeMethod,
       activeLocked: isActiveLocked,
       bucket,
@@ -1190,7 +1248,7 @@ function cmdCleanupWorktrees(args) {
     } catch {}
   }
 
-  console.log(JSON.stringify({ ok: true, readOnly: !pruneSafe, repoRoot: absRepo, baseRef, prunedCount: pruned.length, pruned, worktrees }, null, 2));
+  console.log(JSON.stringify({ ok: true, readOnly: !pruneSafe, repoRoot: absRepo, baseRef, checkedBaseRefs: baseRefs, prunedCount: pruned.length, pruned, worktrees }, null, 2));
 }
 
 function cmdCheckPlan(args) {
@@ -1343,8 +1401,9 @@ function cmdResolveModel(args) {
   const harness = String(flags.harness || detectActiveHarness()).toLowerCase();
   const surface = String(flags.surface || "invoke_subagent").toLowerCase();
   const role = String(flags.role || "coder.standard").toLowerCase();
-  const configPath = typeof flags.config === "string" ? flags.config : DEFAULT_CONFIG;
+  const configPath = typeof flags.config === "string" ? flags.config : process.env.ZEE_CONFIG_PATH?.trim() || DEFAULT_CONFIG;
   const allowStandalone = Boolean(flags["allow-standalone"]);
+  const ignoreCooldown = Boolean(flags["ignore-cooldown"]);
 
   if (!fs.existsSync(configPath)) {
     if (allowStandalone) {
@@ -1415,35 +1474,90 @@ function cmdResolveModel(args) {
     process.exit(1);
   }
 
-  const spec = slot?.prefer || slot;
-  const effectiveEffort = adjustEffortByBudget(spec.effort, cfg?.budget || "balanced");
+  let activeSpec = slot?.prefer || slot;
+  const rawBinding = slot?.bindings?.[harness] || (harness === "antigravity" ? slot?.bindings?.agy : null) || null;
+  let activeBinding = rawBinding;
+  let cooldownFallback = null;
+
+  if (!ignoreCooldown) {
+    if (harness === "agy" || harness === "antigravity") {
+      const agyBind = slot?.bindings?.agy || slot?.bindings?.antigravity || null;
+      const hint = agyBind?.model || activeSpec?.modelHint;
+      const cd = hint ? getModelCooldown(undefined, hint) : { active: false };
+      if (cd.active && slot?.backup) {
+        const bHint = slot.backup?.bindings?.agy?.model || slot.backup?.bindings?.antigravity?.model || slot.backup.modelHint;
+        const bCd = bHint ? getModelCooldown(undefined, bHint) : { active: false };
+        if (!bCd.active) {
+          cooldownFallback = {
+            skippedKey: cd.key,
+            reason: cd.entry?.reason || "cooldown",
+            remainingSec: cd.remainingSec,
+          };
+          activeSpec = slot.backup;
+          activeBinding = slot.backup?.bindings?.agy || slot.backup?.bindings?.antigravity || null;
+        }
+      }
+    } else if (rawBinding || activeSpec?.modelHint) {
+      const primaryBind = rawBinding?.prefer || rawBinding;
+      const cd =
+        primaryBind?.model
+          ? getModelCooldown(primaryBind.providerInstanceId, primaryBind.model)
+          : activeSpec?.modelHint
+            ? getModelCooldown(undefined, activeSpec.modelHint)
+            : { active: false };
+      if (cd.active) {
+        const backupBind = rawBinding?.backup || slot?.backup?.bindings?.[harness] || null;
+        const backupSpec = slot?.backup || null;
+        const bCd =
+          backupBind?.model
+            ? getModelCooldown(backupBind.providerInstanceId, backupBind.model)
+            : backupSpec?.modelHint
+              ? getModelCooldown(undefined, backupSpec.modelHint)
+              : { active: false };
+        if ((backupBind || backupSpec) && !bCd.active) {
+          cooldownFallback = {
+            skippedKey: cd.key,
+            reason: cd.entry?.reason || "cooldown",
+            remainingSec: cd.remainingSec,
+          };
+          if (backupBind) activeBinding = backupBind;
+          if (backupSpec) activeSpec = backupSpec;
+        }
+      }
+    }
+  }
+
+  const effectiveEffort = adjustEffortByBudget(activeSpec.effort, cfg?.budget || "balanced");
 
   let resolved;
   if (harness === "agy" || harness === "antigravity") {
-    const agyBinding = slot?.bindings?.agy || slot?.bindings?.antigravity || null;
-    const hint = agyBinding?.model || spec.modelHint;
+    const agyBinding = activeBinding || slot?.bindings?.agy || slot?.bindings?.antigravity || null;
+    const hint = agyBinding?.model || activeSpec.modelHint;
     resolved = {
       harness: "antigravity",
       surface,
       role,
-      model: normalizeModelForAgy(hint, spec.tier, effectiveEffort, surface),
+      model: normalizeModelForAgy(hint, activeSpec.tier, effectiveEffort, surface),
       effectiveEffort,
       budget: cfg?.budget || "balanced",
       binding: agyBinding,
       fallbackOn429: "inherit",
-      sourceSpec: spec,
+      sourceSpec: activeSpec,
+      ...(cooldownFallback ? { cooldownFallback } : {}),
     };
   } else {
+    const resolvedBinding = activeBinding?.prefer || activeBinding;
     resolved = {
       harness,
       surface,
       role,
-      modelHint: spec.modelHint,
-      family: spec.family,
+      modelHint: activeSpec.modelHint,
+      family: activeSpec.family,
       effort: effectiveEffort,
       budget: cfg?.budget || "balanced",
-      binding: slot?.bindings?.[harness] || null,
+      binding: resolvedBinding,
       backup: slot?.backup || null,
+      ...(cooldownFallback ? { cooldownFallback } : {}),
     };
   }
 
@@ -2630,6 +2744,29 @@ function cmdMatchSkills(args) {
   );
 }
 
+function cmdProviderHealth(args) {
+  const { flags, positional } = parseFlags(args);
+  if (flags.clear !== undefined && flags.clear !== false) {
+    const targetKey = typeof flags.clear === "string" ? flags.clear : positional[0];
+    const res = clearModelCooldown(targetKey);
+    console.log(JSON.stringify({ ok: true, ...res }, null, 2));
+    return;
+  }
+  const cooldowns = listActiveCooldowns();
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        healthPath: resolveProviderHealthPath(),
+        activeCount: cooldowns.length,
+        cooldowns,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 function cmdDoctor(args) {
   const { flags } = parseFlags(args);
   const harness = typeof flags.harness === "string" ? flags.harness : detectActiveHarness();
@@ -2654,6 +2791,12 @@ function cmdDoctor(args) {
   }
 
   const hookProbe = harness === "antigravity" || harness === "local" || auditAll ? probeAgyHook() : { skipped: true };
+  const cooldowns = listActiveCooldowns();
+  const providerHealth = {
+    healthPath: resolveProviderHealthPath(),
+    activeCount: cooldowns.length,
+    cooldowns,
+  };
 
   const highFindings = rulesReport.findings.filter((f) => f.severity === "high");
   const ok =
@@ -2673,6 +2816,7 @@ function cmdDoctor(args) {
         rules: rulesReport,
         agyHookProbe: hookProbe,
         readiness,
+        providerHealth,
       },
       null,
       2,
@@ -2742,6 +2886,9 @@ switch (cmd) {
     break;
   case "match-skills":
     cmdMatchSkills(rest);
+    break;
+  case "provider-health":
+    cmdProviderHealth(rest);
     break;
   default:
     usage();

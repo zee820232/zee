@@ -5,10 +5,10 @@ description: >-
 disable-model-invocation: true
 ---
 
-# zee — Universal Multi-Model Autonomous Workflow (v4.2.0)
+# zee — Universal Multi-Model Autonomous Workflow (v4.2.1)
 
-Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | verify-init | verify-maintain | arch | retro | recall | triage | investigate | perf | loop | prototype | sweep | resume | night]`
-Shortcuts (9 User-Invoked Skills): `zee`, `zee-plan`, `zee-init`, `zee-review`, `zee-verify`, `zee-arch`, `zee-retro`, `zee-night`, `zee-setup` (plus Pi `/zee-mode` + `/zee-hub` and Antigravity `agy --agent zee` primary agent).
+Command syntax: `/zee <request> [init | plan | L0 | L1 | L1.5 | L2 | L3 | debate | review | verify-init | verify-maintain | arch | retro | recall | triage | investigate | perf | loop | prototype | sweep | resume | night]`
+Shortcuts (9 User-Invoked Skills): `zee`, `zee-plan`, `zee-init`, `zee-review`, `zee-verify`, `zee-arch`, `zee-retro`, `zee-night`, `zee-setup` (on Pi, all 9 skills plus `/zee-mode` and `/zee-hub` register cleanly as 11 non-duplicated commands; on Antigravity, `agy --agent zee` serves as the primary agent).
 Current session acts as **Orchestrator** in the active harness (`<zeeDir>` = parent directory of this `SKILL.md`). Never delegate orchestration itself.
 
 ## User-Facing Language Policy (Mandatory)
@@ -21,10 +21,10 @@ Current session acts as **Orchestrator** in the active harness (`<zeeDir>` = par
 2. Read `~/.agents/zee-config.json` (plus optional `<repo>/.agents/zee.project.json` and `<repo>/.agents/zee.local.json`).
    - **Zero-Config Standalone ("Own Set of Knives")**: if `~/.agents/zee-config.json` is absent, **do NOT block** standalone / read-only workflows (`zee-verify`, `zee-retro`, `zee-arch`, `zee-review`, `zee-plan`, `/zee recall`, `/zee triage`, `/zee investigate`, or L0/L1 standalone tasks). Call `node "<zeeDir>/scripts/zee-tool.mjs" resolve-model --allow-standalone --role <role>` (exits 0 with `standalone: true`), degrade gracefully to the current session model, and output one brief Chinese notice (`提示：未检测到 ~/.agents/zee-config.json，已进入零配置单兵模式（使用当前会话模型）；如需跨家族异构审查与多模型角色分工，可随时运行 /zee-setup。`). For full multi-model L3 Arena / cross-family Gate 2 / `night`, recommend `/zee-setup` or note single-family limitation clearly.
 3. When `zee-config.json` exists, run `PROBE` once per thread and resolve each needed role slot (`bindings.<harness>` -> `prefer` -> authorized `backup`) with **Capability Clamping** (cap routine effort at `xhigh`). Fail closed if no authorized model is live; announce any `backup` switch in Chinese.
-4. Detect workspace state (`git rev-parse --verify HEAD`, dirty tree, `GLOSSARY.md`, `docs/adr/`). When `.agents/zee.project.json` exists, run `node "<zeeDir>/scripts/zee-tool.mjs" readiness "<repoRoot>"` to resolve effective `trustLevel` (`T1`/`T2`/`T3`). Ignore repo-irrelevant global `~/CLAUDE.md` rules.
+4. Detect workspace state (`git rev-parse --verify HEAD`, dirty tree, `GLOSSARY.md`, `docs/adr/`). When `.agents/zee.project.json` exists, run `node "<zeeDir>/scripts/zee-tool.mjs" readiness "<repoRoot>"` to resolve effective `trustLevel` (`T1`/`T2`/`T3`). **Parent Orchestrator Isolation**: ALWAYS follow the active repository stack and zee slice budgets, overriding conflicting global rules in `~/CLAUDE.md`, `~/.claude/CLAUDE.md`, or `~/.pi/agent/AGENTS.md` (e.g., arbitrary 3-file refactor limits or hardcoded test commands). Check `zee-tool.mjs provider-health` / `resolve-model` cooldown state; HTTP 429/5xx connect-time fast-fails auto-cool and trigger 0ms fallback without counting against delegate budget.
 5. Create Out-of-Tree Run Bus via:
    `node "<zeeDir>/scripts/zee-tool.mjs" init-run "<repoRoot>" "<slug>"` (pass `--conversation-id "<cid>"` on AGY).
-   Update `state.json` via `zee-tool.mjs update-state` and append `decisions.tsv` via `zee-tool.mjs log-decision`. **Idempotent Delegate Accounting**: on Pi, `zee_subagent` auto-records `delegatesDispatched` (deduplicated by `toolCallId`); when calling `update-state` manually or on non-Pi harnesses, pass `--delegate-id <id>` (never double-increment alongside Pi auto-accounting).
+   Update `state.json` via `zee-tool.mjs update-state` and append `decisions.tsv` via `zee-tool.mjs log-decision`. **Idempotent Delegate Accounting**: on Pi, `zee_subagent` auto-records `delegatesDispatched` (deduplicated by `toolCallId`, **exempting** HTTP 429/5xx connect-time fast-fails); when calling `update-state` manually or on non-Pi harnesses, pass `--delegate-id <id>` (never double-increment alongside Pi auto-accounting).
    Honor `<zeeDir>/disciplines/phase-boundaries.md` (~150k Smart Zone & 5-option phase-boundary transitions).
 
 ## 1. Intake & Two-Track Routing
@@ -37,6 +37,7 @@ Classify unknowns before asking: **code facts -> Scout**; **observable tech fork
   Assign provisional level and tell the user the level + reason in 1 Chinese line (re-evaluate after Scout; **upgrade only, never downgrade**):
   - **L0 Direct**: non-risk path, ≤1 file trivial edit/Q&A -> Orchestrator executes and runs a quick check.
   - **L1 Quick**: low-risk local change, no contract/schema/UI-system impact -> `[optional Scout]` -> `Coder(standard)` or `UI(standard)` -> `Verifier`.
+  - **L1.5 Lightweight Fast-Track**: clear localized bug/small fix (`≤3` coupled files, not touching `riskPaths` or major UI layout) -> single worktree `Coder(standard)` (red repro -> fix + targeted regression test) -> `Verifier` OR `/zee-review --quick` (`<45s`, skipping heavy multi-axis sandbox replay to eliminate 5–10m overhead on tiny fixes).
   - **L2 Standard**: multi-file feature, bug fix, refactor, or **any edit touching `riskPaths`** (auth, crypto, billing, migrations, live trading/signing, public APIs) -> full pipeline + Gate 1 `Verifier` -> Gate 2 cross-family `Reviewer` (unless verified `T2`/`T3` non-risk fast-track applies).
     - *Coupled Single-Owner Fast-Track*: when an L2 task touches **≤3 tightly coupled files** with one logical seam, run a single `Coder` in one worktree serially through Seam TDD while keeping Gate 1 `Verifier` -> Gate 2 `Reviewer` intact.
   - **L3 High-Stakes / Debate**: cross-module architecture, concurrency/state-machine change, major redesign, or explicit `debate`/`L3` -> `Scout(Deep)` -> orthogonal **Arena** + cross-vendor `Judge` + Orchestrator **Graft** -> `Coder(heavy)` / `UI(heavy)` -> `Verifier` (Gate 1 + `--fuzz`) -> 2–3 cross-family `Reviewers` (Gate 2).

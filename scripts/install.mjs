@@ -123,7 +123,7 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee v4.2.0 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
+  console.log(`zee v4.2.1 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
 
 用法：
   npx github:zee820232/zee                       无需克隆，交互式选择宿主安装

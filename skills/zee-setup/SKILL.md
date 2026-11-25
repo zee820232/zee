@@ -19,7 +19,7 @@ Configure `~/.agents/zee-config.json` (canonical role-model intent + runtime bin
    ```bash
    node "<skillDir>/../zee/scripts/zee-tool.mjs" doctor [--repo "<repoRoot>"]
    ```
-   *(Automatically checks config validity, Pi `enabledModels` `CONFIG_DRIFT` masking, active-harness rule/double-install conflicts, bus writability, AGY Hook live probe, and repo `readiness` for `T1/T2/T3`.)*
+   *(Automatically checks config validity, Pi `enabledModels` `CONFIG_DRIFT` masking, active-harness rule/double-install conflicts across `~/CLAUDE.md`/`~/.claude/CLAUDE.md`/`~/.pi/agent/AGENTS.md`, bus writability, AGY Hook live probe, repo `readiness` for `T1/T2/T3`, and cross-session 429/5xx `providerHealth` cooldowns.)*
 2. Detect live available models in the active harness:
    - **T3 Code**: call `orchestrator_capabilities` once (filter `canRunChildTask === true`; note each model's exact `options[].id` and `options[].values`).
    - **Pi**: inspect `pi --list-models` AND check `~/.pi/agent/settings.json` `enabledModels` (alert immediately if `doctor` reports `CONFIG_DRIFT` hiding configured models!).
@@ -57,7 +57,7 @@ For every slot, store `prefer`, authorized `backup`, and `bindings.<harness>`.
 ## Step 4: Active-Harness Conflict Review & Optional AGY Auto-Routing (Approval Required)
 
 Present ONLY the conflicts relevant to the active harness surfaced by `doctor` / `audit-rules`, explaining each risk in Chinese.
-- **Never modify user rules or settings silently.** Ask the user in Chinese before applying any change (unblocking masked models in `~/.pi/agent/settings.json` `enabledModels`, excluding conflicting orchestrator skills, disabling conflicting global-rule plugins in `~/.gemini/config/config.json`, or cleaning hardcoded rules in `~/CLAUDE.md`).
+- **Never modify user rules or settings silently.** Ask the user in Chinese before applying any change (unblocking masked models in `~/.pi/agent/settings.json` `enabledModels`, excluding conflicting orchestrator skills, disabling conflicting global-rule plugins in `~/.gemini/config/config.json`, or cleaning hardcoded rules in `~/CLAUDE.md` / `~/.pi/agent/AGENTS.md`). Note: Pi Package `v4.2.1` exposes 11 non-duplicated commands (`/zee*` + `/zee-mode` + `/zee-hub`) without duplicate `/skill:zee*` menu entries.
 - **Google Antigravity Only (Opt-In, Default OFF)**: ask whether the user wants to enable `~/.gemini/config/rules/zee-auto.md` (≤15 lines, exempting casual chat and ≤1-file trivial edits). Default recommendation is **关闭（仅用 `agy --agent zee` 与显式 `/zee*` 命令，零打扰）**.
 - Only if the user explicitly asks to replicate `zee` into other harnesses, run `node "<zeeDir>/scripts/zee-tool.mjs" symlinks --apply`.
 

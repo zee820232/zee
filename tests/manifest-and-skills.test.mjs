@@ -44,13 +44,15 @@ function readRepoFile(relPath) {
   return fs.readFileSync(path.join(REPO_ROOT, relPath), "utf8");
 }
 
-test("package.json 与 .antigravity-plugin/plugin.json 版本严格一致且为 4.2.0（含可选 pi-tui peerDependency）", () => {
+test("package.json 与 .antigravity-plugin/plugin.json 版本严格一致且为 4.2.1（Pi 防重影去除 pi.skills，含可选 pi-tui）", () => {
   const pkg = JSON.parse(readRepoFile("package.json"));
   const plugin = JSON.parse(readRepoFile(".antigravity-plugin/plugin.json"));
-  assert.equal(pkg.version, "4.2.0");
-  assert.equal(plugin.version, "4.2.0");
+  assert.equal(pkg.version, "4.2.1");
+  assert.equal(plugin.version, "4.2.1");
   assert.equal(pkg.version, plugin.version);
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills（避免与扩展命令产生 /skill:zee* 重影）");
+  assert.ok(Array.isArray(pkg.pi?.extensions) && pkg.pi.extensions.includes("./pi-extension/index.ts"));
   assert.ok(pkg.peerDependencies?.["@earendil-works/pi-tui"], "package.json 必须声明 @earendil-works/pi-tui peerDependency");
   assert.equal(pkg.peerDependenciesMeta?.["@earendil-works/pi-tui"]?.optional, true);
 });
@@ -227,4 +229,33 @@ test("v4.2.0 契约：recall/triage、花园队列、零配置单兵兜底、tru
   assert.match(readme, /4\.2\.0/);
   assert.match(readme, /\/zee-hub/);
   assert.match(changelog, /4\.2\.0/);
+});
+
+test("v4.2.1 契约：package.json 去重 pi.skills、L1.5 快轨、/zee-review --strict/--quick、provider-health 与文档版本对齐", () => {
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "skills", "zee", "scripts", "lib", "provider-health.mjs")), true);
+
+  const skillMd = readRepoFile("skills/zee/SKILL.md");
+  assert.match(skillMd, /4\.2\.1/);
+  assert.match(skillMd, /\bL1\.5\b/);
+  assert.match(skillMd, /provider-health/);
+
+  const reviewSkill = readRepoFile("skills/zee-review/SKILL.md");
+  assert.match(reviewSkill, /--strict/);
+  assert.match(reviewSkill, /--quick/);
+
+  const protocols = readRepoFile("skills/zee/references/protocols.md");
+  assert.match(protocols, /4\.2\.1/);
+  assert.match(protocols, /provider-health/);
+  assert.match(protocols, /cleanup-worktrees/);
+
+  const harness = readRepoFile("skills/zee/references/harness.md");
+  assert.match(harness, /4\.2\.1/);
+  assert.match(harness, /provider-health\.json/);
+
+  const readme = readRepoFile("README.md");
+  const changelog = readRepoFile("CHANGELOG.md");
+  assert.match(readme, /4\.2\.1/);
+  assert.match(readme, /11/);
+  assert.match(readme, /provider-health/);
+  assert.match(changelog, /4\.2\.1/);
 });

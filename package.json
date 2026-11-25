@@ -1,9 +1,9 @@
 {
   "name": "zee-workflow",
-  "version": "4.2.0",
+  "version": "4.2.1",
   "private": true,
   "type": "module",
-  "description": "通用多模型全自动工程工作流 v4.2.0（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包；含 Pi v1.6.1 双轴 FSM 与零冲突 HUD/Hub 控制台、T1/T2/T3 信任梯度、零配置单兵兜底、20 项确定性 CLI 原语与跨平台 Windows/POSIX 安全核）",
+  "description": "通用多模型全自动工程工作流 v4.2.1（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包；含 Pi v1.6.1 零重影 11 命令与双轴 FSM/HUD/Hub、429 跨会话熔断切备、只读锁沙盒/忽略产物清理、L1.5 快轨、T1/T2/T3 信任梯度与 21 项确定性 CLI 原语）",
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   },
@@ -36,9 +36,6 @@
   "pi": {
     "extensions": [
       "./pi-extension/index.ts"
-    ],
-    "skills": [
-      "./skills"
     ]
   }
 }

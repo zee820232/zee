@@ -1039,7 +1039,10 @@ function resolveControlledMktempSandbox(val, repoCwd) {
   }
   const tpl = positionals[positionals.length - 1];
   if (!tpl) return null;
-  const materialized = tpl.replace(/X{3,}$/g, "sandbox");
+  const expandedTpl = tpl
+    .replace(/\$\{TMPDIR:-\/tmp\/?\}/g, os.tmpdir())
+    .replace(/\$\{TMPDIR\}|\$TMPDIR\b/g, os.tmpdir());
+  const materialized = expandedTpl.replace(/X{3,}$/g, "sandbox");
   const resolved = normalizeToolPath(materialized, "/tmp");
   return isAllowedZeeTmpPath(resolved, repoCwd) ? resolved : null;
 }
@@ -1099,10 +1102,112 @@ function isSafeZeeToolInvocation(tokens) {
     "list-findings",
     "readiness",
     "match-skills",
+    "provider-health",
   ]).has(sub);
 }
 
+const SAFE_IGNORED_ARTIFACT_DIRS = new Set([
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  "test-results",
+  "playwright-report",
+  ".nyc_output",
+  ".vite",
+  ".next",
+  ".nuxt",
+  ".cache",
+  ".turbo",
+  ".parcel-cache",
+]);
+
+function isSafeIgnoredBuildArtifact(rawTarget, repoCwd, virtualCwd) {
+  if (!repoCwd || !rawTarget || isProtectedTarget(rawTarget, virtualCwd)) return false;
+  const absRepo = path.resolve(repoCwd);
+  const resolved = normalizeToolPath(rawTarget, virtualCwd);
+  if (!isWithinDir(resolved, absRepo) || pathsEqual(resolved, absRepo)) return false;
+
+  const relPosix = path.relative(absRepo, resolved).replace(/\\/g, "/");
+  const segs = relPosix.split("/").filter(Boolean);
+  if (segs.length === 0) return false;
+  if (segs.some((s) => s === ".git" || s === "node_modules" || s.startsWith(".env"))) {
+    return false;
+  }
+  if (!segs.some((s) => SAFE_IGNORED_ARTIFACT_DIRS.has(s))) {
+    return false;
+  }
+
+  try {
+    let ignored = false;
+    try {
+      execFileSync("git", ["-C", absRepo, "check-ignore", "-q", "--", relPosix], { stdio: "ignore" });
+      ignored = true;
+    } catch {
+      if (!fs.existsSync(resolved)) {
+        try {
+          execFileSync("git", ["-C", absRepo, "check-ignore", "-q", "--", `${relPosix}/`], { stdio: "ignore" });
+          ignored = true;
+        } catch {
+          ignored = false;
+        }
+      }
+    }
+    if (!ignored) return false;
+
+    const tracked = execFileSync("git", ["-C", absRepo, "ls-files", "--", relPosix], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return tracked.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, extraAllowedDirs) {
+  const isAllowed = (rawTarget) => {
+    if (isProtectedTarget(rawTarget, virtualCwd)) return false;
+    const resolved = normalizeToolPath(rawTarget, virtualCwd);
+    return isWriteAllowedUnderGate(resolved, repoCwd, gateMode, extraAllowedDirs);
+  };
+
+  if (verb === "cp") {
+    let explicitTargetDir = null;
+    const cpArgs = [];
+    let cpEnd = false;
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (tok === "--") {
+        cpEnd = true;
+        continue;
+      }
+      if (!cpEnd && (tok === "-t" || tok === "--target-directory")) {
+        if (i + 1 < tokens.length) {
+          explicitTargetDir = tokens[i + 1];
+          i += 1;
+        }
+        continue;
+      }
+      if (!cpEnd && tok.startsWith("--target-directory=")) {
+        explicitTargetDir = tok.slice("--target-directory=".length);
+        continue;
+      }
+      if (!cpEnd && /^-t.+$/.test(tok) && !tok.startsWith("--")) {
+        explicitTargetDir = tok.slice(2);
+        continue;
+      }
+      if (!cpEnd && tok.startsWith("-")) continue;
+      cpArgs.push(tok);
+    }
+    if (explicitTargetDir !== null) {
+      return cpArgs.length >= 1 && isAllowed(explicitTargetDir);
+    }
+    if (cpArgs.length < 2) return false;
+    const dst = cpArgs[cpArgs.length - 1];
+    return isAllowed(dst);
+  }
+
   const args = [];
   let endOfOpts = false;
   for (let i = 1; i < tokens.length; i++) {
@@ -1116,19 +1221,11 @@ function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, ext
   }
   if (args.length === 0) return false;
 
-  const isAllowed = (rawTarget) => {
-    if (isProtectedTarget(rawTarget, virtualCwd)) return false;
-    const resolved = normalizeToolPath(rawTarget, virtualCwd);
-    return isWriteAllowedUnderGate(resolved, repoCwd, gateMode, extraAllowedDirs);
-  };
-
-  if (verb === "mkdir" || verb === "touch" || verb === "tee" || verb === "rm") {
-    return args.every(isAllowed);
+  if (verb === "rm") {
+    return args.every((a) => isAllowed(a) || isSafeIgnoredBuildArtifact(a, repoCwd, virtualCwd));
   }
-  if (verb === "cp") {
-    if (args.length < 2) return false;
-    const dst = args[args.length - 1];
-    return isAllowed(dst);
+  if (verb === "mkdir" || verb === "touch" || verb === "tee") {
+    return args.every(isAllowed);
   }
   if (verb === "mv") {
     if (args.length < 2) return false;
@@ -1218,7 +1315,7 @@ function extractHeredocBodyText(command) {
 }
 
 function isInlineCodeConfinedToAllowedPaths(code, repoCwd, virtualCwd, gateMode, extraAllowedDirs) {
-  const inSandbox = isAllowedZeeTmpPath(virtualCwd, repoCwd);
+  const inIsolatedWorkdir = isAllowedZeeTmpPath(virtualCwd, repoCwd) || isWithinDir(virtualCwd, RUNS_ROOT);
   const absRepo = path.resolve(repoCwd);
 
   // 检查内联代码中的显式写入调用是否全部使用静态字面量路径且落在允许目录内
@@ -1235,7 +1332,7 @@ function isInlineCodeConfinedToAllowedPaths(code, repoCwd, virtualCwd, gateMode,
     }
   }
 
-  // 若显式抽到了写入路径，全部必须落在允许目录内（且若在沙盒外，必须覆盖所有写调用）
+  // 若显式抽到了写入路径，全部必须落在允许目录内（且若在隔离目录外，必须覆盖所有写调用）
   if (literalPaths.length > 0) {
     const allAllowed = literalPaths.every((p) => {
       const resolved = normalizeToolPath(p, virtualCwd);
@@ -1244,8 +1341,8 @@ function isInlineCodeConfinedToAllowedPaths(code, repoCwd, virtualCwd, gateMode,
     if (!allAllowed) return false;
   }
 
-  if (inSandbox) {
-    // 沙盒 cwd 内禁止脚本显式引用仓库绝对路径或上级逃逸 ".."（兼容 Windows 反斜杠与盘符大小写）
+  if (inIsolatedWorkdir) {
+    // 沙盒或 <busDir> cwd 内禁止脚本显式引用仓库绝对路径或上级逃逸 ".."（兼容 Windows 反斜杠与盘符大小写）
     const normCode = process.platform === "win32" ? code.replace(/\\/g, "/").toLowerCase() : code;
     const normAbsRepo = process.platform === "win32" ? absRepo.replace(/\\/g, "/").toLowerCase() : absRepo;
     if (normCode.includes(normAbsRepo) || /(?:^|['"`\s/\\])\.\.(?:[\\/]|['"`\s]|$)/.test(code)) {
@@ -1295,10 +1392,115 @@ function checkInterpreterInlineWrite(verb, tokens, rawCommand, repoCwd, virtualC
   return null;
 }
 
+const SANDBOX_SAFE_GIT_SUBCMDS = new Set([
+  "init",
+  "apply",
+  "add",
+  "commit",
+  "checkout",
+  "switch",
+  "restore",
+  "reset",
+  "clean",
+  "am",
+  "stash",
+  "branch",
+  "tag",
+]);
+
+function extractInPlaceFileTargets(verb, tokens) {
+  if (verb === "sed") {
+    let hasExprFlag = false;
+    let sawStandaloneInPlace = false;
+    let endOfOpts = false;
+    const positionals = [];
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (endOfOpts) {
+        positionals.push(tok);
+        continue;
+      }
+      if (tok === "--") {
+        endOfOpts = true;
+        continue;
+      }
+      if (tok === "-e" || tok === "--expression" || tok === "-f" || tok === "--file") {
+        hasExprFlag = true;
+        if (i + 1 < tokens.length) i += 1;
+        continue;
+      }
+      if (tok.startsWith("--expression=") || tok.startsWith("--file=")) {
+        hasExprFlag = true;
+        continue;
+      }
+      if (tok === "-i" || tok === "--in-place") {
+        sawStandaloneInPlace = true;
+        continue;
+      }
+      if (tok.startsWith("--in-place=")) continue;
+      if (tok.startsWith("-")) {
+        if (/^-[a-zA-Z]*[ef]$/.test(tok) && !tok.startsWith("--")) {
+          hasExprFlag = true;
+          if (i + 1 < tokens.length) i += 1;
+        }
+        continue;
+      }
+      positionals.push(tok);
+    }
+
+    if (sawStandaloneInPlace && positionals.length > 0) {
+      const first = positionals[0];
+      const looksLikeBackupExt = first === "" || /^\.[A-Za-z0-9_-]{1,8}$/.test(first);
+      const minNeed = hasExprFlag ? 2 : 3;
+      if (looksLikeBackupExt && positionals.length >= minNeed) {
+        positionals.shift();
+      }
+    }
+    return hasExprFlag ? positionals : positionals.slice(1);
+  }
+
+  if (verb === "perl") {
+    let hasInlineCode = false;
+    let endOfOpts = false;
+    const positionals = [];
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (endOfOpts) {
+        positionals.push(tok);
+        continue;
+      }
+      if (tok === "--") {
+        endOfOpts = true;
+        continue;
+      }
+      if (tok === "-e" || tok === "-E") {
+        hasInlineCode = true;
+        if (i + 1 < tokens.length) i += 1;
+        continue;
+      }
+      if (tok === "-I") {
+        if (i + 1 < tokens.length) i += 1;
+        continue;
+      }
+      if (tok.startsWith("-")) {
+        if (!tok.startsWith("--") && /[eE]$/.test(tok)) {
+          hasInlineCode = true;
+          if (i + 1 < tokens.length) i += 1;
+        }
+        continue;
+      }
+      positionals.push(tok);
+    }
+    return hasInlineCode ? positionals : positionals.slice(1);
+  }
+
+  return [];
+}
+
 /**
  * 基于词法 token 精确识别变更类命令（彻底消除 git merge-base、perl -0pi 与引号内参数误拦/绕过）
  */
-function checkBlockedMutatingVerb(verb, tokens, repoCwd = "", virtualCwd = "") {
+function checkBlockedMutatingVerb(verb, tokens, repoCwd = "", virtualCwd = "", gateMode = "plan", extraAllowedDirs = []) {
   if (verb === "node" && tokens.length >= 3 && path.basename(tokens[1] || "") === "zee-tool.mjs") {
     const sub = tokens[2] || "";
     if (sub === "cleanup-worktrees" && tokens.includes("--prune-safe")) {
@@ -1311,15 +1513,26 @@ function checkBlockedMutatingVerb(verb, tokens, repoCwd = "", virtualCwd = "") {
 
   if (verb === "git") {
     let subIdx = 1;
+    let gitCwd = virtualCwd || repoCwd || process.cwd();
     while (subIdx < tokens.length && tokens[subIdx].startsWith("-")) {
       const opt = tokens[subIdx];
-      if (["-C", "-c", "--git-dir", "--work-tree", "--namespace"].includes(opt) && subIdx + 1 < tokens.length) {
+      if (opt === "-C" && subIdx + 1 < tokens.length) {
+        gitCwd = normalizeToolPath(tokens[subIdx + 1], gitCwd);
+        subIdx += 2;
+      } else if (opt.startsWith("-C") && opt.length > 2) {
+        gitCwd = normalizeToolPath(opt.slice(2), gitCwd);
+        subIdx += 1;
+      } else if (["-c", "--git-dir", "--work-tree", "--namespace"].includes(opt) && subIdx + 1 < tokens.length) {
         subIdx += 2;
       } else {
         subIdx += 1;
       }
     }
     const sub = tokens[subIdx] || "";
+    // 严格在 /tmp/zee-* 沙盒目录内允许本地临时 git 操作（绝不含 push）
+    if (isAllowedZeeTmpPath(gitCwd, repoCwd) && SANDBOX_SAFE_GIT_SUBCMDS.has(sub)) {
+      return null;
+    }
     if (BLOCKED_GIT_SUBCMDS.has(sub)) {
       return "修改 Git 工作区或提交历史的命令";
     }
@@ -1375,12 +1588,26 @@ function checkBlockedMutatingVerb(verb, tokens, repoCwd = "", virtualCwd = "") {
   }
 
   if (verb === "sed" || verb === "perl") {
+    let hasInPlace = false;
     for (let i = 1; i < tokens.length; i++) {
       const arg = tokens[i];
       if (arg === "--") break;
       if (arg === "--in-place" || arg.startsWith("--in-place=") || arg === "-i" || /^-[a-zA-Z0-9]*i/.test(arg)) {
-        return "原地修改文件命令 (sed -i / perl -i)";
+        hasInPlace = true;
+        break;
       }
+    }
+    if (hasInPlace) {
+      const targets = extractInPlaceFileTargets(verb, tokens);
+      const effectiveRepo = repoCwd || process.cwd();
+      const effectiveVirtual = virtualCwd || effectiveRepo;
+      if (
+        targets.length > 0 &&
+        targets.every((t) => !isProtectedTarget(t, effectiveVirtual) && isWriteAllowedUnderGate(normalizeToolPath(t, effectiveVirtual), effectiveRepo, gateMode, extraAllowedDirs))
+      ) {
+        return null;
+      }
+      return "原地修改文件命令 (sed -i / perl -i)";
     }
     return null;
   }
@@ -1528,7 +1755,7 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
         return `当前处于 zee ${modeLabel}模式，已拦截${interpBlocked}。`;
       }
 
-      const blockedLabel = checkBlockedMutatingVerb(verb, stripped, effectiveCwd, virtualCwd);
+      const blockedLabel = checkBlockedMutatingVerb(verb, stripped, effectiveCwd, virtualCwd, gateMode, extraAllowedDirs);
       if (blockedLabel) {
         return `当前处于 zee ${modeLabel}模式，已拦截${blockedLabel}。`;
       }

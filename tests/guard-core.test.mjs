@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -352,5 +353,74 @@ test("v4.2.0 跨平台：Windows 反斜杠路径保留、tmpRoots/盘符大小�
     }
   } finally {
     fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("v4.2.1 只读锁自伤解除：sandbox git apply、cp -t /tmp/zee-*、<busDir> sed -i/python3 与 .gitignore 零跟踪产物清理", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-guard-"));
+  const tmpBus = path.join(os.homedir(), ".local", "state", "zee", "runs", `v421-test-${process.pid}`, "demo-bus");
+  try {
+    // 初始化真实 Git 仓库验证 .gitignore 忽略且零跟踪产物清理
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "t@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.mkdirSync(path.join(tmpRepo, "src"), { recursive: true });
+    fs.mkdirSync(path.join(tmpRepo, "test-results"), { recursive: true });
+    fs.mkdirSync(path.join(tmpRepo, "dist"), { recursive: true });
+    fs.mkdirSync(path.join(tmpRepo, "node_modules", "pkg"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, ".gitignore"), "test-results/\ndist/\nnode_modules/\n");
+    fs.writeFileSync(path.join(tmpRepo, "src", "app.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(tmpRepo, "unignored.txt"), "keep\n");
+    fs.writeFileSync(path.join(tmpRepo, ".env"), "SECRET=1\n");
+    fs.writeFileSync(path.join(tmpRepo, "test-results", "trace.zip"), "zip");
+    fs.writeFileSync(path.join(tmpRepo, "dist", "tracked.js"), "tracked");
+    execFileSync("git", ["-C", tmpRepo, "add", ".gitignore", "src/app.ts"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "add", "-f", "dist/tracked.js"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+
+    // 1. /tmp/zee-* 沙盒内本地 git -C apply/commit 放行；push 与主仓 apply 仍硬拦截
+    assert.equal(checkBashUnderGate("git -C /tmp/zee-rev-box apply fix.patch", tmpRepo, "review"), null);
+    assert.equal(checkBashUnderGate("git -C /tmp/zee-rev-box commit -m 'tmp'", tmpRepo, "review"), null);
+    assert.ok(checkBashUnderGate("git -C /tmp/zee-rev-box push origin main", tmpRepo, "review"));
+    assert.ok(checkBashUnderGate(`git -C "${tmpRepo}" apply fix.patch`, tmpRepo, "review"));
+
+    // 2. cp -t /tmp/zee-* / --target-directory & ${TMPDIR:-/tmp}/zee-* mktemp 绑定放行
+    assert.equal(checkBashUnderGate("cp -t /tmp/zee-rev-box src/app.ts", tmpRepo, "review"), null);
+    assert.equal(checkBashUnderGate("cp --target-directory=/tmp/zee-rev-box README.md", tmpRepo, "review"), null);
+    assert.equal(
+      checkBashUnderGate('TMP=$(mktemp -d "${TMPDIR:-/tmp}/zee-rev-XXXXXX") && cp src/app.ts "$TMP"', tmpRepo, "review"),
+      null,
+    );
+    assert.ok(checkBashUnderGate("cp -t src README.md", tmpRepo, "review"));
+
+    // 3. <busDir> 内受控 sed -i (GNU + BSD '') 与 python3 写总线放行；改业务码或越权 .. 硬拦
+    fs.mkdirSync(tmpBus, { recursive: true });
+    const busFile = path.join(tmpBus, "partial-arch.md");
+    fs.writeFileSync(busFile, "old\n");
+    assert.equal(checkBashUnderGate(`sed -i 's/old/new/' "${busFile}"`, tmpRepo, "init-design"), null);
+    assert.equal(checkBashUnderGate(`sed -i '' 's/old/new/' "${busFile}"`, tmpRepo, "init-design"), null);
+    assert.equal(
+      checkBashUnderGate(`cd "${tmpBus}" && python3 -c "open('summary.txt','w').write('ok')"`, tmpRepo, "init-design"),
+      null,
+    );
+    assert.ok(checkBashUnderGate("sed -i 's/a/b/' src/app.ts", tmpRepo, "init-design"));
+    assert.ok(
+      checkBashUnderGate(`cd "${tmpBus}" && python3 -c "open('${tmpRepo.replace(/\\/g, "/")}/src/app.ts','w')"`, tmpRepo, "init-design"),
+    );
+
+    // 4. review 锁下放行清理 .gitignore 忽略且零 tracked 产物目录（test-results），拦截未忽略/含 tracked/.git/node_modules/.env
+    assert.equal(checkBashUnderGate("rm -rf test-results", tmpRepo, "review"), null);
+    assert.ok(checkBashUnderGate("rm -rf dist", tmpRepo, "review"), "含 tracked 文件的 dist/ 必须拦截");
+    assert.ok(checkBashUnderGate("rm -rf unignored.txt", tmpRepo, "review"));
+    assert.ok(checkBashUnderGate("rm -rf node_modules", tmpRepo, "review"));
+    assert.ok(checkBashUnderGate("rm -rf .git", tmpRepo, "review"));
+    assert.ok(checkBashUnderGate("rm -rf .env", tmpRepo, "review"));
+    assert.equal(
+      checkBashUnderGate("node skills/zee/scripts/zee-tool.mjs provider-health", tmpRepo, "review"),
+      null,
+    );
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(path.dirname(tmpBus), { recursive: true, force: true });
   }
 });

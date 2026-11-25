@@ -9,8 +9,11 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOOL = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
 
-function runTool(args, expectOk = true) {
-  const res = spawnSync(process.execPath, [TOOL, ...args], { encoding: "utf8" });
+function runTool(args, expectOk = true, extraEnv = {}) {
+  const res = spawnSync(process.execPath, [TOOL, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...extraEnv },
+  });
   if (expectOk) {
     assert.equal(res.status, 0, `zee-tool ${args.join(" ")} failed: ${res.stderr}\n${res.stdout}`);
   }
@@ -584,13 +587,119 @@ test("v4.2.0 mine-transcripts (retro+recall+脱敏)、queue-finding/list-finding
     assert.equal(stPi.json.standalone, true);
     assert.equal(stPi.json.resolved.model, null);
 
-    // 7. scripts/install.mjs --help prints v4.2.0
+    // 7. scripts/install.mjs --help prints v4.2.1
     const instRes = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--help"], { encoding: "utf8" });
     assert.equal(instRes.status, 0);
-    assert.match(instRes.stdout, /v4\.2\.0/);
+    assert.match(instRes.stdout, /v4\.2\.1/);
   } finally {
     fs.rmSync(tmpRepo, { recursive: true, force: true });
     fs.rmSync(srcDir, { recursive: true, force: true });
     if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+  }
+});
+
+test("v4.2.1：功能分支 cleanup-worktrees、provider-health 429 冷却联动 resolve-model 自动切备、audit-rules 检测 ~/.pi/agent/AGENTS.md", async () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-featwt-"));
+  const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-meta-"));
+  const tmpHealth = path.join(tmpMeta, "provider-health.json");
+  const tmpCfg = path.join(tmpMeta, "zee-config.json");
+  const fakeHome = path.join(tmpMeta, "home");
+  let wtPath = "";
+
+  try {
+    // 1. 功能分支上已合入当前 HEAD 的 worktree 自动回收，而 --base main 仍保留 review_unmerged
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "core.autocrlf", "false"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "t@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(tmpRepo, "README.md"), "# base\n");
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+
+    execFileSync("git", ["-C", tmpRepo, "checkout", "-b", "feat/demo"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(tmpRepo, "feat.txt"), "feature\n");
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "feat base"], { stdio: "ignore" });
+
+    const wt = runTool(["worktree-create", tmpRepo, "feat-slug", "u1", "HEAD", "--branch", "zee/feat-u1"]);
+    wtPath = wt.json.worktreePath;
+    fs.writeFileSync(path.join(wtPath, "slice.txt"), "slice 1\n");
+    execFileSync("git", ["-C", wtPath, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", wtPath, "commit", "-m", "slice 1"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "merge", "--ff-only", "zee/feat-u1"], { stdio: "ignore" });
+
+    const auditMainOnly = runTool(["cleanup-worktrees", tmpRepo, "--base", "main"]);
+    const mainEntry = auditMainOnly.json.worktrees.find((w) => w.path === wtPath);
+    assert.equal(mainEntry.mergedIntoBase, false);
+    assert.equal(mainEntry.bucket, "review_unmerged");
+
+    const pruneDefault = runTool(["cleanup-worktrees", tmpRepo, "--prune-safe"]);
+    assert.ok(pruneDefault.json.checkedBaseRefs.includes("HEAD"));
+    assert.equal(pruneDefault.json.prunedCount, 1);
+    assert.equal(fs.existsSync(wtPath), false);
+
+    // 2. provider-health 429 冷却 + resolve-model 自动切备 + doctor 报告 + --clear 清理
+    const { recordModelCooldown } = await import("../skills/zee/scripts/lib/provider-health.mjs");
+    fs.writeFileSync(
+      tmpCfg,
+      JSON.stringify({
+        version: 2,
+        budget: "balanced",
+        roles: {
+          coder: {
+            standard: {
+              prefer: { family: "claude", modelHint: "claude-sonnet-5-5", tier: "standard", effort: "medium" },
+              backup: { family: "openai", modelHint: "gpt-6.1-sol", tier: "pro", effort: "medium" },
+              bindings: {
+                pi: {
+                  prefer: { providerInstanceId: "magpie", model: "remote-magpie/vm/claude-sonnet-5-5" },
+                  backup: { providerInstanceId: "magpie", model: "remote-magpie/codex/gpt-6.1-sol" },
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const env = { ZEE_PROVIDER_HEALTH_PATH: tmpHealth, ZEE_CONFIG_PATH: tmpCfg };
+    const preRes = runTool(["resolve-model", "--harness", "pi", "--role", "coder.standard", "--config", tmpCfg], true, env);
+    assert.equal(preRes.json.resolved.binding.model, "remote-magpie/vm/claude-sonnet-5-5");
+    assert.equal(preRes.json.resolved.cooldownFallback, undefined);
+
+    recordModelCooldown(
+      "magpie",
+      "remote-magpie/vm/claude-sonnet-5-5",
+      { kind: "rate_limit", reason: "HTTP 429 quota", ttlMs: 120_000, errorSnippet: "429" },
+      tmpHealth,
+    );
+
+    const phList = runTool(["provider-health"], true, env);
+    assert.equal(phList.json.activeCount, 1);
+    assert.equal(phList.json.cooldowns[0].key, "magpie/remote-magpie/vm/claude-sonnet-5-5");
+
+    const switchedRes = runTool(["resolve-model", "--harness", "pi", "--role", "coder.standard", "--config", tmpCfg], true, env);
+    assert.equal(switchedRes.json.resolved.binding.model, "remote-magpie/codex/gpt-6.1-sol");
+    assert.equal(switchedRes.json.resolved.cooldownFallback.skippedKey, "magpie/remote-magpie/vm/claude-sonnet-5-5");
+
+    const ignoredRes = runTool(["resolve-model", "--harness", "pi", "--role", "coder.standard", "--config", tmpCfg, "--ignore-cooldown"], true, env);
+    assert.equal(ignoredRes.json.resolved.binding.model, "remote-magpie/vm/claude-sonnet-5-5");
+
+    const docRes = runTool(["doctor", "--harness", "pi", "--repo", tmpRepo], false, env);
+    assert.equal(docRes.json.providerHealth.activeCount, 1);
+
+    const clrRes = runTool(["provider-health", "--clear"], true, env);
+    assert.equal(clrRes.json.clearedCount, 1);
+    assert.equal(clrRes.json.remainingCount, 0);
+
+    // 3. audit-rules 检测 ~/.pi/agent/AGENTS.md 硬编码规则
+    fs.mkdirSync(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+    fs.writeFileSync(path.join(fakeHome, ".pi", "agent", "AGENTS.md"), "# Global\n一次重构不超过 3 个文件，只跑 pnpm test。\n");
+    const auditRes = runTool(["audit-rules", "--harness", "pi"], true, { HOME: fakeHome, USERPROFILE: fakeHome });
+    assert.ok(auditRes.json.findings.some((f) => f.file.endsWith("AGENTS.md") && f.detail.includes("v4.2.1")));
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(tmpMeta, { recursive: true, force: true });
+    if (wtPath) fs.rmSync(path.dirname(path.dirname(path.dirname(wtPath))), { recursive: true, force: true });
   }
 });

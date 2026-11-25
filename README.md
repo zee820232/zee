@@ -1,4 +1,4 @@
-# zee — 通用多模型全自动工程工作流（v4.2.0）
+# zee — 通用多模型全自动工程工作流（v4.2.1）
 
 `zee` 是一套按标准 [Agent Skills](https://agentskills.io) 编写的**通用多模型全自动研发工作流**，采用 **Pi Package + Google Antigravity Native Plugin + 标准 Agent Skills 三形态单仓封装**。
 
@@ -30,15 +30,15 @@ npx github:zee820232/zee --target both --doctor
 pi install git:github.com/zee820232/zee
 ```
 
-安装即得（v4.2.0）：
-- **9 个完整工作流技能 + `/zee-mode` 常驻路由开关 + `/zee-hub` 交互控制台**：`/zee`、`/zee-init`、`/zee-plan`、`/zee-review`、`/zee-verify`、`/zee-arch`、`/zee-retro`、`/zee-night`、`/zee-setup` + `/zee-mode` + `/zee-hub`（`Ctrl+Alt+H` / `F2`）+ **6 份按需工程纪律**
+安装即得（v4.2.1）：
+- **11 个干净命令（零 `/skill:zee*` 重影）**：`/zee`、`/zee-init`、`/zee-plan`、`/zee-review`（`--strict` / `--quick`）、`/zee-verify`、`/zee-arch`、`/zee-retro`、`/zee-night`、`/zee-setup` + `/zee-mode` + `/zee-hub`（`Ctrl+Alt+H` / `F2`）+ **6 份按需工程纪律**（`package.json` 移除了 `pi.skills`，由扩展直接内置展开，彻底消除 Pi 菜单 19 项重影）
 - **Pi v1.6.1 双轴 FSM 与零冲突 Layer 0/1/2 HUD/Hub（`fsm.ts` + `bus-sync.ts` + `hub-ui.ts`）**：
   - **14 个工作流阶段 × 9 个子代理车道状态** + **G-01..G-06 运行期守卫**（跨回合 `zee-fsm` 分支持久化与 `zee-mode`/`zee-gate` 向下兼容，`/tree` 切回时自动标出 `busAheadOfBranch` 绝不覆写磁盘较新 `state.json`）。
   - **Layer 0 状态栏徽章**（`setStatus("zee-mode")` `≤18` 列紧凑指示，**绝不调用 `setFooter()`**，与 `pi-cometix-footer` 完美共存）。
-  - **Layer 1 `aboveEditor` 响应式 HUD**（`setWidget("zee-hud", ..., { placement: "aboveEditor" })`：`IDLE` 时自动隐身 0 行；`full` 边框卡片 / `compact` 1–2 行 / `hidden`；RPC 降级 `string[]`、`Print`/`JSON`/`ZEE_WORKER=1` 100% 静默）。
-  - **Layer 2 5-Tab 交互控制台（`/zee-hub` / `Ctrl+Alt+H` / `F2`，严格避开 Pi 保留快捷键 `Ctrl+G`）**：`1 Overview & FSM`、`2 Workers`（实时预览 `partial-*.md`）、`3 Gates & Trail`（Gate 1→2 + `G-01..G-06` + `decisions.tsv`）、`4 Worktrees & Cost`（6 桶回收 + 成本条）、`5 Controls`（单键切换模式/解锁/回收 worktree/复制续跑命令/切换 HUD 密度/暂停）。
-- **跨回合保护锁 + Windows/POSIX 双端词法安全核 + 子进程 `worker-guard.ts`**：`/zee-plan`/`/zee-arch`/`/zee-init`/`/zee-review` 保护锁与 `guard-core.mjs` 共享（支持 Windows 反斜杠路径与盘符大小写无关 `/tmp/zee-*`、`os.tmpdir()/zee-*`），放行 `.agents/gardening-queue.jsonl` 与全部确定性 `zee-tool.mjs` 只读原语。
-- **内置并行子代理引擎 `zee_subagent` v2.3**：`toolCallId` 幂等去重彻底消灭 `delegatesDispatched` 2x 重复记账、G-02 Gate 1→Gate 2 硬门槛校验、Windows `ZEE_PI_BIN` `.mjs`/`.js`/`.ts` `spawn EFTYPE` 修复与 `"junction"` `node_modules` 挂载、流式抢救（`>2KB` 落盘 `partial-*.md`）、4 击 `StagnancyTracker`、`authorFamily` 同家族硬拦截与 70% 截断提示。
+  - **Layer 1 `aboveEditor` 响应式 HUD**（`setWidget("zee-hud", ..., { placement: "aboveEditor" })`：`IDLE` 时自动隐身 0 行；`full` 边框卡片含实时 `turns`/`cost` 跳表 / `compact` 1–2 行 / `hidden`；RPC 降级 `string[]`、`Print`/`JSON`/`ZEE_WORKER=1` 100% 静默）。
+  - **Layer 2 5-Tab 交互控制台（`/zee-hub` / `Ctrl+Alt+H` / `F2`，严格避开 Pi 保留快捷键 `Ctrl+G`）**：`1 Overview & FSM`、`2 Workers`（实时预览 `partial-*.md`）、`3 Gates & Trail`（Gate 1→2 + `G-01..G-06` + `decisions.tsv`）、`4 Worktrees & Cost`（6 桶回收 + 成本条 + `429/5xx` 熔断冷却状态）、`5 Controls`（`m`/`l`/`w`/`c`/`d`/`p`/`h` 单键控制）。
+- **跨回合保护锁 + 零自伤只读放行 + 子进程 `worker-guard.ts`**：`/zee-plan`/`/zee-arch`/`/zee-init`/`/zee-review` 保护锁与 `guard-core.mjs` 共享（支持 Windows 反斜杠与大小写无关 `/tmp/zee-*`/`os.tmpdir()/zee-*`），精准放行 `/tmp/zee-*` 内 `git apply`、`cp -t /tmp/zee-*`、`<busDir>` 内 `sed -i`/`python3` 与 `.gitignore` 忽略且零 tracked 产物清理（`test-results/`/`dist/`），并注入父编排器全局规则隔离。
+- **内置并行子代理引擎 `zee_subagent` v2.4**：**跨会话 `429/5xx` 熔断冷却（`provider-health.json`）与 `0ms` 健康切备（建连即败免扣预算）**、`10s` 实时进度心跳（含 `turns`/`cost`/`thinking`）、`toolCallId` 幂等去重、G-02 Gate 1→Gate 2 硬门槛校验、Windows `ZEE_PI_BIN` `.mjs`/`.js`/`.ts` `spawn EFTYPE` 修复与 `"junction"` `node_modules` 挂载、流式抢救（`>2KB` 落盘 `partial-*.md`）、4 击 `StagnancyTracker`、`authorFamily` 同家族硬拦截与 70% 截断提示。
 
 ### 方式三：Google Antigravity（`agy` CLI / App / IDE 原生插件形态）
 
@@ -46,7 +46,7 @@ pi install git:github.com/zee820232/zee
 agy plugin install https://github.com/zee820232/zee
 ```
 
-安装即得（v4.2.0）：
+安装即得（v4.2.1）：
 - **专属主控代理 `zee`（零劫持闲聊）**：终端运行 **`agy --agent zee`**（或在 CLI `/agents` / Antigravity App 切换 `zee`），绝不内置劫持普通对话的 `rules/AGENTS.md`
 - **6 个硬权限隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 与精确 OneHarness `tools:` 白名单
 - **9 个原生斜杠命令 + 三事件生命周期 Hook（`PreInvocation` + `PreToolUse` + `Stop`）**：`$PLUGIN_DATA` 跨回合保持锁状态、共用 `guard-core.mjs` 词法安全核、支持 Brain Artifacts（「Proceed」按钮 / `walkthrough.md` / `carousel` / `decisions.tsv`）、`run_workflow` 宽扇出与 `Stop` 过夜防断尾
@@ -72,8 +72,8 @@ npx skills add zee820232/zee
 | **`/zee-hub`**（`Ctrl+Alt+H` / `F2`） | Pi 交互式 5-Tab 控制台 | 只读观测+安全控制 | 查看 FSM 阶段、Worker 实时进度与抢救稿、Gate 1→2 门禁、Worktree 与成本控制 |
 | **`/zee-init`** | 项目 **0→1** 全自动建项 | Stage 1–2 `init🔒` | 空目录或全新想法从零做到实机验收（含 `--fuzz`）通过的 v1 |
 | **`/zee-plan`** | 深度 Grill 访谈 + 领域建模 + 计划 | 跨回合 `plan🔒` · 支持零配置 | 动手前先聊透需求、补 `GLOSSARY.md`/ADR、产出 `plan.md` 后停机 |
-| **`/zee`** | **1→100** 全自动开发主入口 | 按子模式自动上锁 | 开发、修 Bug、重构、接棒 `plan.md`、`recall`、`triage`、`investigate`、`perf`、`loop`、`sweep`、`resume` |
-| **`/zee-review`** | 只读跨家族三轴对抗审查 | 单轮 `review🔒` · 支持零配置 | 审未提交工作区、分支 diff 或 PR；自动跑 `gate-tamper-diff` + `sandbox-export` |
+| **`/zee`** | **1→100** 全自动开发主入口 | 按子模式自动上锁 | 支持 L0/L1/**L1.5 快轨**/L2/L3、接棒 `plan.md`、`recall`、`triage`、`investigate`、`perf`、`loop`、`sweep`、`resume` |
+| **`/zee-review`** | 只读跨家族三轴对抗审查 | 单轮 `review🔒` · 支持零配置 | 默认 `--strict` 机械建独立总线 + 跨家族审未提交/分支改动；支持 `--quick` (<45s) 快审 |
 | **`/zee-verify`** | **项目级实机验证技能全生命周期** | `run` 启 `review🔒` · 支持零配置 | 生成并真机跑通 `verify-<app>` + `verify-ctl.*`、防腐维护、冷启动验收与 `--fuzz` |
 | **`/zee-arch`** | 代码库深模块抗熵增巡检 | 跨回合 `plan🔒` · 支持零配置 | 结合 `git log` 热点与 `list-findings`（`systemic` 模式），输出交互式 HTML 报告 |
 | **`/zee-retro`** | 会话复盘与 4+1 纠错飞轮 | 审批后执行 · 支持零配置 | 挖掘跨宿主对话与花园队列，按 4 级阶梯 +「新建技能/裁剪死规则」固化并做 Bite Proof |
@@ -81,7 +81,13 @@ npx skills add zee820232/zee
 
 ---
 
-## v4.2.0 核心增强亮点（8 大原则 + 实机稳定性）
+## v4.2.1 / v4.2.0 核心增强亮点（8 大原则 + 程序员体验实测优化）
+
+- **Mac 7 场景实战体验专项优化（v4.2.1）**：
+  - **Pi 菜单去重（19 → 11 项）**：`package.json` 移除了 `pi.skills` 字段，Pi 扩展通过 `expandBundledZeeSkill` 内置展开 9 个工作流技能，彻底消除 `/skill:zee*` 重影。
+  - **跨会话 `429/5xx` 熔断切备与免扣预算**：新增 `lib/provider-health.mjs` + `zee-tool.mjs provider-health`，429/5xx 建连即败自动写入冷却（30m / 5m）且**绝不扣减 `delegatesDispatched` 预算**，下次直接 `0ms` 自动切换健康备选，HUD 与 Hub 同步展示 `turns`/`cost`/冷却倒计时。
+  - **解除只读锁 3 类“自伤”**：安全放行 `/tmp/zee-*` 内 `git -C ... apply` 与 `cp -t /tmp/zee-*`、`<busDir>` 内 `sed -i`/`python3`、以及 `.gitignore` 忽略且零 tracked 产物（`test-results/`/`dist/`）清理；业务源码与 `.git`/`node_modules`/`.env*` 依旧 100% 物理拦截。
+  - **`/zee-review --strict / --quick` + `L1.5` 快轨 + 功能分支 worktree 回收**：`--strict` 机械自建独立总线并检查 Reviewer 派发；`--quick` & `L1.5` 压缩小改等待时间；`cleanup-worktrees` 默认同时比对当前 `HEAD` 与主干，功能分支已合入 worktree 即刻可回收；全局 `~/CLAUDE.md`/`~/.pi/agent/AGENTS.md` 冲突限制不再渗透 `/zee-retro` 等编排。
 
 ### 1. 信任梯度（`trustLevel: T1 / T2 / T3`）与机械化准入（`readiness`）
 在 `<repo>/.agents/zee.project.json` 中配置可选 `"trustLevel"`，并由 `zee-tool.mjs readiness "<repoRoot>"` 按仓库实际完备度**自动向下钳位**为 `effectiveTrustLevel`：
@@ -142,7 +148,7 @@ agy --agent zee          # Antigravity 专属总控代理（零劫持普通对�
 ```
 
 ### 6. `/zee-review`、`/zee-verify`、`/zee-arch`、`/zee-retro`、`/zee-night`
-- **`/zee-review`**：启用 `review🔒` 只读锁，先跑 `zee-tool.mjs gate-tamper-diff` 与 `sandbox-export` 隔离爆破复现，三轴隔离报告 + `P2` 自动入库 `.agents/gardening-queue.jsonl`。
+- **`/zee-review [--strict | --quick]`**：启用 `review🔒` 只读锁，默认 `--strict` 机械建独立总线 + `gate-tamper-diff` + `sandbox-export` 隔离爆破复现与三轴审查；`--quick`（`<45s`）用于清晰小改动快速只读核验，`P2` 自动入库 `.agents/gardening-queue.jsonl`。
 - **`/zee-verify [init|maintain|run] [--fuzz]`**：围绕 `verify-<app>/SKILL.md` + `scripts/verify-ctl.(mjs|py|sh)` + `features/` 执行，所有产物隔离在 `/tmp/zee-verify-*` 或 `<busDir>`。
 - **`/zee-arch`**：结合 `git log` 热点与 `zee-tool.mjs list-findings`（`systemic: true` 置顶）做删除测试，输出交互式 Before/After HTML 报告。
 - **`/zee-retro`**：联查 `mine-transcripts --mode retro`、`list-findings`、`list-runs` 与 `git log`，按「架构 > Lint/Hook/CI > Seam 测试 > 精简文档 > 新建技能/裁剪死规则」提案并做 Mandatory Bite Proof。
@@ -150,11 +156,12 @@ agy --agent zee          # Antigravity 专属总控代理（零劫持普通对�
 
 ---
 
-## 核心架构与 `zee-tool.mjs` 确定性原语速查（20 项）
+## 核心架构与 `zee-tool.mjs` 确定性原语速查（21 项）
 
 | 子命令 | 用途 |
 | :--- | :--- |
-| `doctor [--harness <名>] [--repo <path>] [--all]` | 一站式健康体检（配置 + Pi 漂移 + 规则冲突 + 总线 + AGY Hook + 项目 `readiness`） |
+| `provider-health [--clear [模型键]]` | 查看当前跨会话 `429/5xx` 熔断冷却通道，或清除指定/全部冷却缓存 |
+| `doctor [--harness <名>] [--repo <path>] [--all]` | 一站式健康体检（配置 + Pi 漂移 + 规则冲突 + 总线 + AGY Hook + 项目 `readiness` + `providerHealth`） |
 | `validate [cfg] [--check-live]` | 校验 `zee-config.json` schema v2、跨家族多样性与 Pi live 漂移 |
 | `audit-rules [--all \| --harness <名>]` | 审计宿主规则与双安装重名冲突 |
 | `readiness [repoRoot]` | 检查 `.agents/zee.project.json` 与 `verify-*`/`verify-ctl`，将 `trustLevel` 钳位为有效档位 |
@@ -164,9 +171,9 @@ agy --agent zee          # Antigravity 专属总控代理（零劫持普通对�
 | `list-runs [repo \| --all]` | 列出活跃/暂停总线供 `/zee resume` 一键续跑 |
 | `log-decision --bus ... --unit ... --phase ...` | 安全追加一行审计记录到 `decisions.tsv` |
 | `worktree-create <repo> <slug> <lane> <baseRef>` | 原子创建隔离 worktree（自动扁平化嵌套分支 ref 冲突） |
-| `cleanup-worktrees [repo] [--base <ref>] [--prune-safe]` | 跨平台 6 桶体检 worktree（`path.resolve` 统一 Windows/POSIX）与安全回收 |
+| `cleanup-worktrees [repo] [--base <ref>] [--prune-safe]` | 未传 `--base` 时同时比对当前 `HEAD` 与默认主干，跨平台 6 桶体检 worktree 与安全回收 |
 | `check-plan <plan.md> [--strict-budget]` | 校验必备章节、切片循环/悬空依赖与单切片预算（≤5 文件 / ≤400 LOC） |
-| `resolve-model --harness ... --role <角色> [--allow-standalone]` | 翻译角色模型标识；缺省配置加 `--allow-standalone` 可优雅单兵兜底 |
+| `resolve-model --harness ... --role <角色> [--allow-standalone] [--ignore-cooldown]` | 翻译角色模型标识；命中冷却自动切健康 `backup`，缺省配置加 `--allow-standalone` 单兵兜底 |
 | `sandbox-export --repo <repo> [--sha <sha> \| --working-tree] [--prefix rev\|mut]` | 一行导出快照或工作区 diff 到安全 `os.tmpdir()/zee-*` 沙盒 |
 | `sandbox-clean <sandboxDir>` | 校验路径安全后彻底清理 `zee-*` 沙盒目录（不碰 `<busDir>`） |
 | `gate-tamper-diff --repo <repo> [--base <ref>] [--head <ref> \| --working-tree]` | 自动检测测试/CI/Lint 门禁文件改动与新增抑制注释（`as any`、`@ts-ignore` 等） |
@@ -180,28 +187,28 @@ agy --agent zee          # Antigravity 专属总控代理（零劫持普通对�
 ## 目录结构
 
 ```text
-.antigravity-plugin/plugin.json   # Google Antigravity 原生插件清单（v4.2.0）
+.antigravity-plugin/plugin.json   # Google Antigravity 原生插件清单（v4.2.1）
 assets/logo.svg                   # Antigravity 插件卡片图标
 agents/                           # Antigravity 原生代理（主控 zee + 6 隔离角色子代理）
 hooks.json                        # Antigravity 原生三事件 Hook（PreInvocation / PreToolUse / Stop）
 scripts/
 ├── install.mjs                   # 交互式 / 命令行多宿主选择安装器（pi | agy | skills | both）
 └── agy-guard.mjs                 # Antigravity 生命周期守卫与跨回合写锁
-package.json                      # Pi Package 清单（v4.2.0，含可选 @earendil-works/pi-tui）
+package.json                      # Pi Package 清单（v4.2.1，移除 pi.skills 消除重影）
 pi-extension/
-├── index.ts                      # Pi v1.6.1 扩展：/zee-mode、/zee-hub、9 短命令、zee_subagent v2.3
+├── index.ts                      # Pi v1.6.1 扩展：11 干净命令、/zee-review 双档、zee_subagent v2.4
 ├── fsm.ts                        # 纯 TS 双轴状态机（14 工作流阶段 × 9 车道状态 + G-01..G-06）
 ├── bus-sync.ts                   # 零轮询总线水合 + /tree busAheadOfBranch 保护
-├── hub-ui.ts                     # 零冲突 Layer 0/1/2 HUD & 5-Tab 交互 Hub（与 pi-cometix-footer 共存）
+├── hub-ui.ts                     # 零冲突 Layer 0/1/2 HUD & 5-Tab 交互 Hub（含冷却显示与 [h] 清除）
 └── worker-guard.ts               # Pi 子进程极简安全守卫（-ne -e 挂载，消灭子代理安全真空）
 skills/
 ├── zee/                          # 核心工作流（唯一真源）
-│   ├── SKILL.md                  # 宿主无关总控内核（v4.2.0）
+│   ├── SKILL.md                  # 宿主无关总控内核（v4.2.1）
 │   ├── worker.md                 # 子代理通用前置契约（含 [zee-worker] 防递归哨兵）
 │   ├── roles/                    # scout / architect / ui / coder / verifier / reviewer
 │   ├── disciplines/              # domain-modeling / deep-modules / diagnosing-bugs / code-smells / phase-boundaries / verification-skill
 │   ├── references/               # harness / antigravity / interop / protocols / plan-mode / greenfield / overnight / specialized
-│   └── scripts/                  # zee-tool.mjs（20 确定性原语）+ lib/guard-core.mjs（跨平台安全核）
+│   └── scripts/                  # zee-tool.mjs（21 原语）+ lib/guard-core.mjs + lib/provider-health.mjs
 ├── zee-plan/                     # Grill 访谈 + 领域建模 → 计划文档
 ├── zee-init/                     # 项目 0→1 全自动建项
 ├── zee-review/                   # 只读跨家族三轴对抗审查

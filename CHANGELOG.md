@@ -1,5 +1,28 @@
 # Changelog
 
+## [4.2.1] - 2026-11-26
+
+> 专项响应 Mac mini 端 7 场景真实程序员实战体验评测反馈（`8.1 / 10` 报告中的 8 大体感痛点与 5 条高杠杆建议）。
+
+### Added
+- **跨会话 `429/5xx` 熔断冷却与 `0ms` 健康切备（`skills/zee/scripts/lib/provider-health.mjs`, `zee-tool.mjs provider-health`, `pi-extension/index.ts`, `pi-extension/hub-ui.ts`）**：
+  - `zee_subagent` v2.4 将 HTTP `429`（默认 `30m` TTL）与 `5xx`（默认 `5m` TTL）建连即败记录至 `~/.local/state/zee/provider-health.json`，**彻底免扣 `delegatesDispatched` 预算名额**；后续 `zee_subagent` 与 `zee-tool.mjs resolve-model`（无 `--ignore-cooldown` 时）直接 `0ms` 自动切换健康备胎（遵守跨家族审查隔离）。
+  - 新增 `zee-tool.mjs provider-health [--clear [modelKey]]` 并集成进 `doctor`；Hub Tab 4 新增冷却通道清单、Tab 5 新增 `[h]` 一键清理冷却操作。
+- **Pi 11 干净命令去重（`package.json`, `pi-extension/index.ts` `expandBundledZeeSkill`）**：移除 `package.json` 中的 `pi.skills` 暴露，改为 `pi-extension/index.ts` 直接读取并展开仓库内置 `skills/<name>/SKILL.md`，消灭 Pi 命令列表 19 项 `/skill:zee*` 重影。
+- **`/zee-review --strict / --quick` 双档位与 **`L1.5` 轻量快轨**（`skills/zee-review/SKILL.md`, `skills/zee/SKILL.md`, `pi-extension/index.ts`）**：
+  - `/zee-review` 默认 `--strict` 在 Pi 扩展层机械自动创建独立 `review-*` 总线并追踪跨家族 `Reviewer` 派发（跳过则记录 `G-02` 告警），`--quick`（目标 `<45s`）用于小 diff 轻量只读快审；`/zee` 路由新增 `L1.5` 轻量快轨降低 `≤3` 文件小修耗时。
+- **HUD/流式实时心跳深化**：`HEARTBEAT_INTERVAL_MS` 缩短至 `10s`，实时输出 `turns`、`cost` 与纯思考 `thinking=Xs`；Layer 1 `formatWorkerLine` 同步显示 `t<turns>` 与 `$<cost>`。
+
+### Changed & Fixed
+- **解除只读锁 3 类“自伤”摩擦（`skills/zee/scripts/lib/guard-core.mjs`）**：
+  - 严格在 `/tmp/zee-*` / `os.tmpdir()/zee-*` 沙盒内放行本地 `git -C ... init/apply/add/commit/...`（**绝不含 `push`**）；
+  - `cp` 识别 `-t <dir>` / `--target-directory=<dir>` 并支持 `${TMPDIR:-/tmp}` 沙盒变量绑定；
+  - `<busDir>`（`RUNS_ROOT`）及白名单目标文件放行受控 `sed -i` / `perl -i` 与解释器写操作（业务源码与逃逸 `..` 仍硬拦截）；
+  - `review`/`plan` 锁下精准放行清理 `.gitignore` 忽略且零 tracked 文件的标准构建/测试产物目录（`test-results/`、`dist/`、`playwright-report/`、`coverage/` 等，严禁删 `.git`/`node_modules`/`.env*`）。
+- **修复功能分支下 worktree 清理基准（`zee-tool.mjs cleanup-worktrees`）**：未显式传入 `--base` 时默认同时校验当前 `HEAD` 与默认主干，使功能分支内已合并 worktree 立即可被 `--prune-safe` 回收。
+- **强化父编排器全局规则隔离（`pi-extension/index.ts`, `zee-tool.mjs audit-rules`）**：即使 `/zee-mode off` 时显式运行 `/zee-retro` 等命令，也在父会话注入 `AMBIENT_RULE_ISOLATION_LINE` 覆盖 `~/CLAUDE.md` / `~/.claude/CLAUDE.md` / `~/.pi/agent/AGENTS.md` 的冲突硬限制。
+- **包清单与脚本同步**：`package.json` 与 `.antigravity-plugin/plugin.json` 同步升至 `4.2.1`。
+
 ## [4.2.0] - 2026-11-26
 
 ### Added

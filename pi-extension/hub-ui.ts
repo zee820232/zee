@@ -46,6 +46,7 @@ export interface HubStateSnapshot extends ZeeFsmPersistedSnapshot {
 	decisionsTail: DecisionRow[];
 	projectConfig: ProjectConfigSnapshot | null;
 	worktreeInventory: WorktreeInventory | null;
+	providerCooldowns: Array<{ key: string; reason: string; remainingSec: number }>;
 	costByRole: Record<string, number>;
 	costByModel: Record<string, number>;
 	lastSyncAt: number;
@@ -59,6 +60,7 @@ export interface HubActions {
 	onCycleHudDensity?: () => Promise<void> | void;
 	onPauseRun?: () => Promise<void> | void;
 	onCopyResume?: (cmd: string) => Promise<void> | void;
+	onClearCooldowns?: () => Promise<string | void> | string | void;
 }
 
 export const HUB_OVERLAY_OPTIONS: OverlayOptions = {
@@ -170,6 +172,7 @@ export function createInitialHubSnapshot(cwd: string, fsm?: ZeeFsmPersistedSnaps
 		decisionsTail: [],
 		projectConfig: null,
 		worktreeInventory: null,
+		providerCooldowns: [],
 		costByRole,
 		costByModel,
 		lastSyncAt: 0,
@@ -346,9 +349,11 @@ function formatWorkerLine(w: WorkerLaneState, now: number): string {
 			: w.lastActions.length > 0
 				? w.lastActions[w.lastActions.length - 1]
 				: w.phase;
+	const turnsPart = w.turns > 0 ? ` · t${w.turns}` : "";
+	const costPart = w.cost > 0 ? ` · $${w.cost.toFixed(2)}` : "";
 	const streamPart = w.streamChars && w.streamChars > 0 ? ` · ${w.streamChars}ch` : "";
 	const warnTag = w.phase === "STALLED_WARN" ? " [STALL]" : w.phase === "PREPARING_WT" ? " [WT]" : "";
-	return `▸ ${w.role}${warnTag} · ${modelLabel} · ${elapsed}s · ${activity}${streamPart}`;
+	return `▸ ${w.role}${warnTag} · ${modelLabel} · ${elapsed}s${turnsPart}${costPart} · ${activity}${streamPart}`;
 }
 
 /**
@@ -647,7 +652,7 @@ export class ZeeHubOverlayComponent implements Component {
 		this.tui.requestRender();
 	}
 
-	private triggerControlKey(key: "m" | "l" | "w" | "c" | "d" | "p", snap: HubStateSnapshot): void {
+	private triggerControlKey(key: "m" | "l" | "w" | "c" | "d" | "p" | "h", snap: HubStateSnapshot): void {
 		if (key === "m") {
 			void Promise.resolve(this.actions.onCycleMode?.()).then(() => {
 				this.setToast(`已切换路由模式 -> ${this.store.getSnapshot().routingMode}`);
@@ -667,6 +672,13 @@ export class ZeeHubOverlayComponent implements Component {
 			} catch {}
 			void Promise.resolve(this.actions.onCopyResume?.(cmd));
 			this.setToast(`已复制续跑命令：${cmd}`);
+			return;
+		}
+		if (key === "h") {
+			this.setToast("正在清除 429/5xx 模型冷却缓存...");
+			void Promise.resolve(this.actions.onClearCooldowns?.()).then((msg) => {
+				this.setToast(typeof msg === "string" && msg ? msg : "已清除模型冷却缓存。");
+			});
 			return;
 		}
 		if (key === "l") {
@@ -796,7 +808,7 @@ export class ZeeHubOverlayComponent implements Component {
 					this.workerCursor = Math.max(0, Math.min(workers.length - 1, this.workerCursor + delta));
 				}
 			} else if (this.activeTab === 4) {
-				this.controlCursor = Math.max(0, Math.min(5, this.controlCursor + delta));
+				this.controlCursor = Math.max(0, Math.min(6, this.controlCursor + delta));
 			} else {
 				this.scrollOffset = Math.max(0, this.scrollOffset + delta);
 			}
@@ -811,7 +823,7 @@ export class ZeeHubOverlayComponent implements Component {
 				return;
 			}
 			if (this.activeTab === 4) {
-				const keys: Array<"m" | "l" | "w" | "c" | "d" | "p"> = ["m", "l", "w", "c", "d", "p"];
+				const keys: Array<"m" | "l" | "w" | "c" | "d" | "p" | "h"> = ["m", "l", "w", "c", "d", "p", "h"];
 				this.triggerControlKey(keys[this.controlCursor] ?? "m", snap);
 				return;
 			}
@@ -819,7 +831,7 @@ export class ZeeHubOverlayComponent implements Component {
 
 		// 9. Tab 5 单键快捷键
 		if (this.activeTab === 4) {
-			for (const k of ["m", "l", "w", "c", "d", "p"] as const) {
+			for (const k of ["m", "l", "w", "c", "d", "p", "h"] as const) {
 				if (matchesKey(data, k) || data === k) {
 					this.triggerControlKey(k, snap);
 					return;
@@ -1002,6 +1014,16 @@ export class ZeeHubOverlayComponent implements Component {
 		renderBars("按角色 (Role)", snap.costByRole);
 		renderBars("按模型 (Model)", snap.costByModel);
 
+		lines.push("");
+		lines.push(bold(this.theme, `429/5xx 熔断冷却通道 (${snap.providerCooldowns.length}):`));
+		if (snap.providerCooldowns.length === 0) {
+			lines.push(fg(this.theme, "dim", "  (当前无冷却通道)"));
+		} else {
+			for (const cd of snap.providerCooldowns) {
+				lines.push(fg(this.theme, "warning", `  [COOLDOWN] ${cd.key} · ${cd.reason} · 剩余 ${cd.remainingSec}s`));
+			}
+		}
+
 		return lines.map((l) => fitToWidth(l, innerWidth));
 	}
 
@@ -1013,6 +1035,7 @@ export class ZeeHubOverlayComponent implements Component {
 			{ key: "c", label: `复制续跑命令 (/zee resume ${snap.slug || ""})` },
 			{ key: "d", label: `切换 HUD 密度 (当前: ${snap.hudDensity} -> full/compact/hidden)` },
 			{ key: "p", label: `暂停当前运行 (当前: ${snap.phase} -> PAUSED) [需确认]` },
+			{ key: "h", label: `清除 429/5xx 模型冷却缓存 (当前活跃: ${snap.providerCooldowns.length}, provider-health --clear)` },
 		];
 
 		const lines: string[] = [
@@ -1039,7 +1062,7 @@ export class ZeeHubOverlayComponent implements Component {
 		const innerWidth = Math.max(10, width - 4);
 
 		// Header
-		const title = ` zee Hub v4.2.0 · ${snap.riskLevel}·${snap.routingMode}·${snap.trustLevel} · ${snap.phase} `;
+		const title = ` zee Hub v4.2.1 · ${snap.riskLevel}·${snap.routingMode}·${snap.trustLevel} · ${snap.phase} `;
 		const topBorder = fitToWidth(buildBorderLine("╭", "╮", `─${title}`, "─", width), width);
 
 		// Tab Bar

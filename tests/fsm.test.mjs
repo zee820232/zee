@@ -578,3 +578,52 @@ test("hub-ui.ts：Layer 0 徽章、Layer 1 HUD 80/120/50 列宽度不变量、Hu
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("v4.2.1：fsm.ts 保持零 provider-health/node:fs 依赖；Hub Tab 4 展示冷却通道、Tab 5 [h] 清冷却、HUD 行含 turns/cost", async () => {
+  const fsmSrc = fs.readFileSync(path.join(REPO_ROOT, "pi-extension", "fsm.ts"), "utf8");
+  assert.equal(/provider-health/.test(fsmSrc), false);
+  assert.equal(/node:fs/.test(fsmSrc), false);
+
+  const now = Date.now();
+  let f = fsm.createInitialFsmSnapshot("auto", now);
+  f = fsm.reduceFsm(f, { type: "START_RUN", track: "build", riskLevel: "L2", phase: "REVIEWING" }, now);
+  f = fsm.reduceFsm(f, { type: "WORKER_START", id: "w-cd", model: "gpt-6.1-sol" }, now - 8000);
+  f = fsm.reduceFsm(f, { type: "WORKER_PROGRESS", id: "w-cd", turns: 3, cost: 0.25, inFlightTool: "bash" }, now - 2000);
+
+  let cleared = 0;
+  const snap = {
+    ...hubUi.createInitialHubSnapshot(REPO_ROOT, f),
+    providerCooldowns: [{ key: "magpie/remote-magpie/devin/gemini-4-hydrogen", reason: "HTTP 429 / 配额耗尽", remainingSec: 1750 }],
+  };
+  const hud = hubUi.renderZeeHudLines(snap, 120, 40, undefined, now);
+  assert.ok(hud.some((l) => l.includes("t3") && l.includes("$0.25")), "HUD Worker 行必须包含实时 turns 与 cost");
+
+  const store = new hubUi.HubStore(snap);
+  const fakeTui = { terminal: { rows: 40 }, requestRender: () => {} };
+  const hub = new hubUi.ZeeHubOverlayComponent(
+    store,
+    fakeTui,
+    {},
+    {
+      onClearCooldowns: () => {
+        cleared += 1;
+        store.update((s) => ({ ...s, providerCooldowns: [] }), true);
+        return "cleared";
+      },
+    },
+    () => {},
+  );
+
+  hub.handleInput("4");
+  const tab4 = hub.render(100);
+  assert.ok(tab4.some((l) => l.includes("429/5xx 熔断冷却通道 (1)")));
+  assert.ok(tab4.some((l) => l.includes("[COOLDOWN]") && l.includes("gemini-4-hydrogen")));
+  for (const l of hub.render(80)) assert.ok(visibleWidth(l) <= 80);
+
+  hub.handleInput("5");
+  hub.handleInput("h");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(cleared, 1);
+  assert.equal(store.getSnapshot().providerCooldowns.length, 0);
+  store.dispose();
+});

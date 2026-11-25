@@ -352,3 +352,245 @@ first
     if (wtPath) fs.rmSync(path.dirname(path.dirname(path.dirname(wtPath))), { recursive: true, force: true });
   }
 });
+
+test("v4.2.0 sandbox-export / sandbox-clean / gate-tamper-diff 零污染沙盒与门禁篡改检测", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-sandbox-"));
+  let shaBox = "";
+  let wtBox = "";
+  try {
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.mkdirSync(path.join(tmpRepo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, "src", "app.ts"), "export const v = 1;\n");
+    fs.writeFileSync(path.join(tmpRepo, "old.txt"), "remove me\n");
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+    const headSha = execFileSync("git", ["-C", tmpRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    // 1. --sha 导出与拒绝越权清理
+    const expSha = runTool(["sandbox-export", "--repo", tmpRepo, "--sha", headSha, "--prefix", "mut"]);
+    assert.equal(expSha.json.ok, true);
+    assert.equal(expSha.json.mode, "sha");
+    shaBox = expSha.json.sandboxDir;
+    assert.ok(path.basename(shaBox).startsWith("zee-mut-"));
+    assert.equal(fs.readFileSync(path.join(shaBox, "src", "app.ts"), "utf8"), "export const v = 1;\n");
+
+    const badCleanRepo = runTool(["sandbox-clean", tmpRepo], false);
+    assert.equal(badCleanRepo.status, 1);
+    const badCleanTmpRoot = runTool(["sandbox-clean", os.tmpdir()], false);
+    assert.equal(badCleanTmpRoot.status, 1);
+
+    const cleanedSha = runTool(["sandbox-clean", shaBox]);
+    assert.equal(cleanedSha.json.removed, true);
+    assert.equal(fs.existsSync(shaBox), false);
+    shaBox = "";
+
+    // 2. --working-tree 导出（含已修改文件、删除文件、未跟踪文件）及 gate-tamper-diff
+    fs.writeFileSync(path.join(tmpRepo, "src", "app.ts"), "export const v = 2 as any; // @ts-ignore\n");
+    fs.unlinkSync(path.join(tmpRepo, "old.txt"));
+    fs.mkdirSync(path.join(tmpRepo, "tests"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, "tests", "app.test.mjs"), "// eslint-disable-next-line\n");
+
+    const expWt = runTool(["sandbox-export", "--repo", tmpRepo, "--working-tree", "--prefix", "rev"]);
+    assert.equal(expWt.json.mode, "working-tree");
+    assert.equal(expWt.json.ref, "WORKING_TREE");
+    wtBox = expWt.json.sandboxDir;
+    assert.ok(path.basename(wtBox).startsWith("zee-rev-"));
+    assert.match(fs.readFileSync(path.join(wtBox, "src", "app.ts"), "utf8"), /v = 2/);
+    assert.equal(fs.existsSync(path.join(wtBox, "old.txt")), false);
+    assert.equal(fs.existsSync(path.join(wtBox, "tests", "app.test.mjs")), true);
+
+    const tamperWt = runTool(["gate-tamper-diff", "--repo", tmpRepo, "--working-tree"]);
+    assert.equal(tamperWt.json.requiresCountersign, true);
+    assert.ok(tamperWt.json.gateFilesTouched.includes("tests/app.test.mjs"));
+    assert.ok(tamperWt.json.suppressionsAdded.some((s) => s.file === "src/app.ts" && s.line.includes("@ts-ignore")));
+    assert.ok(tamperWt.json.suppressionsAdded.some((s) => s.file === "src/app.ts" && s.line.includes("as any")));
+    assert.ok(tamperWt.json.suppressionsAdded.some((s) => s.file === "tests/app.test.mjs" && s.line.includes("eslint-disable")));
+
+    // 3. committed base..head 范围检测
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "tamper"], { stdio: "ignore" });
+    const tamperRange = runTool(["gate-tamper-diff", "--repo", tmpRepo, "--base", headSha, "--head", "HEAD"]);
+    assert.equal(tamperRange.json.requiresCountersign, true);
+    assert.ok(tamperRange.json.gateFilesTouched.includes("tests/app.test.mjs"));
+
+    const cleanClean = runTool(["sandbox-clean", wtBox]);
+    assert.equal(cleanClean.json.removed, true);
+    wtBox = "";
+  } finally {
+    if (shaBox) fs.rmSync(shaBox, { recursive: true, force: true });
+    if (wtBox) fs.rmSync(wtBox, { recursive: true, force: true });
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("v4.2.0 mine-transcripts (retro+recall+脱敏)、queue-finding/list-findings、readiness、match-skills、--delegate-id、--allow-standalone", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-ops-"));
+  const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-mine-"));
+  let busDir = "";
+  try {
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+
+    // 1. queue-finding & list-findings (>=3 systemic)
+    const q1 = runTool(["queue-finding", "--repo", tmpRepo, "--category", "smell", "--pattern", "missing-seam", "--summary", "hard to test auth", "--file", "src/auth.ts"]);
+    assert.equal(q1.json.patternCount, 1);
+    assert.equal(q1.json.systemic, false);
+    runTool(["queue-finding", "--repo", tmpRepo, "--category", "smell", "--pattern", "missing-seam", "--summary", "hard to test billing", "--file", "src/billing.ts"]);
+    const q3 = runTool(["queue-finding", "--repo", tmpRepo, "--category", "smell", "--pattern", "missing-seam", "--summary", "hard to test checkout", "--file", "src/checkout.ts"]);
+    assert.equal(q3.json.patternCount, 3);
+    assert.equal(q3.json.systemic, true);
+    runTool(["queue-finding", "--repo", tmpRepo, "--category", "doc", "--pattern", "stale-readme", "--summary", "typo"]);
+
+    const listAll = runTool(["list-findings", "--repo", tmpRepo]);
+    assert.equal(listAll.json.totalEntries, 4);
+    assert.equal(listAll.json.clusters[0].pattern, "missing-seam");
+    assert.equal(listAll.json.clusters[0].systemic, true);
+    const listSys = runTool(["list-findings", "--repo", tmpRepo, "--min-count", "3"]);
+    assert.equal(listSys.json.clusters.length, 1);
+
+    // 2. mine-transcripts retro + recall + secrets redaction
+    fs.writeFileSync(
+      path.join(srcDir, "session.jsonl"),
+      [
+        JSON.stringify({
+          role: "user",
+          timestamp: new Date().toISOString(),
+          content: "No, that's wrong — stop using sk-1234567890abcdef1234567890 and ghp_abcdef1234567890abcdef!",
+        }),
+        JSON.stringify({
+          role: "assistant",
+          timestamp: new Date().toISOString(),
+          content: "Use Bearer supersecretjwtvalue12345 instead? Wait also pstack verify pattern failed.",
+        }),
+      ].join("\n") + "\n",
+    );
+    fs.writeFileSync(
+      path.join(srcDir, "notes.md"),
+      "Decision note: always run pstack verify before merge.\n\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234567890\n-----END RSA PRIVATE KEY-----\n",
+    );
+    fs.writeFileSync(
+      path.join(srcDir, "decisions.tsv"),
+      "ts\tunit\tphase\tdecision\twhy\tevidence\tresult\n2026-11-25T00:00:00Z\tU1\tverify\tFAIL\tpstack smoke failed\texit 1\tREVISE\n",
+    );
+
+    const retro = runTool(["mine-transcripts", "--mode", "retro", "--repo", tmpRepo, "--source-dir", srcDir]);
+    assert.equal(retro.json.ok, true);
+    assert.ok(retro.json.totalScanned >= 3);
+    const retroRaw = JSON.stringify(retro.json);
+    assert.equal(retroRaw.includes("sk-1234567890abcdef1234567890"), false);
+    assert.equal(retroRaw.includes("ghp_abcdef1234567890abcdef"), false);
+    assert.ok(retroRaw.includes("<REDACTED>"));
+    assert.ok(retro.json.snippets.some((s) => s.signal === "human_correction"));
+    assert.ok(retro.json.snippets.some((s) => s.signal === "decision_failure"));
+
+    const recall = runTool(["mine-transcripts", "--mode", "recall", "--repo", tmpRepo, "--source-dir", srcDir, "--query", "pstack verify", "--limit", "5"]);
+    assert.equal(recall.json.ok, true);
+    assert.ok(recall.json.matches.length >= 1);
+    const recallRaw = JSON.stringify(recall.json);
+    assert.equal(recallRaw.includes("supersecretjwtvalue12345"), false);
+    assert.equal(recallRaw.includes("MIIEowIBAAKCAQEA1234567890"), false);
+
+    // 3. readiness clamping: T3 configured without verify-* -> clamped to T1; then add T2 & T3 prerequisites
+    fs.mkdirSync(path.join(tmpRepo, ".agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRepo, ".agents", "zee.project.json"),
+      JSON.stringify({
+        trustLevel: "T3",
+        testCmds: ["node --test"],
+        lintCmd: "npm run lint",
+        denyCommands: ["--live"],
+        pathSkills: [
+          { glob: "src/auth/**", skill: "auth-guard", roles: ["coder", "reviewer"] },
+          { glob: "docs/*.md", skill: "docs/style-skill.md" },
+        ],
+      }),
+    );
+    const r1 = runTool(["readiness", tmpRepo]);
+    assert.equal(r1.json.configuredTrustLevel, "T3");
+    assert.equal(r1.json.maxEligibleTrustLevel, "T1");
+    assert.equal(r1.json.effectiveTrustLevel, "T1");
+    assert.equal(r1.json.clamped, true);
+
+    fs.mkdirSync(path.join(tmpRepo, ".agents", "skills", "verify-demo"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, ".agents", "skills", "verify-demo", "SKILL.md"), "# verify-demo\n");
+    const r2 = runTool(["readiness", tmpRepo]);
+    assert.equal(r2.json.maxEligibleTrustLevel, "T2");
+    assert.equal(r2.json.effectiveTrustLevel, "T2");
+
+    fs.mkdirSync(path.join(tmpRepo, ".agents", "skills", "verify-demo", "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, ".agents", "skills", "verify-demo", "scripts", "verify-ctl.mjs"), "console.log('ok');\n");
+    fs.writeFileSync(
+      path.join(tmpRepo, ".agents", "zee.project.json"),
+      JSON.stringify({
+        trustLevel: "T3",
+        testCmds: ["node --test"],
+        lintCmd: "npm run lint",
+        denyCommands: ["--live"],
+        riskPaths: ["src/auth/**"],
+        pathSkills: [
+          { glob: "src/auth/**", skill: "auth-guard", roles: ["coder", "reviewer"] },
+          { glob: "docs/*.md", skill: "docs/style-skill.md" },
+        ],
+      }),
+    );
+    const r3 = runTool(["readiness", tmpRepo]);
+    assert.equal(r3.json.maxEligibleTrustLevel, "T3");
+    assert.equal(r3.json.effectiveTrustLevel, "T3");
+    assert.equal(r3.json.clamped, false);
+
+    // doctor --repo exposes readiness without failing doctor due to readiness
+    const doc = runTool(["doctor", "--repo", tmpRepo], false);
+    assert.equal(doc.json.readiness.effectiveTrustLevel, "T3");
+
+    // 4. match-skills
+    fs.mkdirSync(path.join(tmpRepo, ".agents", "skills", "auth-guard"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, ".agents", "skills", "auth-guard", "SKILL.md"), "# auth-guard\n");
+    fs.mkdirSync(path.join(tmpRepo, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, "docs", "style-skill.md"), "# style\n");
+
+    const msCoder = runTool(["match-skills", "--repo", tmpRepo, "--files", "src/auth/login.ts,docs/guide.md", "--role", "coder"]);
+    assert.equal(msCoder.json.matched.length, 2);
+    const msScout = runTool(["match-skills", "--repo", tmpRepo, "--files", "src/auth/login.ts,docs/guide.md", "--role", "scout"]);
+    assert.equal(msScout.json.matched.length, 1);
+    assert.equal(msScout.json.matched[0].skill, "docs/style-skill.md");
+
+    // 5. update-state --delegate-id idempotent deduplication + 200 cap
+    const init = runTool(["init-run", tmpRepo, "dedup-test"]);
+    busDir = init.json.busDir;
+    const d1 = runTool(["update-state", busDir, "--inc-delegates", "--delegate-id", "call-1"]);
+    assert.equal(d1.json.state.delegatesDispatched, 1);
+    const d2 = runTool(["update-state", busDir, "--inc-delegates", "--delegate-id", "call-1"]);
+    assert.equal(d2.json.state.delegatesDispatched, 1);
+    const d3 = runTool(["update-state", busDir, "--delegate-id", "call-2"]);
+    assert.equal(d3.json.state.delegatesDispatched, 2);
+
+    const statePath = path.join(busDir, "state.json");
+    const stSeed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    stSeed.countedDelegateIds = Array.from({ length: 200 }, (_, i) => `id-${i}`);
+    fs.writeFileSync(statePath, JSON.stringify(stSeed, null, 2));
+    const dCap = runTool(["update-state", busDir, "--inc-delegates", "--delegate-id", "id-200"]);
+    assert.equal(dCap.json.state.countedDelegateIds.length, 200);
+    assert.equal(dCap.json.state.countedDelegateIds[0], "id-1");
+    assert.equal(dCap.json.state.countedDelegateIds[199], "id-200");
+
+    // 6. resolve-model --allow-standalone
+    const stAgy = runTool(["resolve-model", "--harness", "agy", "--role", "scout", "--config", path.join(tmpRepo, "missing.json"), "--allow-standalone"]);
+    assert.equal(stAgy.json.ok, true);
+    assert.equal(stAgy.json.standalone, true);
+    assert.equal(stAgy.json.resolved.model, "inherit");
+    const stPi = runTool(["resolve-model", "--harness", "pi", "--role", "coder", "--config", path.join(tmpRepo, "missing.json"), "--allow-standalone"]);
+    assert.equal(stPi.json.ok, true);
+    assert.equal(stPi.json.standalone, true);
+    assert.equal(stPi.json.resolved.model, null);
+
+    // 7. scripts/install.mjs --help prints v4.2.0
+    const instRes = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--help"], { encoding: "utf8" });
+    assert.equal(instRes.status, 0);
+    assert.match(instRes.stdout, /v4\.2\.0/);
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(srcDir, { recursive: true, force: true });
+    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+  }
+});

@@ -5,11 +5,11 @@ description: >-
 disable-model-invocation: true
 ---
 
-# zee — Universal Multi-Model Autonomous Workflow (v4.1.1)
+# zee — Universal Multi-Model Autonomous Workflow (v4.2.0)
 
-Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | verify-init | verify-maintain | arch | retro | investigate | perf | loop | prototype | sweep | resume | night]`
-Shortcuts (9 User-Invoked Skills): `zee`, `zee-plan`, `zee-init`, `zee-review`, `zee-verify`, `zee-arch`, `zee-retro`, `zee-night`, `zee-setup` (plus Pi `/zee-mode` auto-routing switch and Antigravity `agy --agent zee` primary agent).
-Current session acts as **Orchestrator** on whichever harness `zee` is installed in. Never delegate orchestration itself, and only manage the active harness where this skill lives (`<zeeDir>` = parent directory of this `SKILL.md`).
+Command syntax: `/zee <request> [init | plan | L0 | L1 | L2 | L3 | debate | review | verify-init | verify-maintain | arch | retro | recall | triage | investigate | perf | loop | prototype | sweep | resume | night]`
+Shortcuts (9 User-Invoked Skills): `zee`, `zee-plan`, `zee-init`, `zee-review`, `zee-verify`, `zee-arch`, `zee-retro`, `zee-night`, `zee-setup` (plus Pi `/zee-mode` + `/zee-hub` and Antigravity `agy --agent zee` primary agent).
+Current session acts as **Orchestrator** in the active harness (`<zeeDir>` = parent directory of this `SKILL.md`). Never delegate orchestration itself.
 
 ## User-Facing Language Policy (Mandatory)
 - **All user-facing prompts, questions, status updates, routing reasons, fallback notices, confirmation cards, final reports, and morning briefs MUST be written in clear Simplified Chinese (简体中文)** (unless the user explicitly asks for another language).
@@ -17,73 +17,74 @@ Current session acts as **Orchestrator** on whichever harness `zee` is installed
 
 ## 0. Preflight (Every Run)
 
-1. Resolve `<zeeDir>` (the directory containing this `SKILL.md`). Load `<zeeDir>/references/harness.md` to bind abstract ops (`PROBE`, `SPAWN`, `ISOLATE`, `ASK`, `VISUAL_CHECK`, `SCHEDULE`) to the active harness only (load `<zeeDir>/references/antigravity.md` when running natively in Google Antigravity), and follow `<zeeDir>/references/interop.md` when reusing host-discovered domain skills.
-2. Read `~/.agents/zee-config.json` (plus optional `<repo>/.agents/zee.project.json` and `<repo>/.agents/zee.local.json`). If missing, run `zee-setup` first.
-3. Run `PROBE` once per thread. Resolve each needed role slot (`bindings.<harness>` -> `prefer` -> authorized `backup`) with **Capability Clamping** onto live supported option values (cap routine effort at `xhigh`). Fail closed if no authorized model is available; always announce any `backup` switch to the user in Chinese.
-4. Detect workspace state (`git rev-parse --verify HEAD`, dirty tree, `CONTEXT.md`/`GLOSSARY.md`, `docs/adr/`). Ignore repo-irrelevant global `~/CLAUDE.md` rules.
+1. Resolve `<zeeDir>`, load `<zeeDir>/references/harness.md` (`references/antigravity.md` when in Antigravity), and follow `<zeeDir>/references/interop.md` for `<available_skills>` and `pathSkills`. *(Runtime guards `guard-core.mjs` / `worker-guard.ts` / `agy-guard.mjs` physically enforce `plan`/`review`/`init-design` write locks, `denyCommands`, read-only `edit` stripping, and Pi `authorFamily` isolation.)*
+2. Read `~/.agents/zee-config.json` (plus optional `<repo>/.agents/zee.project.json` and `<repo>/.agents/zee.local.json`).
+   - **Zero-Config Standalone ("Own Set of Knives")**: if `~/.agents/zee-config.json` is absent, **do NOT block** standalone / read-only workflows (`zee-verify`, `zee-retro`, `zee-arch`, `zee-review`, `zee-plan`, `/zee recall`, `/zee triage`, `/zee investigate`, or L0/L1 standalone tasks). Call `node "<zeeDir>/scripts/zee-tool.mjs" resolve-model --allow-standalone --role <role>` (exits 0 with `standalone: true`), degrade gracefully to the current session model, and output one brief Chinese notice (`提示：未检测到 ~/.agents/zee-config.json，已进入零配置单兵模式（使用当前会话模型）；如需跨家族异构审查与多模型角色分工，可随时运行 /zee-setup。`). For full multi-model L3 Arena / cross-family Gate 2 / `night`, recommend `/zee-setup` or note single-family limitation clearly.
+3. When `zee-config.json` exists, run `PROBE` once per thread and resolve each needed role slot (`bindings.<harness>` -> `prefer` -> authorized `backup`) with **Capability Clamping** (cap routine effort at `xhigh`). Fail closed if no authorized model is live; announce any `backup` switch in Chinese.
+4. Detect workspace state (`git rev-parse --verify HEAD`, dirty tree, `GLOSSARY.md`, `docs/adr/`). When `.agents/zee.project.json` exists, run `node "<zeeDir>/scripts/zee-tool.mjs" readiness "<repoRoot>"` to resolve effective `trustLevel` (`T1`/`T2`/`T3`). Ignore repo-irrelevant global `~/CLAUDE.md` rules.
 5. Create Out-of-Tree Run Bus via:
-   `node "<zeeDir>/scripts/zee-tool.mjs" init-run "<repoRoot>" "<slug>"` (pass `--conversation-id "<cid>"` on Antigravity so `night` Stop-hook scoping stays exact).
-   Always update `state.json` atomically via `zee-tool.mjs update-state` and append decisions via `zee-tool.mjs log-decision`. Never use repo-local `.scratch/` as the worker bus.
-   Honor `<zeeDir>/disciplines/phase-boundaries.md` (~150k Smart Zone & 5-option phase-boundary transitions) across multi-phase runs.
+   `node "<zeeDir>/scripts/zee-tool.mjs" init-run "<repoRoot>" "<slug>"` (pass `--conversation-id "<cid>"` on AGY).
+   Update `state.json` via `zee-tool.mjs update-state` and append `decisions.tsv` via `zee-tool.mjs log-decision`. **Idempotent Delegate Accounting**: on Pi, `zee_subagent` auto-records `delegatesDispatched` (deduplicated by `toolCallId`); when calling `update-state` manually or on non-Pi harnesses, pass `--delegate-id <id>` (never double-increment alongside Pi auto-accounting).
+   Honor `<zeeDir>/disciplines/phase-boundaries.md` (~150k Smart Zone & 5-option phase-boundary transitions).
 
 ## 1. Intake & Two-Track Routing
 
 Classify unknowns before asking: **code facts -> Scout**; **observable tech forks -> prototype**; **product/preference forks -> `ASK` in Chinese** (one batch with `推荐` defaults).
 
 - **Track A · Project 0→1 (`init` or empty repo / no `HEAD` / new product request)**
-  Load `<zeeDir>/references/greenfield.md` and run Stages 1–5 (`SPEC.md` Chinese sign-off -> 2-beat Architecture + `DESIGN.md` + Roadmap -> M0 Foundation Commit + M1 Walking Skeleton -> M2..Mk auto slices -> Cold-Start & E2E Delivery).
+  Load `<zeeDir>/references/greenfield.md` and run Stages 1–5 (`SPEC.md` Chinese sign-off -> 2-beat Architecture + `DESIGN.md` + Roadmap -> M0 Foundation Commit + M1 Walking Skeleton -> M2..Mk auto slices -> Cold-Start + `--fuzz` Delivery).
 - **Track B · 1→100 Risk-Routed Execution (`Risk × Intent × Mode`)**
   Assign provisional level and tell the user the level + reason in 1 Chinese line (re-evaluate after Scout; **upgrade only, never downgrade**):
   - **L0 Direct**: non-risk path, ≤1 file trivial edit/Q&A -> Orchestrator executes and runs a quick check.
   - **L1 Quick**: low-risk local change, no contract/schema/UI-system impact -> `[optional Scout]` -> `Coder(standard)` or `UI(standard)` -> `Verifier`.
-  - **L2 Standard**: multi-file feature, bug fix, refactor, or **any edit touching `riskPaths`** (auth, crypto, billing, migrations, live trading/signing, public APIs) -> full pipeline + Gate 1 `Verifier` -> Gate 2 cross-family `Reviewer`.
-    - *Coupled Single-Owner Fast-Track*: when an L2 task touches **≤3 tightly coupled files** with one logical seam, run a single `Coder` in one worktree serially through Seam TDD (skipping multi-worktree fan-out and merge ceremony) while keeping **Gate 1 `Verifier` -> Gate 2 cross-family `Reviewer`** intact.
-  - **L3 High-Stakes / Debate**: cross-module architecture, concurrency/state-machine change, major redesign, or explicit `debate`/`L3` -> `Scout(Deep)` -> orthogonal **Arena** + cross-vendor `Judge` + Orchestrator **Graft** -> `Coder(heavy)` / `UI(heavy)` -> `Verifier` (Gate 1) -> 2–3 cross-family `Reviewers` (Gate 2).
+  - **L2 Standard**: multi-file feature, bug fix, refactor, or **any edit touching `riskPaths`** (auth, crypto, billing, migrations, live trading/signing, public APIs) -> full pipeline + Gate 1 `Verifier` -> Gate 2 cross-family `Reviewer` (unless verified `T2`/`T3` non-risk fast-track applies).
+    - *Coupled Single-Owner Fast-Track*: when an L2 task touches **≤3 tightly coupled files** with one logical seam, run a single `Coder` in one worktree serially through Seam TDD while keeping Gate 1 `Verifier` -> Gate 2 `Reviewer` intact.
+  - **L3 High-Stakes / Debate**: cross-module architecture, concurrency/state-machine change, major redesign, or explicit `debate`/`L3` -> `Scout(Deep)` -> orthogonal **Arena** + cross-vendor `Judge` + Orchestrator **Graft** -> `Coder(heavy)` / `UI(heavy)` -> `Verifier` (Gate 1 + `--fuzz`) -> 2–3 cross-family `Reviewers` (Gate 2).
   - **Standalone & Specialized Modes**:
-    - `plan` (or `/zee-plan`): load `<zeeDir>/references/plan-mode.md` + `disciplines/domain-modeling.md`. Runs `Scout` -> multi-round Chinese **Grilling + inline `GLOSSARY.md` / 3-condition ADR** (cross-turn write lock active) -> `Architect` (+ `UI`, optional dual-mode `prototype` / L3 Arena) -> `zee-tool.mjs check-plan` -> writes finalized `plan.md` and **stops without editing production code**.
+    - `plan` (`/zee-plan`): load `references/plan-mode.md` + `disciplines/domain-modeling.md`. `Scout` -> Chinese **Grilling + inline `GLOSSARY.md` / 3-condition ADR** -> `Architect` (+ `UI`) -> `check-plan` -> finalized `plan.md`; **stops without editing production code**.
     - `debate`: stops after L3 Arena + cross-vendor Judge ADR/decision report.
-    - `review` (or `/zee-review`): initializes an independent run bus and runs cross-family `Reviewers` read-only on target diff/SHA **or uncommitted workspace changes** without editing.
-    - `verify` (or `/zee-verify [init|maintain|run]`): project-local `verify-<app>` verification skill lifecycle (generate & live-prove on existing/new repos, anti-rot maintenance, or read-only live verification run).
-    - `arch` (or `/zee-arch`): deep-module churn hotspot audit (`disciplines/deep-modules.md`) emitting a Before/After HTML report without editing production code.
-    - `retro` (or `/zee-retro`): session retrospective & 4-level error hardening (mechanical checks proven to bite on historical failures).
-    - `investigate` / `perf` (`hillclimb`) / `loop` / `prototype` / `sweep` / `verify-init` / `verify-maintain`: load `<zeeDir>/references/specialized.md` (and `disciplines/verification-skill.md` for `verify-*`).
-    - `resume`: run `node "<zeeDir>/scripts/zee-tool.mjs" list-runs "<repoRoot>"` to locate active/paused buses and follow Session-Pickup in `<zeeDir>/references/overnight.md`.
-  - **Approved Plan Fast-Path**: if the user passes an existing approved `plan.md` / `SPEC.md` (e.g. from `zee-plan`), verify no repo drift and skip Intake/Architect straight into **Build -> Check -> Merge**.
-  - **`night` Mode (or `/zee-night`, orthogonal modifier)**: load `<zeeDir>/references/overnight.md`. Applies autonomous branch isolation, Unit 0 verification harness + baseline, Canary first unit, `decisions.tsv` audit trail, 70% cutoff & budget fuse, and Chinese morning report.
+    - `review` (`/zee-review`): independent bus + read-only cross-family `Reviewers` on target diff/SHA or uncommitted edits.
+    - `verify` (`/zee-verify [init|maintain|run]`): `verify-<app>` (`SKILL.md` + `scripts/verify-ctl.*` + `features/`) lifecycle with `/tmp/zee-verify-*` output isolation and optional `--fuzz`.
+    - `arch` (`/zee-arch`): deep-module churn hotspot + `list-findings` audit (`disciplines/deep-modules.md`) emitting Before/After HTML report without editing production code.
+    - `retro` (`/zee-retro`): session retrospective (`mine-transcripts --mode retro` + `list-findings` + `list-runs` + `git log`) -> 4-level hardening + Skill Creation / Dead-Rule Pruning.
+    - `recall <topic>` (`references/specialized.md` §7): calls `zee-tool.mjs mine-transcripts --mode recall --query "<topic>"`, emits `<= 40` line historical context brief without editing repo.
+    - `triage` (`references/specialized.md` §8): 3-step Chief-of-Staff clustering (verify repro on `main` -> cluster shared root cause -> emit `/zee-plan`/`/zee-night` brief or `queue-finding`).
+    - `investigate` / `perf` (`hillclimb`) / `loop` / `prototype` / `sweep` / `verify-init` / `verify-maintain`: load `references/specialized.md` (and `disciplines/verification-skill.md` for `verify-*`).
+    - `resume`: run `zee-tool.mjs list-runs "<repoRoot>"` and follow Session-Pickup in `references/overnight.md`.
+  - **Approved Plan Fast-Path**: if the user supplies an approved `plan.md` / `SPEC.md`, verify no repo drift and jump straight to **Build -> Check -> Merge**.
+  - **`night` Mode (`/zee-night`, orthogonal modifier)**: load `references/overnight.md` (branch `zee/<slug>`, Unit 0 + Canary, `trustLevel`, `decisions.tsv`, 70% cutoff, Audit Judge, Chinese morning report).
 
 ## 2. Core Pipeline (Load Role Card Per Step)
 
-Load `<zeeDir>/references/protocols.md` for bus schemas, Pinned SHA rules, and worktree merging. Every `SPAWN` prompt MUST start with the `<zeeDir>/worker.md` header, explicit target model + explicit options, role card path, bus path, and pinned SHA.
+Load `<zeeDir>/references/protocols.md` for bus schemas, Trust Ladder (`T1`/`T2`/`T3`), Pinned SHA, and worktree merging. Every `SPAWN` prompt MUST start with `<zeeDir>/worker.md` header, explicit target model + options, role card path, bus path, and pinned SHA.
 
-1. **Scout (`roles/scout.md`)** [L2+]: read-only pointer map (`file:line`, test commands, `riskPaths`, non-grep readers, optional MCP evidence sources). Re-check level (upgrade only).
+1. **Scout (`roles/scout.md`)** [L2+]: read-only pointer map (`file:line`, gate cmds, `riskPaths`, non-grep readers, MCP evidence). Re-check level (upgrade only).
 2. **Design (`roles/architect.md` + `roles/ui.md`)**:
-   - **Bug Intent**: skip Architect; write a 10-line `<busDir>/bug-brief.md` (symptom, repro command, expected behavior) as Reviewer Axis 1 anchor, then open Bug Fast-Track in `roles/coder.md` (Phase 1 must prove a fast **red reproduction** before touching production code).
-   - **Feature / Refactor**: Architect produces `plan.md` (data shape, Test Seam, Throughput Checkpoint, Out-of-Scope, falsifiable `Done Predicate`, vertical slices each **≤5 files / ≤400 LOC**; L3 runs orthogonal Arena + anonymous cross-vendor Judge + Orchestrator Graft). Validate with `zee-tool.mjs check-plan`.
-   - **UI Scope** (matches `uiGlobs` or visual task): `ui` runs alongside Architect to emit `ui-spec.md` (state matrix, design tokens, visual rubric, optional `?variant=` prototype). Default L3 proceeds after design unless user asks to review plan first.
+   - **Bug Intent**: skip Architect; write 10-line `<busDir>/bug-brief.md` as Reviewer Axis 1 anchor, then run Bug Fast-Track in `roles/coder.md` (Phase 1 red repro before editing production code).
+   - **Feature / Refactor**: Architect emits `plan.md` (data shape, Test Seam, Throughput Checkpoint, Out-of-Scope, falsifiable `Done Predicate`, slices **≤5 files / ≤400 LOC**; L3 runs Arena + Judge + Graft). Validate with `zee-tool.mjs check-plan`.
+   - **UI Scope** (`uiGlobs` or visual task): `ui` emits `ui-spec.md` alongside Architect.
 3. **Build (`roles/coder.md`, `roles/ui.md`)**:
-   - Execute in isolated worktree (`ISOLATE` — on Pi use `zee_subagent({ worktree: {...} })`; on AGY use `Workspace: "share"`). Never modify shared integration files (`CHANGELOG.md`, `README.md`, global test registries) on parallel branches.
-   - Writer runs pre-commit `deslop` hygiene, commits on worktree branch, and returns `BRANCH`, `HEAD_SHA`, and local check results.
+   - Run in isolated worktree (`ISOLATE`), injecting matched project skills from `zee-tool.mjs match-skills --repo "<repoRoot>" --files "<csv>" --role <role>`. Keep shared index files (`CHANGELOG.md`, `README.md`, global test registries) for the integration writer.
+   - Commit on worktree branch and return `BRANCH`, `HEAD_SHA`, `VERIFY_MAP_DELTA`, and `LOCAL_CHECKS`.
 4. **Check (`roles/verifier.md` + `roles/reviewer.md`) on Pinned SHA**:
-   - **Strict Serial Gate 1 -> Gate 2 (L2 / L3 / Stage 5 / `night`)**: ALWAYS run `Verifier` (**Gate 1**) first. Launch cross-family `Reviewer`(s) (**Gate 2**) ONLY after Gate 1 returns `VERDICT: PASS`. Never waste review tokens on code that fails build/tests.
-   - `Reviewer` MUST exclude the `family` used by `Coder`/`UI` on this unit (on Pi pass `authorFamily` to `zee_subagent` for static enforcement); include ≥1 multimodal reviewer when UI screenshots exist.
-   - **Lead Verifier Rerun**: before accepting any dynamic Axis 3 `P0/P1` blocker from a Reviewer, the Orchestrator re-runs the cited reproduction command once to filter false positives and build an explicit Agreement Map when multiple reviewers run.
-   - **Gate Tampering Rule**: any diff modifying existing tests, snapshots, baselines, lint/CI config, or pinned hashes requires explicit rationale + cross-family Reviewer countersign.
-5. **Merge (`Sequential Grafting`)**: merge verified SHAs one by one into the integration branch (`zee/<slug>` in `night`), verifying after each merge. Never bulk-merge parallel branches.
+   - **Strict Serial Gate 1 -> Gate 2 (L2 / L3 / Stage 5 / `night` under `T1` default, or any `riskPaths` / UI / `GATE_CHANGE_RATIONALE` slice)**: ALWAYS run `Verifier` (**Gate 1**, with `--fuzz` enabled by default on `L3`, `Stage 5`, and `T3`) first; launch cross-family `Reviewer`(s) (**Gate 2**) ONLY after Gate 1 returns `VERDICT: PASS`. Under `readiness`-verified `T2`/`T3` non-risk two-way-door slices, `Verifier` `PASS` unlocks merge onto `zee/<slug>` with cross-family batch/morning sampling (`protocols.md`).
+   - `Reviewer` MUST exclude the `family` used by `Coder`/`UI` (pass `authorFamily` on Pi) and run `zee-tool.mjs gate-tamper-diff` first; include ≥1 multimodal reviewer when UI screenshots exist.
+   - **Lead Verifier Rerun**: re-run any dynamic Axis 3 `P0/P1` repro command once before triggering rework, and build an explicit Agreement Map for multi-reviewer passes.
+   - **Gardening Queue Capture**: persist non-blocking `P2` smells, missing Test Seams, and repeated workarounds into `.agents/gardening-queue.jsonl` via `zee-tool.mjs queue-finding` instead of mid-task scope creep.
+5. **Merge (`Sequential Grafting`)**: merge verified SHAs one by one, verifying after each merge and pruning clean worktrees via `cleanup-worktrees --prune-safe`.
 
 ## 3. Four-Level Failure Ladder, Partial Salvage & 70% Cutoff
 
-- **Partial Salvage Rule**: if a delegate returns `[STATUS: TIMEOUT_PARTIAL | IDLE_TIMEOUT_PARTIAL | STAGNANCY_LOOP_PARTIAL | ABORTED_PARTIAL]`, inspect its rescued `partialText` and `git status/HEAD` before re-dispatching — reuse valid findings or split oversized slices instead of blindly repeating the same prompt.
-- **70% Wall-Clock / Budget Cutoff**: when approaching 70% of the session wall-clock or delegate budget, STOP opening new feature units; immediately finish integrating verified SHAs, update `state.json`, and deliver the complete Chinese summary so work never times out mid-closeout.
+- **Partial Salvage Rule**: on `[STATUS: *_PARTIAL]`, inspect rescued `partialText` and `git status/HEAD` before re-dispatching.
+- **70% Wall-Clock / Budget Cutoff**: when approaching 70% of wall-clock or delegate budget, STOP opening new feature units; immediately finish integrating verified SHAs, update `state.json`, and deliver the complete Chinese summary.
 - **Level 0 · Micro-Fix (≤15 lines, localized, unambiguous)**: Orchestrator fixes directly, commits new SHA, and re-runs `Verifier`.
-- **Level 1 · 1st Substantive Failure**: spawn a fresh same-tier `Coder`/`UI` with consolidated scope; require a 5-line root-cause reflection before editing; allow evidence-backed objection.
-- **Level 2 · 2nd Failure on Same Root Cause**: state the shared premise of both failed attempts.
-  - Premise is in `plan.md` / boundaries -> trigger **`Scrap`** back to `Architect` (max 1 Scrap per task).
-  - Premise is implementation difficulty -> escalate to `heavy` tier (prefer switching model `family`).
-- **Level 3 · 3rd Failure (Hard Fuse)**: halt. Interactive -> present root cause & options in Chinese. `night` -> mark unit `parked`, block dependents, continue unrelated units; 2 consecutive `parked` units trigger global stop + Chinese morning report.
+- **Level 1 · 1st Substantive Failure**: fresh same-tier `Coder`/`UI` with consolidated scope + 5-line root-cause reflection; allow evidence-backed objection.
+- **Level 2 · 2nd Failure on Same Root Cause**: state shared premise -> `Scrap` back to `Architect` (max 1) OR escalate to `heavy` tier (prefer switching `family`).
+- **Level 3 · 3rd Failure (Hard Fuse)**: halt. Interactive -> Chinese root cause & options. `night` -> mark `parked`, continue unrelated units; 2 consecutive `parked` units trigger global stop + Chinese morning report.
 
 ## 4. Guardrails & Operator Controls
 
-- **One-Way Doors (Always Pause in Chinese)**: merge to protected `main`/trunk, `git push --force`, destructive data deletion, production deploy, external messages, and any command matching project `denyCommands`.
-- **Zero Polling**: after async `SPAWN`, yield the turn with zero tool calls and wait for completion wakeups. Never run `sleep` loops or repeated status polling.
-- **Operator Overrides**: `stop` cancels active delegates immediately; `fewer` cancels extra delegates with no replacement; `pause` runs safe-pause checkpoint (`references/overnight.md`).
-- **Final Report (Ketchup Format in Chinese — `disciplines/phase-boundaries.md`)**: lead with visual/Before-After evidence & Pinned SHA -> what changed & why -> Merge Danger (two-way vs one-way doors & blast radius) -> any `backup` models used -> self-contained ≤30-char decision cards for open forks.
+- **One-Way Doors (Always Pause in Chinese)**: merge to protected `main`/trunk, `git push --force`, destructive data deletion, production deploy, external messages, and `denyCommands`.
+- **Zero Polling**: after async `SPAWN`, yield the turn with zero tool calls and wait for completion wakeups.
+- **Operator Overrides**: `stop` cancels active delegates; `fewer` cancels extra delegates; `pause` runs safe-pause checkpoint (`references/overnight.md`).
+- **Final Report (Ketchup Format in Chinese — `disciplines/phase-boundaries.md`)**: visual/Before-After evidence & Pinned SHA -> what changed & why -> Merge Danger (two-way vs one-way doors & blast radius) -> `backup` models used -> ≤30-char decision cards for open forks.

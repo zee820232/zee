@@ -1,4 +1,4 @@
-# Google Antigravity (`agy`) Native Adapter (`zee` v4)
+# Google Antigravity (`agy`) Native Adapter (`zee` v4.2)
 
 When `zee` is installed as a native Google Antigravity plugin (`agy plugin install https://github.com/zee820232/zee`), it eats full native AGY primitives across `agy` CLI, Antigravity 2.0 App, and Antigravity IDE **without** shipping a global hijacking `rules/AGENTS.md`.
 
@@ -47,8 +47,8 @@ Keep machine-to-machine cross-worktree bus files under `~/.local/state/zee/runs/
 | Temporary probe scripts / raw logs | `scratch/<name>` | Omit `ArtifactMetadata` | Automatically folded into AGY Scratch sidebar |
 
 ## 5. Surface Model Translation, 429 Fallback & Wide `run_workflow` Sweeps
-- **Deterministic Model Translation**: resolve `zee-config.json` slots to exact AGY surface names via:
-  `node "<zeeDir>/scripts/zee-tool.mjs" resolve-model --harness agy --surface invoke_subagent --role <role>`
+- **Deterministic Model Translation**: resolve `zee-config.json` slots (or standalone current-session fallback when unconfigured) via:
+  `node "<zeeDir>/scripts/zee-tool.mjs" resolve-model --harness agy --surface invoke_subagent --role <role> [--allow-standalone]`
   - `invoke_subagent` accepts ONLY `inherit | pro | flash | flash_lite` (`gemini-4-neon` -> `pro`, `gemini-4-hydrogen` / `3.8-flash` -> `flash`, `gemini-4-argon` -> `inherit`).
   - Native `swarm` accepts exact effort-suffixed IDs (e.g. `gemini-4-neon-high`, `gemini-4-hydrogen-medium`).
 - **HTTP 429 / Single-Tier Fallback**: if `invoke_subagent` hits `429 RESOURCE_EXHAUSTED` or a single-tier account restriction, immediately retry with `Model: "inherit"` (preserving full coverage without dropping slots) and announce once in Chinese.

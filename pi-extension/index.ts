@@ -1,15 +1,14 @@
 /**
- * zee Pi Extension v4.1.1 — 常驻自动路由 (/zee-mode)、9 快捷命令转发、跨回合路径锁、共享安全核与 zee_subagent v2.2
+ * zee Pi Extension v4.2.0 — Dual-Axis FSM + Zero-Conflict Layer 0/1/2 HUD & 5-Tab Hub + zee_subagent v2.3
  *
- * 设计原则（严格对齐 Pi v1.6.0 源码 + v4.1.1 终审闭环修复）：
- * 1. 不写死任何第三方技能/扩展/私有网关；所有领域技能由 Pi 原生 <available_skills> 自动发现，并向自动路由注入精确 <zeeDir> 路径。
- * 2. mode 与 gate 均通过 pi.appendEntry 持久化并仅从 ctx.sessionManager.getBranch() 逆序恢复，
- *    支持 /zee plan|review|init|arch 空格子命令同步上锁与 M0 磁盘解锁，以及 /zee-verify 全生命周期入口。
- * 3. 与 AGY 共用 skills/zee/scripts/lib/guard-core.mjs，并向子进程挂载轻量 worker-guard.ts 彻底消灭 `-ne` 安全真空。
- * 4. 四层防递归：默认 off + !ctx.hasUI + ZEE_WORKER=1 + [zee-worker] 首消息哨兵。
- * 5. zee_subagent v2.2：流式正文优先抢救并自动落盘 (>2KB)、并发 Map 工具看门狗、15s 节流心跳、
- *    精准增量脏区回滚、只读预挂 node_modules 软链（写 worktree 专属 exclude 零误报）、嵌套分支 ref 冲突自动扁平化、
- *    provider/model 自动按 zee-config.json 归一、70% 预算截断硬提示与自动 delegatesDispatched 落账。
+ * 设计原则（对齐 Pi v1.6.1 源码 + v4.2.0 Autopilot + Windows 跨平台闭环）：
+ * 1. 纯净零冲突界面：绝不调用 setFooter()（由 pi-cometix-footer 独占）、绝不绑定 ctrl+g、绝不发明 session_switch/session_fork；
+ *    TUI 组件严格以 ctx.mode === "tui" 门控，RPC 降级为 string[] widget + notify，Print/JSON/ZEE_WORKER=1 100% 静默。
+ * 2. Dual-Axis FSM (14 Workflow x 9 WorkerLane + G-01..G-06)：通过 pi.appendEntry("zee-fsm", ...) 按分支持久化，
+ *    并在 session_start / session_tree 逆序恢复（向后兼容旧 zee-mode / zee-gate）。
+ * 3. Read-Only Bus Sync + /tree 回滚保护：tool_result 零轮询即时水合 state.json 与 decisions.tsv，绝不回写覆盖较新磁盘状态。
+ * 4. zee_subagent v2.3：toolCallId 幂等记账（修复 2x 重复计数）、G-02 Gate1->Gate2 校验、60% 空闲 STALLED_WARN、
+ *    Windows ZEE_PI_BIN (.mjs/.js/.ts/.cjs) 防 spawn EFTYPE 与 junction 软链免特权挂载。
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -28,6 +27,7 @@ import {
 	isToolCallEventType,
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import { Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	RUNS_ROOT,
@@ -39,57 +39,50 @@ import {
 	isWriteAllowedUnderGate as sharedIsWriteAllowedUnderGate,
 	normalizeToolPath,
 } from "../skills/zee/scripts/lib/guard-core.mjs";
+import {
+	BusSyncReader,
+	fetchWorktreeInventoryAsync,
+	parseWorktreeInventoryJson,
+	pruneSafeWorktreesAsync,
+	type WorktreeInventory,
+} from "./bus-sync.ts";
+import {
+	checkCutoffPrecondition,
+	checkGate2Precondition,
+	createInitialFsmSnapshot,
+	isValidGateMode,
+	isValidRiskLevel,
+	isValidZeeMode,
+	reduceFsm,
+	restoreFsmFromBranch,
+	toPersistedFsmEntry,
+	type FsmEvent,
+	type GateMode,
+	type RiskLevel,
+	type ZeeFsmPersistedSnapshot,
+	type ZeeMode,
+	type ZeeTrack,
+} from "./fsm.ts";
+import {
+	HubStore,
+	createInitialHubSnapshot,
+	createZeeHudWidget,
+	formatCompactStatusBadge,
+	formatRpcHubSummary,
+	getCtxMode,
+	isRpcContext,
+	isTuiContext,
+	openZeeHubOverlay,
+	renderRpcHudLines,
+	type HubActions,
+	type HudDensity,
+} from "./hub-ui.ts";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS_ROOT = path.resolve(EXTENSION_DIR, "..", "skills");
 const ZEE_SKILL_DIR = path.join(SKILLS_ROOT, "zee");
+const ZEE_TOOL_PATH = path.join(ZEE_SKILL_DIR, "scripts", "zee-tool.mjs");
 const WORKER_GUARD_PATH = path.join(EXTENSION_DIR, "worker-guard.ts");
-
-type ZeeMode = "off" | "auto" | "strict";
-type GateMode = "none" | "plan" | "review" | "init-design";
-
-interface ZeeModeEntry {
-	mode: ZeeMode;
-}
-
-interface ZeeGateEntry {
-	gate: GateMode;
-}
-
-interface SubagentUsage {
-	turns: number;
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-	contextTokens: number;
-}
-
-interface SubagentDetails {
-	role: string;
-	provider?: string;
-	model?: string;
-	thinkingLevel?: string;
-	tools?: string[];
-	cwd: string;
-	worktreePath?: string;
-	branch?: string;
-	worktreeCleaned?: boolean;
-	mountedNodeModules?: boolean;
-	partialArtifactPath?: string;
-	budgetCutoffTriggered?: boolean;
-	status: "running" | "completed" | "failed" | "aborted" | "timeout" | "idle_timeout" | "stagnancy_loop";
-	exitCode: number | null;
-	stopReason?: string;
-	errorMessage?: string;
-	roleViolation?: boolean;
-	lastActions: string[];
-	usage: SubagentUsage;
-}
-
-const VALID_MODES = new Set<ZeeMode>(["off", "auto", "strict"]);
-const VALID_GATES = new Set<GateMode>(["none", "plan", "review", "init-design"]);
 
 const ROLE_DEFAULT_TIMEOUT_MS: Record<string, number> = {
 	scout: 240_000,
@@ -118,14 +111,6 @@ const WORKER_SENTINELS = [
 	"# zee Worker Standing Contract",
 	"You are already running as a delegate",
 ];
-
-function isValidMode(value: unknown): value is ZeeMode {
-	return typeof value === "string" && VALID_MODES.has(value as ZeeMode);
-}
-
-function isValidGate(value: unknown): value is GateMode {
-	return typeof value === "string" && VALID_GATES.has(value as GateMode);
-}
 
 function containsWorkerSentinel(text: string): boolean {
 	if (!text) return false;
@@ -161,6 +146,12 @@ function isSubagentContext(event: BeforeAgentStartEvent, ctx: ExtensionContext):
 		}
 	}
 	return false;
+}
+
+function sameResolvedPath(a: string, b: string): boolean {
+	const ra = path.resolve(a);
+	const rb = path.resolve(b);
+	return process.platform === "win32" ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
 }
 
 export function isWriteAllowedUnderGate(rawPath: string, cwd: string, gateMode: Exclude<GateMode, "none">): boolean {
@@ -206,7 +197,6 @@ export function resolveSafeWorktreeBranch(absRepo: string, rawBranch: string): {
 		}
 	};
 
-	// 检查祖先路径是否已是现存分支（防止 Git 报 cannot lock ref 'refs/heads/a/b': 'refs/heads/a' exists）
 	for (let guard = 0; guard < 8; guard++) {
 		const parts = candidate.split("/").filter(Boolean);
 		let collidedIdx = -1;
@@ -240,7 +230,6 @@ function ensureWorktreeExcludesNodeModules(absRepo: string, wtPath: string): boo
 	const dstModules = path.join(wtPath, "node_modules");
 	if (!fs.existsSync(srcModules) || fs.existsSync(dstModules)) return false;
 
-	// 仅在 node_modules 未被 git 跟踪时预挂只读软链，防止破坏异常提交了 node_modules 的仓库
 	try {
 		const tracked = execFileSync("git", ["-C", absRepo, "ls-files", "node_modules"], {
 			encoding: "utf8",
@@ -260,12 +249,11 @@ function ensureWorktreeExcludesNodeModules(absRepo: string, wtPath: string): boo
 		fs.mkdirSync(path.dirname(resolvedExclude), { recursive: true });
 		const existing = fs.existsSync(resolvedExclude) ? fs.readFileSync(resolvedExclude, "utf8") : "";
 		const lines = existing.split(/\r?\n/).map((l) => l.trim());
-		// 写入不带尾斜杠的 /node_modules，同时匹配目录与软链，彻底避免 git status 报 ?? node_modules
 		if (!lines.includes("/node_modules") && !lines.includes("node_modules")) {
 			const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
 			fs.appendFileSync(resolvedExclude, `${prefix}/node_modules\n`, "utf8");
 		}
-		fs.symlinkSync(srcModules, dstModules);
+		fs.symlinkSync(srcModules, dstModules, process.platform === "win32" ? "junction" : undefined);
 		return true;
 	} catch {
 		return false;
@@ -328,7 +316,6 @@ export function resolvePiProviderModel(
 	const bindings = collectPiBindingsFromConfig(configPath);
 	const knownProviders = new Set(bindings.map((b) => b.providerInstanceId.toLowerCase()));
 
-	// Case 1: provider + model 拼起来刚好命中已配置的完整 model ID（例如 provider="remote-magpie", model="vm/claude-sonnet-5-5"）
 	if (provider && model) {
 		const joined = `${provider}/${model}`.toLowerCase();
 		const exactJoined = bindings.find((b) => b.model.toLowerCase() === joined);
@@ -340,7 +327,6 @@ export function resolvePiProviderModel(
 				notice: `已按 zee-config.json 自动归一 provider="${provider}" + model="${model}" -> provider="${exactJoined.providerInstanceId}", model="${exactJoined.model}"`,
 			};
 		}
-		// 若 model 本身已完整命中配置，但 provider 传成了错误前缀（如 remote-magpie），也自动纠偏
 		if (knownProviders.size > 0 && !knownProviders.has(provider.toLowerCase())) {
 			const byModel = bindings.find((b) => b.model.toLowerCase() === model.toLowerCase());
 			if (byModel) {
@@ -352,7 +338,6 @@ export function resolvePiProviderModel(
 				};
 			}
 		}
-		// 显式拦截常见模型路径前缀误当 provider 且未命中任何绑定
 		if (/^(vm|devin|codex|remote-[a-z0-9_-]+)$/i.test(provider) && !knownProviders.has(provider.toLowerCase())) {
 			const validHint = knownProviders.size > 0 ? `可用 providerInstanceId：${[...knownProviders].join(", ")}` : "请查看 pi --list-models 第一列";
 			throw new Error(
@@ -362,7 +347,6 @@ export function resolvePiProviderModel(
 		return { provider, model, normalized: false };
 	}
 
-	// Case 2: 仅传了 model（如 "gemini-4-hydrogen"）而未传 provider -> 若在 bindings.pi 中唯一匹配则自动补全，消除重名快败
 	if (!provider && model && bindings.length > 0) {
 		const low = model.toLowerCase();
 		const matches = bindings.filter(
@@ -383,31 +367,50 @@ export function resolvePiProviderModel(
 	return { provider, model, normalized: false };
 }
 
-function recordSubagentBudgetAndCutoff(
+export function recordSubagentBudgetAndCutoff(
 	busDir: string,
 	isAborted: boolean,
-): { dispatched: number; maxDelegates: number; cutoffAt: number; cutoffTriggered: boolean } | null {
+	delegateId?: string,
+): { dispatched: number; maxDelegates: number; cutoffAt: number; cutoffTriggered: boolean; deduplicated: boolean } | null {
 	if (!busDir) return null;
 	const statePath = path.join(busDir, "state.json");
 	if (!fs.existsSync(statePath)) return null;
 	try {
 		const st = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
-		const dispatched = (Number(st.delegatesDispatched) || 0) + 1;
-		st.delegatesDispatched = dispatched;
-		if (isAborted) {
-			st.abortedDelegates = (Number(st.abortedDelegates) || 0) + 1;
+		const countedIds = Array.isArray(st.countedDelegateIds)
+			? st.countedDelegateIds.filter((x): x is string => typeof x === "string" && x.length > 0)
+			: [];
+		const cleanId = delegateId?.trim() || "";
+		const alreadyCounted = Boolean(cleanId && countedIds.includes(cleanId));
+
+		let dispatched = Number(st.delegatesDispatched) || 0;
+		if (!alreadyCounted) {
+			dispatched += 1;
+			st.delegatesDispatched = dispatched;
+			if (isAborted) {
+				st.abortedDelegates = (Number(st.abortedDelegates) || 0) + 1;
+			}
+			if (cleanId) {
+				st.countedDelegateIds = [...countedIds, cleanId].slice(-200);
+			}
+			st.updatedAt = new Date().toISOString();
+			const tmp = `${statePath}.tmp.${process.pid}.${Date.now()}`;
+			fs.writeFileSync(tmp, JSON.stringify(st, null, 2) + "\n", "utf8");
+			fs.renameSync(tmp, statePath);
 		}
-		st.updatedAt = new Date().toISOString();
-		const tmp = `${statePath}.tmp.${process.pid}.${Date.now()}`;
-		fs.writeFileSync(tmp, JSON.stringify(st, null, 2) + "\n", "utf8");
-		fs.renameSync(tmp, statePath);
 
 		const budget = (st.budget && typeof st.budget === "object" ? st.budget : {}) as Record<string, unknown>;
 		const defaultMax = st.mode === "night" ? 12 : 40;
 		const maxDelegates = Math.max(1, Number(budget.maxDelegates) || defaultMax);
 		const cutoffRatio = Math.min(0.95, Math.max(0.5, Number(budget.cutoffRatio) || 0.7));
 		const cutoffAt = Math.max(1, Math.ceil(maxDelegates * cutoffRatio));
-		return { dispatched, maxDelegates, cutoffAt, cutoffTriggered: dispatched >= cutoffAt };
+		return {
+			dispatched,
+			maxDelegates,
+			cutoffAt,
+			cutoffTriggered: dispatched >= cutoffAt,
+			deduplicated: alreadyCounted,
+		};
 	} catch {
 		return null;
 	}
@@ -438,7 +441,6 @@ function prepareAtomicWorktree(spec: {
 	const wtPath = path.join(wtRoot, sanitizeSlug(spec.lane));
 	fs.mkdirSync(wtRoot, { recursive: true });
 
-	// 若路径已存在且是合法干净 worktree，先移除再按最新 baseRef 重建，确保 Pinned SHA 100% 精确
 	if (fs.existsSync(wtPath)) {
 		try {
 			const st = execFileSync("git", ["-C", wtPath, "status", "--porcelain"], {
@@ -466,7 +468,6 @@ function prepareAtomicWorktree(spec: {
 		const safe = resolveSafeWorktreeBranch(absRepo, spec.branch.trim());
 		const branchName = safe.branch;
 		resolvedBranch = branchName;
-		// 检查分支是否已存在：若旧分支已完全包含在 baseRef 祖先链内则安全重置至新 baseRef，否则保留未合并分支提交
 		let branchExists = false;
 		let branchAlreadyMergedIntoBase = false;
 		try {
@@ -558,6 +559,20 @@ function inferGateFromZeeArgs(args: string, cwd: string): GateMode {
 	return "none";
 }
 
+function inferTrackFromZeeArgs(args: string): ZeeTrack {
+	const firstToken = String(args || "").trim().split(/\s+/)[0]?.toLowerCase() || "";
+	if (firstToken === "plan") return "plan";
+	if (firstToken === "arch") return "arch";
+	if (firstToken === "review") return "review";
+	if (firstToken === "init") return "init";
+	if (firstToken === "night") return "night";
+	if (firstToken === "retro") return "retro";
+	if (firstToken === "triage") return "triage";
+	if (firstToken === "recall") return "recall";
+	if (firstToken.startsWith("verify")) return "verify";
+	return "build";
+}
+
 function isBenignReadOnlySearchCommand(toolName: string, rawArgsObj: unknown): boolean {
 	if (toolName === "grep" || toolName === "find") return true;
 	if (toolName !== "bash" && toolName !== "powershell") return false;
@@ -612,9 +627,14 @@ function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string 
 	return lines.join("\n");
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+export function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const envBin = process.env.ZEE_PI_BIN?.trim();
-	if (envBin) return { command: envBin, args };
+	if (envBin) {
+		if (/\.(?:mjs|cjs|js|ts)$/i.test(envBin)) {
+			return { command: process.execPath, args: [envBin, ...args] };
+		}
+		return { command: envBin, args };
+	}
 
 	const currentScript = process.argv[1];
 	const isBunVirtualScript =
@@ -645,6 +665,24 @@ function truncateSubagentOutput(output: string): string {
 	if (!initial.truncated) return output;
 	const omittedBytes = initial.totalBytes - initial.outputBytes;
 	return `${initial.content}\n\n[输出已截断：省略 ${omittedBytes} 字节，完整内容请通过总线文件传递]`;
+}
+
+function parseJsonFromToolOutput(text: string): Record<string, unknown> | null {
+	const trimmed = text.trim();
+	if (!trimmed) return null;
+	if (trimmed.startsWith("{")) {
+		try {
+			return JSON.parse(trimmed) as Record<string, unknown>;
+		} catch {}
+	}
+	const startIdx = trimmed.indexOf("{");
+	const endIdx = trimmed.lastIndexOf("}");
+	if (startIdx >= 0 && endIdx > startIdx) {
+		try {
+			return JSON.parse(trimmed.slice(startIdx, endIdx + 1)) as Record<string, unknown>;
+		} catch {}
+	}
+	return null;
 }
 
 const ZeeSubagentParams = Type.Object({
@@ -744,79 +782,339 @@ const ZeeSubagentParams = Type.Object({
 	),
 });
 
+interface SubagentUsage {
+	turns: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	contextTokens: number;
+}
+
+interface SubagentDetails {
+	role: string;
+	provider?: string;
+	model?: string;
+	thinkingLevel?: string;
+	tools?: string[];
+	cwd: string;
+	worktreePath?: string;
+	branch?: string;
+	worktreeCleaned?: boolean;
+	mountedNodeModules?: boolean;
+	partialArtifactPath?: string;
+	budgetCutoffTriggered?: boolean;
+	status: "running" | "completed" | "failed" | "aborted" | "timeout" | "idle_timeout" | "stagnancy_loop";
+	exitCode: number | null;
+	stopReason?: string;
+	errorMessage?: string;
+	roleViolation?: boolean;
+	lastActions: string[];
+	usage: SubagentUsage;
+}
+
 export default function zeeExtension(pi: ExtensionAPI) {
-	let mode: ZeeMode = "off";
-	let gate: GateMode = "none";
-	let budgetCutoffLabel = "";
+	const busSync = new BusSyncReader();
+	const store = new HubStore(
+		createInitialHubSnapshot(process.cwd(), createInitialFsmSnapshot(pi.getFlag("zee-mode"))),
+	);
+	let hudMounted = false;
+	let hubOpen = false;
+
+	const isSilentSession = (ctx: ExtensionContext): boolean => {
+		if (process.env.ZEE_WORKER === "1") return true;
+		if (!ctx.hasUI) return true;
+		const m = getCtxMode(ctx);
+		return m === "print" || m === "json";
+	};
+
+	const syncStatusAndRpcHud = (ctx: ExtensionContext) => {
+		if (isSilentSession(ctx)) return;
+		const snap = store.getSnapshot();
+		ctx.ui.setStatus("zee-mode", formatCompactStatusBadge(snap));
+		if (hudMounted && isRpcContext(ctx) && typeof ctx.ui.setWidget === "function") {
+			const rpcLines = renderRpcHudLines(snap);
+			ctx.ui.setWidget("zee-hud", rpcLines.length > 0 ? rpcLines : undefined, { placement: "aboveEditor" });
+		}
+	};
+
+	const mountHud = (ctx: ExtensionContext) => {
+		if (isSilentSession(ctx)) return;
+		if (typeof ctx.ui.setWidget !== "function") return;
+		if (isTuiContext(ctx)) {
+			ctx.ui.setWidget("zee-hud", createZeeHudWidget(store), { placement: "aboveEditor" });
+			hudMounted = true;
+		} else if (isRpcContext(ctx)) {
+			hudMounted = true;
+			syncStatusAndRpcHud(ctx);
+		}
+	};
+
+	const dispatchFsm = (evt: FsmEvent, ctx: ExtensionContext, persist = false, immediateUi = false) => {
+		const prev = store.getSnapshot();
+		const nextFsm = reduceFsm(prev, evt, Date.now());
+		let nextBranchEntryTs = prev.branchEntryTs;
+		if (persist) {
+			pi.appendEntry("zee-fsm", toPersistedFsmEntry(nextFsm));
+			nextBranchEntryTs = Date.now();
+		}
+		store.setSnapshot(
+			{
+				...prev,
+				...nextFsm,
+				cwd: ctx.cwd || prev.cwd,
+				branchEntryTs: nextBranchEntryTs,
+			},
+			immediateUi,
+		);
+		syncStatusAndRpcHud(ctx);
+		return nextFsm;
+	};
+
+	const hydrateFromDisk = (ctx: ExtensionContext, explicitBusDir?: string) => {
+		const prev = store.getSnapshot();
+		const cwd = ctx.cwd || prev.cwd || process.cwd();
+		const projectConfig = busSync.readProjectConfig(cwd);
+		const busDir = explicitBusDir || prev.busDir;
+
+		let nextSnap = {
+			...prev,
+			cwd,
+			projectConfig,
+		};
+
+		if (busDir) {
+			const hyd = busSync.hydrateBus(busDir, prev.branchEntryTs);
+			const diskRisk = isValidRiskLevel(hyd.state?.level) ? (hyd.state?.level as RiskLevel) : undefined;
+			const budget = hyd.state?.budget;
+			const fsmAfter = reduceFsm(
+				nextSnap,
+				{
+					type: "HYDRATE_FROM_BUS",
+					slug: hyd.state?.slug,
+					busDir: hyd.busDir,
+					riskLevel: diskRisk,
+					dispatched: typeof hyd.state?.delegatesDispatched === "number" ? hyd.state.delegatesDispatched : undefined,
+					maxDelegates: typeof budget?.maxDelegates === "number" ? budget.maxDelegates : undefined,
+					cutoffRatio: typeof budget?.cutoffRatio === "number" ? budget.cutoffRatio : undefined,
+					abortedDelegates: typeof hyd.state?.abortedDelegates === "number" ? hyd.state.abortedDelegates : undefined,
+					status: typeof hyd.state?.status === "string" ? hyd.state.status : undefined,
+				},
+				Date.now(),
+			);
+			nextSnap = {
+				...nextSnap,
+				...fsmAfter,
+				busAheadOfBranch: hyd.busAheadOfBranch,
+				busState: hyd.state,
+				decisionsTail: hyd.decisionsTail,
+				lastSyncAt: Date.now(),
+			};
+		} else {
+			nextSnap = {
+				...nextSnap,
+				trustLevel: prev.trustLevel === "T1" && projectConfig.trustLevel ? projectConfig.trustLevel : prev.trustLevel,
+				lastSyncAt: Date.now(),
+			};
+		}
+
+		store.setSnapshot(nextSnap, false);
+		syncStatusAndRpcHud(ctx);
+	};
+
+	const restoreState = (ctx: ExtensionContext, mountWidget = false) => {
+		const branch = ctx.sessionManager.getBranch();
+		const restored = restoreFsmFromBranch(branch, pi.getFlag("zee-mode"));
+		const cwd = ctx.cwd || process.cwd();
+		const projectConfig = busSync.readProjectConfig(cwd);
+
+		const restoredSnap: ZeeFsmPersistedSnapshot = {
+			...restored.snapshot,
+			trustLevel: restored.source === "default" ? projectConfig.trustLevel : restored.snapshot.trustLevel,
+		};
+
+		const initialHub = {
+			...createInitialHubSnapshot(cwd, restoredSnap),
+			hudDensity: store.getHudDensity(),
+			branchEntryTs: restored.branchEntryTs,
+			projectConfig,
+		};
+		store.rearm(initialHub);
+
+		if (restoredSnap.busDir) {
+			hydrateFromDisk(ctx, restoredSnap.busDir);
+		}
+		if (mountWidget) {
+			mountHud(ctx);
+		}
+		syncStatusAndRpcHud(ctx);
+	};
+
+	const setGate = (nextGate: GateMode, ctx: ExtensionContext, persist = true) => {
+		dispatchFsm({ type: "SET_WRITE_GATE", gate: nextGate }, ctx, persist, true);
+	};
+
+	const openHub = async (ctx: ExtensionContext) => {
+		if (isSilentSession(ctx)) return;
+		if (hubOpen) return;
+
+		const snap = store.getSnapshot();
+		const fallbackBus = snap.busDir || busSync.findLatestRepoBus(ctx.cwd || snap.cwd);
+		hydrateFromDisk(ctx, fallbackBus);
+
+		if (!isTuiContext(ctx)) {
+			ctx.ui.notify(formatRpcHubSummary(store.getSnapshot()), "info");
+			return;
+		}
+
+		hubOpen = true;
+		void fetchWorktreeInventoryAsync(ctx.cwd || snap.cwd, ZEE_TOOL_PATH).then((inv: WorktreeInventory) => {
+			store.update((p) => ({ ...p, worktreeInventory: inv }), true);
+		});
+
+		const actions: HubActions = {
+			onRefresh: async () => {
+				busSync.clearCache();
+				const cur = store.getSnapshot();
+				hydrateFromDisk(ctx, cur.busDir || busSync.findLatestRepoBus(ctx.cwd || cur.cwd));
+				const inv = await fetchWorktreeInventoryAsync(ctx.cwd || cur.cwd, ZEE_TOOL_PATH);
+				store.update((p) => ({ ...p, worktreeInventory: inv }), true);
+			},
+			onCycleMode: () => {
+				const order: ZeeMode[] = ["off", "auto", "strict"];
+				const cur = store.getSnapshot().routingMode;
+				const next = order[(order.indexOf(cur) + 1) % order.length];
+				dispatchFsm({ type: "SET_ROUTING_MODE", mode: next }, ctx, true, true);
+			},
+			onUnlockGate: () => {
+				dispatchFsm({ type: "SET_WRITE_GATE", gate: "none", reason: "Hub 控制台手动解锁" }, ctx, true, true);
+			},
+			onPruneWorktrees: async () => {
+				const res = await pruneSafeWorktreesAsync(ctx.cwd || store.getSnapshot().cwd, ZEE_TOOL_PATH);
+				store.update((p) => ({ ...p, worktreeInventory: res.inventory }), true);
+				return res.ok ? `已清理 ${res.prunedCount} 个安全 worktree。` : `清理失败：${res.error || "未知错误"}`;
+			},
+			onCycleHudDensity: () => {
+				const order: HudDensity[] = ["full", "compact", "hidden"];
+				const cur = store.getHudDensity();
+				const next = order[(order.indexOf(cur) + 1) % order.length];
+				store.setHudDensity(next, true);
+				syncStatusAndRpcHud(ctx);
+			},
+			onPauseRun: () => {
+				dispatchFsm({ type: "SET_PHASE", phase: "PAUSED", reason: "Hub 手动暂停" }, ctx, true, true);
+			},
+		};
+
+		try {
+			await openZeeHubOverlay(ctx, store, actions);
+		} finally {
+			hubOpen = false;
+		}
+	};
 
 	pi.registerFlag("zee-mode", {
 		type: "string",
 		description: "启动时启用 zee 自动路由模式：off | auto | strict",
 	});
 
-	const updateStatus = (ctx: ExtensionContext) => {
-		if (!ctx.hasUI) return;
-		const parts: string[] = [];
-		if (mode !== "off") parts.push(`zee:${mode}`);
-		if (gate === "plan") parts.push("plan🔒");
-		else if (gate === "init-design") parts.push("init🔒");
-		else if (gate === "review") parts.push("review🔒");
-		if (budgetCutoffLabel) parts.push(budgetCutoffLabel);
-		ctx.ui.setStatus("zee-mode", parts.length > 0 ? parts.join("|") : undefined);
-	};
-
-	const setGate = (next: GateMode, ctx: ExtensionContext, persist = true) => {
-		gate = next;
-		if (persist) {
-			pi.appendEntry<ZeeGateEntry>("zee-gate", { gate });
-		}
-		updateStatus(ctx);
-	};
-
-	const restoreState = (ctx: ExtensionContext) => {
-		mode = "off";
-		gate = "none";
-
-		const flagVal = pi.getFlag("zee-mode");
-		if (isValidMode(flagVal)) {
-			mode = flagVal;
-		}
-
-		// 仅读取当前活动分支（getBranch），绝不读取 getEntries() 避免串分支污染
-		const branch = ctx.sessionManager.getBranch();
-		let foundMode = false;
-		let foundGate = false;
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
-			if (entry.type !== "custom") continue;
-			if (!foundMode && entry.customType === "zee-mode") {
-				const data = entry.data as Partial<ZeeModeEntry> | undefined;
-				if (isValidMode(data?.mode)) {
-					mode = data.mode;
-					foundMode = true;
-				}
-			} else if (!foundGate && entry.customType === "zee-gate") {
-				const data = entry.data as Partial<ZeeGateEntry> | undefined;
-				if (isValidGate(data?.gate)) {
-					gate = data.gate;
-					foundGate = true;
-				}
-			}
-			if (foundMode && foundGate) break;
-		}
-		updateStatus(ctx);
-	};
-
 	pi.on("session_start", (_event, ctx) => {
-		restoreState(ctx);
+		restoreState(ctx, true);
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
-		restoreState(ctx);
+		busSync.clearCache();
+		restoreState(ctx, true);
+		const snap = store.getSnapshot();
+		if (snap.busAheadOfBranch && !isSilentSession(ctx)) {
+			ctx.ui.notify(
+				"检测到 /tree 分支回退：磁盘 state.json 更新于当前会话分支（busAheadOfBranch），已启用只读保护，绝不覆盖磁盘状态。",
+				"warning",
+			);
+		}
+	});
+
+	pi.on("session_shutdown", (_event, ctx) => {
+		hudMounted = false;
+		hubOpen = false;
+		store.dispose();
+		if (!isSilentSession(ctx)) {
+			if (typeof ctx.ui.setWidget === "function") {
+				ctx.ui.setWidget("zee-hud", undefined);
+			}
+			ctx.ui.setStatus("zee-mode", undefined);
+		}
+	});
+
+	// 零轮询监听 tool_result：捕捉 zee-tool.mjs init-run / update-state / log-decision / cleanup-worktrees 并即时水合总线
+	pi.on("tool_result", (event, ctx) => {
+		if (process.env.ZEE_WORKER === "1") return;
+		const evtRec = event as { toolName?: unknown; input?: { command?: unknown }; content?: unknown };
+		const toolName = String(evtRec.toolName ?? "");
+		if (toolName !== "bash" && toolName !== "powershell") return;
+
+		const cmd = typeof evtRec.input?.command === "string" ? evtRec.input.command : "";
+		const text = extractMessageText(evtRec.content);
+		const looksLikeZeeTool = cmd.includes("zee-tool.mjs") || text.includes('"busDir"') || text.includes('"statePath"') || text.includes('"tsvPath"');
+		if (!looksLikeZeeTool) return;
+
+		const parsed = parseJsonFromToolOutput(text);
+		if (parsed) {
+			if (typeof parsed.busDir === "string" && typeof parsed.statePath === "string") {
+				const busDir = parsed.busDir;
+				const slug = path.basename(busDir);
+				const prev = store.getSnapshot();
+				dispatchFsm(
+					{
+						type: "START_RUN",
+						track: prev.track === "direct" ? "build" : prev.track,
+						slug,
+						busDir,
+						phase: prev.phase === "IDLE" ? "PREFLIGHT" : prev.phase,
+					},
+					ctx,
+					true,
+					true,
+				);
+				hydrateFromDisk(ctx, busDir);
+				return;
+			}
+			if (typeof parsed.statePath === "string") {
+				const bDir = path.dirname(parsed.statePath);
+				const wasAhead = store.getSnapshot().busAheadOfBranch;
+				hydrateFromDisk(ctx, bDir);
+				if (!wasAhead) {
+					pi.appendEntry("zee-fsm", toPersistedFsmEntry(store.getSnapshot()));
+					store.update((p) => ({ ...p, branchEntryTs: Date.now() }), false);
+				}
+				return;
+			}
+			if (typeof parsed.tsvPath === "string") {
+				const bDir = path.dirname(parsed.tsvPath);
+				const wasAhead = store.getSnapshot().busAheadOfBranch;
+				hydrateFromDisk(ctx, bDir);
+				if (!wasAhead) {
+					pi.appendEntry("zee-fsm", toPersistedFsmEntry(store.getSnapshot()));
+					store.update((p) => ({ ...p, branchEntryTs: Date.now() }), false);
+				}
+				return;
+			}
+			if (Array.isArray(parsed.worktrees)) {
+				const inv = parseWorktreeInventoryJson(JSON.stringify(parsed), ctx.cwd || store.getSnapshot().cwd);
+				store.update((p) => ({ ...p, worktreeInventory: inv }), false);
+				return;
+			}
+		}
+
+		if (store.getSnapshot().busDir) {
+			hydrateFromDisk(ctx, store.getSnapshot().busDir);
+		}
 	});
 
 	// 修复跨回合掉锁漏洞：仅 review 为单轮锁；plan 与 init-design 跨回合保持，直到显式执行或 M0 落盘解锁
 	pi.on("agent_settled", (_event, ctx) => {
+		const gate = store.getSnapshot().writeGate;
 		if (gate === "review") {
 			setGate("none", ctx);
 		} else if (gate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
@@ -825,9 +1123,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
+		const curGate = store.getSnapshot().writeGate;
 		if (event.messageType === "user") {
 			const prompt = (event.prompt || "").trim();
-			// 兼容直接调用原生 /skill:zee-*、/zee <subcmd> 空格子命令或显式解锁口令
 			if (
 				/<skill\s+name="zee-(?:plan|arch)"\b/.test(prompt) ||
 				/^\/(?:skill:)?zee-(?:plan|arch)\b/i.test(prompt) ||
@@ -855,8 +1153,8 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			) {
 				const subMatch = prompt.match(/^\/(?:skill:)?zee\s+(.+)$/i);
 				const nextGate = subMatch ? inferGateFromZeeArgs(subMatch[1], ctx.cwd) : "none";
-				if (gate !== nextGate) setGate(nextGate, ctx);
-			} else if (gate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
+				if (curGate !== nextGate) setGate(nextGate, ctx);
+			} else if (curGate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
 				setGate("none", ctx);
 			}
 		}
@@ -865,6 +1163,10 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			delete event.systemPromptOptions.sections.zee;
 			return undefined;
 		}
+
+		const snap = store.getSnapshot();
+		const mode = snap.routingMode;
+		const gate = snap.writeGate;
 
 		if (mode === "off" && gate === "none") {
 			delete event.systemPromptOptions.sections.zee;
@@ -887,36 +1189,38 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		// 若 Stage 3 M0 子代理已落盘 .agents/zee.project.json，实时解除 init-design 写锁
+		let gate = store.getSnapshot().writeGate;
 		if (gate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
 			setGate("none", ctx);
+			gate = "none";
 		}
 
-		// 1. 常驻安全红线（无论是否处于保护锁，均执行项目 denyCommands 与破坏性命令检查）
 		if (isToolCallEventType("bash", event) || isToolCallEventType("powershell", event)) {
 			const command = event.input.command;
 			const denyReason = checkProjectDenyCommands(command, ctx.cwd);
 			if (denyReason) {
-				if (ctx.hasUI) ctx.ui.notify(denyReason, "warning");
+				dispatchFsm({ type: "RECORD_VIOLATION", guard: "G-01", severity: "block", message: denyReason }, ctx);
+				if (!isSilentSession(ctx)) ctx.ui.notify(denyReason, "warning");
 				return { block: true, reason: denyReason };
 			}
 			const destructive = evaluateDestructiveCommand(command, ctx.cwd);
 			if (destructive) {
 				const reason = `[zee 安全护栏] ${destructive.reason}，已自动拦截。请由用户在终端亲自确认执行。`;
-				if (ctx.hasUI) ctx.ui.notify(reason, "warning");
+				dispatchFsm({ type: "RECORD_VIOLATION", guard: "G-01", severity: "block", message: reason }, ctx);
+				if (!isSilentSession(ctx)) ctx.ui.notify(reason, "warning");
 				return { block: true, reason };
 			}
 			if (gate !== "none") {
 				const violation = sharedCheckBashUnderGate(command, ctx.cwd, gate);
 				if (violation) {
-					if (ctx.hasUI) ctx.ui.notify(violation, "warning");
+					dispatchFsm({ type: "RECORD_VIOLATION", guard: "G-01", severity: "block", message: violation }, ctx);
+					if (!isSilentSession(ctx)) ctx.ui.notify(violation, "warning");
 					return { block: true, reason: violation };
 				}
 			}
 			return undefined;
 		}
 
-		// 2. 保护锁下拦截 write/edit
 		if (gate !== "none" && (isToolCallEventType("write", event) || isToolCallEventType("edit", event))) {
 			const rawPath = event.input.path;
 			if (!sharedIsWriteAllowedUnderGate(rawPath, ctx.cwd, gate)) {
@@ -927,11 +1231,14 @@ export default function zeeExtension(pi: ExtensionAPI) {
 							? "~/.local/state/zee/runs/、/tmp/zee-*、.scratch/、.agents/、docs/adr/ 或 SPEC/ARCHITECTURE/GLOSSARY/DESIGN.md"
 							: "~/.local/state/zee/runs/ 或 /tmp/zee-*";
 				const reason = `当前处于 zee-${gate} 保护锁，禁止修改 "${rawPath}"（仅允许写入 ${allowedHint}）。如需开始写代码，请调用 /zee 执行计划。`;
-				if (ctx.hasUI) ctx.ui.notify(reason, "warning");
+				dispatchFsm({ type: "RECORD_VIOLATION", guard: "G-01", severity: "block", message: reason }, ctx);
+				if (!isSilentSession(ctx)) ctx.ui.notify(reason, "warning");
 				return { block: true, reason };
 			}
-			// 写入 .agents/zee.project.json（兼容 @ 前缀）标志着 M0 启程，自动解除 init-design 锁
-			if (gate === "init-design" && normalizeToolPath(rawPath, ctx.cwd) === path.resolve(ctx.cwd, ".agents", "zee.project.json")) {
+			if (
+				gate === "init-design" &&
+				sameResolvedPath(normalizeToolPath(rawPath, ctx.cwd), path.join(ctx.cwd, ".agents", "zee.project.json"))
+			) {
 				setGate("none", ctx);
 			}
 			return undefined;
@@ -955,7 +1262,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const target = args.trim().toLowerCase();
+			const snap = store.getSnapshot();
 			if (!target || target === "status") {
+				const gate = snap.writeGate;
 				const lockLabel =
 					gate === "none"
 						? "无"
@@ -964,53 +1273,91 @@ export default function zeeExtension(pi: ExtensionAPI) {
 							: gate === "init-design"
 								? "init-design（0→1 Stage 1–2 设计冻结锁）"
 								: "review（只读）";
-				if (ctx.hasUI) {
+				if (!isSilentSession(ctx)) {
 					ctx.ui.notify(
-						`当前 zee-mode：${mode}｜保护锁：${lockLabel}（切换用法：/zee-mode auto | strict | off）`,
+						`当前 zee-mode：${snap.routingMode}｜保护锁：${lockLabel}｜阶段：${snap.phase}（切换用法：/zee-mode auto | strict | off）`,
 						"info",
 					);
 				}
 				return;
 			}
 
-			if (!isValidMode(target)) {
-				if (ctx.hasUI) {
+			if (!isValidZeeMode(target)) {
+				if (!isSilentSession(ctx)) {
 					ctx.ui.notify(`无效模式 "${target}"，仅支持：/zee-mode auto | strict | off | status`, "warning");
 				}
 				return;
 			}
 
-			mode = target;
-			pi.appendEntry<ZeeModeEntry>("zee-mode", { mode });
-			if (mode === "off" && gate !== "none") {
-				setGate("none", ctx);
-			} else {
-				updateStatus(ctx);
-			}
+			dispatchFsm({ type: "SET_ROUTING_MODE", mode: target }, ctx, true, true);
 
 			const descMap: Record<ZeeMode, string> = {
 				off: "已关闭 zee 常驻自动路由（仍可随时通过 /zee、/zee-plan 等命令手动触发）",
 				auto: "已开启 zee 自动路由模式（auto）：简单问题直接回答，复杂开发/排障/架构/UI 自动进入 zee 流水线",
 				strict: "已开启 zee 严格编排模式（strict）：所有非问答工程任务均强制先走 zee Preflight、风险定级与门禁验收",
 			};
-			if (ctx.hasUI) ctx.ui.notify(descMap[mode], "info");
+			if (!isSilentSession(ctx)) ctx.ui.notify(descMap[target], "info");
 		},
 	});
 
-	// 2. 8 个短斜杠命令转发到对应 /skill:<name>
-	const registerShortcut = (
+	// 2. /zee-hub 与零冲突快捷键（Key.ctrlAlt("h") & Key.f2，严禁绑定 ctrl+g）
+	pi.registerCommand("zee-hub", {
+		description: "打开 zee 5 标签交互式状态中枢 (Overview & FSM / Workers / Gates / Worktrees & Cost / Controls)",
+		handler: async (_args, ctx) => {
+			await openHub(ctx);
+		},
+	});
+
+	if (typeof pi.registerShortcut === "function") {
+		pi.registerShortcut(Key.ctrlAlt("h"), {
+			description: "打开 zee 状态中枢 (Hub)",
+			handler: async (ctx) => {
+				await openHub(ctx);
+			},
+		});
+		pi.registerShortcut(Key.f2, {
+			description: "打开 zee 状态中枢 (Hub)",
+			handler: async (ctx) => {
+				await openHub(ctx);
+			},
+		});
+	}
+
+	// 3. 9 个短斜杠命令转发到对应 /skill:<name>
+	const registerSkillCommand = (
 		name: string,
 		skillName: string,
 		description: string,
 		nextGate: GateMode | ((ctx: ExtensionContext, args: string) => GateMode),
+		trackResolver: ZeeTrack | ((args: string) => ZeeTrack),
 		lockNotice?: string,
 	) => {
 		pi.registerCommand(name, {
 			description,
 			handler: async (args, ctx) => {
 				const resolvedGate = typeof nextGate === "function" ? nextGate(ctx, args) : nextGate;
-				setGate(resolvedGate, ctx);
-				if (lockNotice && resolvedGate !== "none" && ctx.hasUI) {
+				const track = typeof trackResolver === "function" ? trackResolver(args) : trackResolver;
+				const projectCfg = busSync.readProjectConfig(ctx.cwd);
+				dispatchFsm(
+					{
+						type: "START_RUN",
+						track,
+						trustLevel: projectCfg.trustLevel,
+						phase:
+							resolvedGate === "plan"
+								? "PLANNING"
+								: resolvedGate === "init-design"
+									? "INIT_DESIGN"
+									: resolvedGate === "review"
+										? "REVIEWING"
+										: "PREFLIGHT",
+					},
+					ctx,
+					false,
+					false,
+				);
+				setGate(resolvedGate, ctx, true);
+				if (lockNotice && resolvedGate !== "none" && !isSilentSession(ctx)) {
 					ctx.ui.notify(lockNotice, "info");
 				}
 				const trimmed = args.trim();
@@ -1020,108 +1367,231 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		});
 	};
 
-	registerShortcut(
+	registerSkillCommand(
 		"zee",
 		"zee",
 		"运行 zee 全自动多模型工程工作流（按风险自动定级，支持 /zee plan|review|init|arch 自动上锁与接棒 plan.md）",
 		(ctx, args) => inferGateFromZeeArgs(args, ctx.cwd),
+		(args) => inferTrackFromZeeArgs(args),
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-plan",
 		"zee-plan",
 		"先 Grill 深度访谈与领域建模再沉淀计划文档（跨回合启用写保护锁，禁止修改业务代码）",
 		"plan",
+		"plan",
 		"已启用 zee-plan 跨回合规划保护锁：仅允许写入计划文档、GLOSSARY/ADR 与运行总线，禁止修改业务代码（直到调用 /zee 执行）。",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-init",
 		"zee-init",
 		"项目 0→1 建项模式：从需求访谈到可运行且验收通过的 v1",
 		(ctx) => (fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json")) ? "none" : "init-design"),
+		"init",
 		"已启用 zee-init Stage 1–2 设计保护锁：在 M0 写入 .agents/zee.project.json 前仅允许写设计文档与运行总线。",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-review",
 		"zee-review",
 		"只读跨家族三轴对抗审查（含未提交工作区，自动启用只读保护锁）",
 		"review",
+		"review",
 		"已启用 zee-review 只读审查锁：仅允许写入运行总线与 /tmp/zee-* 沙盒，禁止改动仓库文件。",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-verify",
 		"zee-verify",
 		"项目实机验证技能全生命周期：init 生成 verify-<app>、maintain 防腐维护、run 冷启动实机验收",
 		(_ctx, args) => (/^run\b/i.test(args.trim()) ? "review" : "none"),
+		"verify",
 		"已启用 zee-verify run 只读保护锁：仅允许执行冷启动实机验证与写证据到运行总线，禁止修改仓库源码。",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-arch",
 		"zee-arch",
 		"代码库深模块抗熵增巡检（只读扫描热点与浅模块，输出 HTML 报告，无缝衔接 /zee-plan）",
 		"plan",
+		"arch",
 		"已启用 zee-arch 规划保护锁：仅允许输出架构报告与计划文档，禁止直接修改业务代码。",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-retro",
 		"zee-retro",
 		"会话复盘与 4 级结构化纠错飞轮（将重复错因固化进架构/Lint/Hook/测试）",
 		"none",
+		"retro",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-night",
 		"zee-night",
 		"无人值守过夜模式：独立分支、断点日志、预算熔断与中文晨报",
 		"none",
+		"night",
 	);
-	registerShortcut(
+	registerSkillCommand(
 		"zee-setup",
 		"zee-setup",
 		"配置 zee 模型槽位、执行当前 Pi 宿主全面体检并按需生成项目 verify-<app> 验证技能",
 		"none",
+		"direct",
 	);
 
-	// 3. 内置独立子代理工具 zee_subagent v2.2
+	// 4. 内置独立子代理工具 zee_subagent v2.3
 	pi.registerTool({
 		name: "zee_subagent",
-		label: "zee 子代理 v2.2",
+		label: "zee 子代理 v2.3",
 		description:
-			"在独立隔离的 Pi 子进程中执行单个 zee 角色任务（-ne 挂载轻量 worker-guard.ts + ZEE_WORKER=1、provider/model 自动归一、流式正文优先抢救并自动落盘、并发工具双态看门狗、StagnancyTracker 早停、声明式原子 worktree + 预挂 node_modules + 嵌套分支冲突扁平化、70% 预算截断提示与 authorFamily 同家族硬拦截）。",
+			"在独立隔离的 Pi 子进程中执行单个 zee 角色任务（-ne 挂载轻量 worker-guard.ts + ZEE_WORKER=1、provider/model 自动归一、流式正文优先抢救并自动落盘、并发工具双态看门狗、StagnancyTracker 早停、声明式原子 worktree + 预挂 node_modules/Windows junction + 嵌套分支冲突扁平化、toolCallId 幂等落账、70% 预算截断、G-02 Gate1->Gate2 守卫与 authorFamily 同家族硬拦截）。",
 		promptSnippet:
 			"Delegate an isolated zee role worker with explicit role, provider, model, thinkingLevel, atomic worktree, authorFamily, and least-privilege tools",
 		executionMode: "parallel",
 		parameters: ZeeSubagentParams,
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (process.env.ZEE_WORKER === "1") {
+				dispatchFsm(
+					{
+						type: "RECORD_VIOLATION",
+						guard: "G-06",
+						severity: "block",
+						message: "[G-06] 禁止在子代理内递归派发 zee_subagent。",
+					},
+					ctx,
+				);
 				throw new Error("禁止递归派发：当前进程已是 zee 子代理（ZEE_WORKER=1），请直接执行任务。");
 			}
 			if (params.provider && !params.model) {
 				throw new Error("参数错误：指定 provider 时必须同时提供 model。");
 			}
 
-			// 创建 worktree 之前先按 zee-config.json 归一 provider / model，消灭 0.2s 前缀拆分快败与重名失败
 			const resolvedTarget = resolvePiProviderModel(params.provider, params.model);
 			const effectiveProvider = resolvedTarget.provider;
 			const effectiveModel = resolvedTarget.model;
 
 			const role = (params.role?.trim() || "worker").toLowerCase();
 
-			// 同家族 Reviewer 静态硬拦截（经 extractModelFamily 归一化 anthropic→claude 等别名）
+			// G-03: 同家族 Reviewer 静态硬拦截（经 extractModelFamily 归一化 anthropic→claude 等别名）
 			if (role === "reviewer" && params.authorFamily && effectiveModel) {
 				const authorFam = extractModelFamily(params.authorFamily);
 				const reviewerFam = extractModelFamily(effectiveModel);
 				if (authorFam && reviewerFam && authorFam === reviewerFam) {
-					throw new Error(
-						`[zee_subagent:reviewer] 跨家族拦截：审查员模型 "${effectiveModel}"（家族 ${reviewerFam}）与作者家族 "${authorFam}" 相同，禁止同源审查！请切换为其他家族审查员（如 gemini / openai / claude / devin）。`,
+					const reason = `[zee_subagent:reviewer] 跨家族拦截：审查员模型 "${effectiveModel}"（家族 ${reviewerFam}）与作者家族 "${authorFam}" 相同，禁止同源审查！请切换为其他家族审查员（如 gemini / openai / claude / devin）。`;
+					dispatchFsm(
+						{
+							type: "RECORD_VIOLATION",
+							guard: "G-03",
+							severity: "block",
+							message: reason,
+							detail: `author=${authorFam} reviewer=${reviewerFam}`,
+						},
+						ctx,
+						true,
+						true,
 					);
+					throw new Error(reason);
 				}
 			}
 
-			// 启动前先检查 abort，防止取消后仍创建 worktree 造成目录泄漏
+			// G-04: CUTOFF_CLOSING 阶段拦截/告警新开 coder/ui 功能切片
+			// 注意：strict 阻断在此直接落盘 RECORD_VIOLATION 后抛错；auto 放行由下方 WORKER_PREPARE 统一记录 1 条违规，避免重复双写！
+			const cutoffCheck = checkCutoffPrecondition(store.getSnapshot(), role);
+			let preflightWarningBanner = "";
+			let hasPreflightWarn = false;
+			if (cutoffCheck.violation) {
+				if (!cutoffCheck.allowed) {
+					dispatchFsm(
+						{
+							type: "RECORD_VIOLATION",
+							guard: "G-04",
+							severity: cutoffCheck.violation.severity,
+							message: cutoffCheck.violation.message,
+							detail: cutoffCheck.violation.detail,
+						},
+						ctx,
+						true,
+						true,
+					);
+					throw new Error(cutoffCheck.reason);
+				}
+				hasPreflightWarn = true;
+				if (!isSilentSession(ctx)) ctx.ui.notify(cutoffCheck.reason || cutoffCheck.violation.message, "warning");
+				preflightWarningBanner += `${cutoffCheck.violation.message}\n`;
+			}
+
+			// G-02: L2/L3/night 派发 reviewer 前检查 Gate 1 PASS on matching pinnedSha
+			const rawBaseRef = params.worktree?.baseRef?.trim() || "";
+			const targetShaForG2 = /^[0-9a-f]{7,40}$/i.test(rawBaseRef)
+				? rawBaseRef
+				: store.getSnapshot().pinnedSha || undefined;
+			if (role === "reviewer") {
+				const g2Check = checkGate2Precondition(store.getSnapshot(), targetShaForG2);
+				if (g2Check.violation) {
+					if (!g2Check.allowed) {
+						dispatchFsm(
+							{
+								type: "RECORD_VIOLATION",
+								guard: "G-02",
+								severity: g2Check.violation.severity,
+								message: g2Check.violation.message,
+								detail: g2Check.violation.detail,
+							},
+							ctx,
+							true,
+							true,
+						);
+						throw new Error(g2Check.reason);
+					}
+					hasPreflightWarn = true;
+					if (!isSilentSession(ctx)) ctx.ui.notify(g2Check.reason || g2Check.violation.message, "warning");
+					preflightWarningBanner += `${g2Check.violation.message}\n`;
+				}
+			}
+
 			if (signal?.aborted) {
 				throw new Error(`[zee_subagent:${role}] 启动前已被取消。`);
 			}
 
-			// 声明式原子 Worktree 托管（spawn 之前同步就绪、自动预挂 node_modules 到 exclude、自动规避嵌套 ref 冲突并写入活锁）
+			const workerId = toolCallId?.trim() || `w-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+			const workerLane = params.worktree?.lane || role;
+			const workerFamily = effectiveModel ? extractModelFamily(effectiveModel) : undefined;
+			let workerPrepared = false;
+			let workerFinalized = false;
+
+			const safeFinalizeError = (msg: string) => {
+				if (workerPrepared && !workerFinalized) {
+					workerFinalized = true;
+					dispatchFsm(
+						{
+							type: "WORKER_FINISH",
+							id: workerId,
+							outcome: "failed",
+							errorMessage: msg,
+						},
+						ctx,
+						false,
+						true,
+					);
+				}
+			};
+
+			dispatchFsm(
+				{
+					type: "WORKER_PREPARE",
+					worker: {
+						id: workerId,
+						lane: workerLane,
+						role,
+						provider: effectiveProvider,
+						model: effectiveModel,
+						family: workerFamily,
+						pinnedSha: targetShaForG2 ?? (rawBaseRef || undefined),
+					},
+				},
+				ctx,
+				hasPreflightWarn,
+				true,
+			);
+			workerPrepared = true;
+
 			let createdWorktreePath: string | undefined;
 			let resolvedWorktreeBranch: string | undefined;
 			let mountedNodeModules = false;
@@ -1132,17 +1602,23 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				(params.worktree
 					? path.join(RUNS_ROOT, repoKeyFor(params.worktree.repoRoot), sanitizeSlug(params.worktree.slug))
 					: "");
-			if (params.worktree) {
-				const wtInfo = prepareAtomicWorktree(params.worktree);
-				createdWorktreePath = wtInfo.wtPath;
-				resolvedWorktreeBranch = wtInfo.branch;
-				mountedNodeModules = wtInfo.mountedNodeModules;
-				activeLockPath = writeWorktreeActiveLock(createdWorktreePath, role);
-				effectiveCwd = createdWorktreePath;
-			}
-			if (!fs.existsSync(effectiveCwd)) {
-				removeWorktreeActiveLock(activeLockPath);
-				throw new Error(`工作目录不存在：${effectiveCwd}`);
+
+			try {
+				if (params.worktree) {
+					const wtInfo = prepareAtomicWorktree(params.worktree);
+					createdWorktreePath = wtInfo.wtPath;
+					resolvedWorktreeBranch = wtInfo.branch;
+					mountedNodeModules = wtInfo.mountedNodeModules;
+					activeLockPath = writeWorktreeActiveLock(createdWorktreePath, role);
+					effectiveCwd = createdWorktreePath;
+				}
+				if (!fs.existsSync(effectiveCwd)) {
+					removeWorktreeActiveLock(activeLockPath);
+					throw new Error(`工作目录不存在：${effectiveCwd}`);
+				}
+			} catch (err) {
+				safeFinalizeError(err instanceof Error ? err.message : String(err));
+				throw err;
 			}
 
 			const roleDefaultTimeout = ROLE_DEFAULT_TIMEOUT_MS[role] ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
@@ -1155,10 +1631,8 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			const toolIdleTimeoutMs = Math.max(idleTimeoutMs, TOOL_EXEC_IDLE_TIMEOUT_MS);
 			const maxRepeatErrors = Math.min(10, Math.max(2, params.maxRepeatToolErrors ?? DEFAULT_MAX_REPEAT_ERRORS));
 
-			// 按角色硬收敛最小权限 --tools（防止 verifier/reviewer 拿到 edit 改脏源码）
 			const effectiveTools = enforcePiRoleTools(role, params.tools);
 
-			// 使用 -ne 屏蔽全局扩展，同时挂载仅含安全核的 worker-guard.ts，彻底消灭子进程安全真空
 			const cliArgs: string[] = ["--mode", "json", "-p", "--no-session", "-ne"];
 			if (fs.existsSync(WORKER_GUARD_PATH)) {
 				cliArgs.push("-e", WORKER_GUARD_PATH);
@@ -1183,7 +1657,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				: `[zee-worker]\n${params.task}`;
 			cliArgs.push("--", workerPrompt);
 
-			// 只读/验证角色派发前快照工作区状态（含完整 HEAD），用于事后精准增量脏区审计
 			const preSnapshot = READ_ONLY_AUDIT_ROLES.has(role) ? readGitSnapshot(effectiveCwd) : null;
 
 			const startedAt = Date.now();
@@ -1211,6 +1684,22 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				},
 			};
 
+			dispatchFsm(
+				{
+					type: "WORKER_START",
+					id: workerId,
+					worktreePath: createdWorktreePath,
+					branch: resolvedWorktreeBranch,
+					provider: effectiveProvider,
+					model: effectiveModel,
+					family: workerFamily,
+					pinnedSha: params.worktree?.baseRef,
+				},
+				ctx,
+				false,
+				true,
+			);
+
 			let latestAssistantText = "";
 			let streamingAssistantText = "";
 			let stderrText = "";
@@ -1221,7 +1710,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			let stagnancyDetail = "";
 			let aborted = false;
 
-			// StagnancyTracker 与并发工具 Map 心跳状态（修复单标量竞态缩看门狗漏洞）
 			let lastToolSig = "";
 			let repeatSigCount = 0;
 			let consecutiveToolErrors = 0;
@@ -1259,6 +1747,23 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					content: [{ type: "text", text: `${header}${body}` }],
 					details: { ...details, lastActions: [...details.lastActions], usage: { ...details.usage } },
 				});
+				dispatchFsm(
+					{
+						type: "WORKER_PROGRESS",
+						id: workerId,
+						turns: details.usage.turns,
+						cost: details.usage.cost,
+						inputTokens: details.usage.input,
+						outputTokens: details.usage.output,
+						streamChars: streamingAssistantText.length,
+						inFlightTool: oldest?.name,
+						inFlightSince: oldest?.startedAt,
+						lastActions: details.lastActions,
+					},
+					ctx,
+					false,
+					false,
+				);
 			};
 
 			emitProgress();
@@ -1279,13 +1784,35 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					let killTimer: ReturnType<typeof setTimeout> | undefined;
 					let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 					let idleTimer: ReturnType<typeof setTimeout> | undefined;
+					let stallWarnTimer: ReturnType<typeof setTimeout> | undefined;
 					let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 					let proc: ReturnType<typeof spawn>;
 
 					const resetIdleTimer = (customWindowMs?: number, reasonHint?: string) => {
 						if (idleTimer) clearTimeout(idleTimer);
+						if (stallWarnTimer) clearTimeout(stallWarnTimer);
 						const oldest = getOldestInFlight();
 						const windowMs = customWindowMs ?? (oldest ? toolIdleTimeoutMs : idleTimeoutMs);
+						const warnMs = Math.max(1000, Math.round(windowMs * 0.6));
+						stallWarnTimer = setTimeout(() => {
+							if (settled) return;
+							const curOldest = getOldestInFlight();
+							const stallMsg = curOldest
+								? `工具 ${curOldest.name} 空转 >${Math.round(warnMs / 1000)}s`
+								: `空闲 >${Math.round(warnMs / 1000)}s (60% 阈值)`;
+							dispatchFsm(
+								{
+									type: "WORKER_STALL_WARN",
+									id: workerId,
+									stallReason: stallMsg,
+								},
+								ctx,
+								false,
+								true,
+							);
+						}, warnMs);
+						stallWarnTimer.unref?.();
+
 						idleTimer = setTimeout(() => {
 							idleTimedOut = true;
 							const curOldest = getOldestInFlight();
@@ -1309,6 +1836,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 						if (killTimer) clearTimeout(killTimer);
 						if (timeoutTimer) clearTimeout(timeoutTimer);
 						if (idleTimer) clearTimeout(idleTimer);
+						if (stallWarnTimer) clearTimeout(stallWarnTimer);
 						if (heartbeatTimer) clearInterval(heartbeatTimer);
 						if (signal) signal.removeEventListener("abort", onAbort);
 						resolve(result);
@@ -1339,7 +1867,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 							return;
 						}
 
-						// 追踪工具执行事件以驱动并发 Map 看门狗与 StagnancyTracker
 						if (evt.type === "tool_execution_start") {
 							thinkingStreamStartedAt = 0;
 							const tName = String(evt.toolName ?? "tool");
@@ -1415,7 +1942,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 							return;
 						}
 
-						// 监听 message_update 实时抢救流式正文，并对纯 thinking_delta 设独立上限防止看门狗被无限续命
 						if (evt.type === "message_update") {
 							const ame = evt.assistantMessageEvent as
 								| { type?: string; delta?: string; content?: string }
@@ -1500,6 +2026,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 								...process.env,
 								ZEE_WORKER: "1",
 								ZEE_ROLE: role,
+								...(effectiveBusDir ? { ZEE_BUS_DIR: effectiveBusDir } : {}),
 							},
 						});
 					} catch (error) {
@@ -1555,13 +2082,13 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 			details.exitCode = outcome.code;
 
-			// 精准增量脏区审计（仅撤销本次子代理新增的越权改动，绝不误杀用户原有未提交代码！豁免只读 node_modules 软链）
 			let violationBanner = "";
 			const postSnapshot = readGitSnapshot(effectiveCwd);
 			if (preSnapshot?.isGit && postSnapshot.isGit) {
 				const preSet = new Set(preSnapshot.statusLines);
 				const isBenignNodeModulesSymlink = (line: string): boolean => {
-					if (line.trim() !== "?? node_modules") return false;
+					const trimmedLine = line.trim();
+					if (trimmedLine !== "?? node_modules" && trimmedLine !== "?? node_modules/") return false;
 					try {
 						return fs.lstatSync(path.join(effectiveCwd, "node_modules")).isSymbolicLink();
 					} catch {
@@ -1586,11 +2113,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					try {
 						if (trackedToRestore.size > 0) {
 							const relList = [...trackedToRestore];
-							// 先撤出暂存区（针对 git add）
 							try {
 								execFileSync("git", ["-C", effectiveCwd, "reset", "HEAD", "--", ...relList], { stdio: "ignore" });
 							} catch {}
-							// 仅逐文件恢复原本存在于 HEAD 中的跟踪路径，避免全局 git checkout -- . 误杀用户未提交修改
 							for (const relFile of relList) {
 								let inHead = false;
 								try {
@@ -1614,7 +2139,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 								fs.rmSync(fullPath, { recursive: true, force: true });
 							}
 						}
-						// 若在 zee 专属隔离 detached worktree 中越权 commit，安全复位到原 HEAD
 						if (headMoved && createdWorktreePath && !params.worktree?.branch) {
 							try {
 								execFileSync("git", ["-C", effectiveCwd, "reset", "--hard", preSnapshot.head], { stdio: "ignore" });
@@ -1630,13 +2154,18 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			// 声明式 Worktree 自动清理（detached 默认清理，先安全解绑预挂的 node_modules 软链，绝不删 busDir 证据）
 			if (createdWorktreePath && params.worktree) {
 				const shouldCleanup = params.worktree.autoCleanup ?? !params.worktree.branch;
 				if (shouldCleanup) {
 					const nmLink = path.join(createdWorktreePath, "node_modules");
 					try {
-						if (fs.lstatSync(nmLink).isSymbolicLink()) fs.unlinkSync(nmLink);
+						if (fs.lstatSync(nmLink).isSymbolicLink()) {
+							try {
+								fs.unlinkSync(nmLink);
+							} catch {
+								fs.rmdirSync(nmLink);
+							}
+						}
 					} catch {}
 				}
 				const curSnap = readGitSnapshot(createdWorktreePath);
@@ -1654,17 +2183,29 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 			if (outcome.spawnError) {
 				details.status = "failed";
-				throw new Error(`[zee_subagent:${role}] 启动 Pi 子进程失败：${outcome.spawnError.message}`);
+				const spawnErrMsg = `[zee_subagent:${role}] 启动 Pi 子进程失败：${outcome.spawnError.message}`;
+				safeFinalizeError(spawnErrMsg);
+				throw new Error(spawnErrMsg);
 			}
 
-			// 自动落账 delegatesDispatched 并在跨过 70% 预算截断线时硬注入 [ZEE_BUDGET_CUTOFF] 提醒收口
 			const isPartialOutcome = aborted || timedOut || idleTimedOut || stagnancyTripped;
-			const budgetTick = recordSubagentBudgetAndCutoff(effectiveBusDir, isPartialOutcome);
+			const budgetTick = recordSubagentBudgetAndCutoff(effectiveBusDir, isPartialOutcome, toolCallId);
 			let budgetCutoffBanner = "";
+			if (budgetTick) {
+				dispatchFsm(
+					{
+						type: "BUDGET_TICK",
+						dispatched: budgetTick.dispatched,
+						maxDelegates: budgetTick.maxDelegates,
+						cutoffTriggered: budgetTick.cutoffTriggered,
+					},
+					ctx,
+					false,
+					true,
+				);
+			}
 			if (budgetTick?.cutoffTriggered) {
 				details.budgetCutoffTriggered = true;
-				budgetCutoffLabel = `cut:${budgetTick.dispatched}/${budgetTick.maxDelegates}`;
-				updateStatus(ctx);
 				budgetCutoffBanner = `\n[ZEE_BUDGET_CUTOFF] 已派发子代理 ${budgetTick.dispatched}/${budgetTick.maxDelegates}（达到 70% 截断线 ${budgetTick.cutoffAt}）：请立即停止新开功能切片，完成当前已验证提交的合流、清理 worktree、更新 state.json 并输出最终中文交付报告/晨报！\n`;
 			}
 
@@ -1681,7 +2222,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				: "non-git";
 			const metaLine = `\n\n---\n[zee_subagent] role=${role} status=${details.status} model=${details.model ?? "default"} elapsed=${elapsedSec}s turns=${details.usage.turns} in=${details.usage.input} out=${details.usage.output} cost=$${details.usage.cost.toFixed(4)} ${gitSummary}${resolvedWorktreeBranch ? ` branch=${resolvedWorktreeBranch}` : ""}${createdWorktreePath ? ` worktree=${createdWorktreePath}(cleaned=${Boolean(details.worktreeCleaned)})` : ""}`;
 
-			// 中止 / 墙钟超时 / 空闲超时 / StagnancyTracker 早停：优先抢救当前轮流式正文，超 2KB 自动落盘至 busDir/artifacts/！
 			if (isPartialOutcome) {
 				let tag = "ABORTED_PARTIAL";
 				let reasonLine = "子代理已被外部中止";
@@ -1714,7 +2254,34 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				const partialArtifactPath = persistPartialSalvage(effectiveBusDir, role, rescuedText);
 				if (partialArtifactPath) details.partialArtifactPath = partialArtifactPath;
 
+				workerFinalized = true;
+				dispatchFsm(
+					{
+						type: "WORKER_FINISH",
+						id: workerId,
+						outcome: details.roleViolation
+							? "role_violation"
+							: partialArtifactPath || details.status !== "aborted"
+								? "partial_salvaged"
+								: "aborted",
+						status: details.status,
+						turns: details.usage.turns,
+						cost: details.usage.cost,
+						inputTokens: details.usage.input,
+						outputTokens: details.usage.output,
+						lastActions: details.lastActions,
+						partialArtifactPath,
+						roleViolation: details.roleViolation,
+						budgetCutoffTriggered: details.budgetCutoffTriggered,
+					},
+					ctx,
+					true,
+					true,
+				);
+				if (effectiveBusDir) hydrateFromDisk(ctx, effectiveBusDir);
+
 				const partialParts = [
+					preflightWarningBanner.trim(),
 					normNoticeBanner.trim(),
 					branchNote.trim(),
 					`[STATUS: ${tag}] ${reasonLine}`,
@@ -1745,14 +2312,69 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					stderrText.trim() ? `stderr: ${stderrText.trim().slice(0, 800)}` : "",
 					latestAssistantText ? `最后输出: ${latestAssistantText.slice(0, 800)}` : "",
 				].filter(Boolean);
-				throw new Error(`[zee_subagent:${role}] 执行失败：${reasonParts.join(" | ") || "未知错误"}`);
+				const failMsg = `[zee_subagent:${role}] 执行失败：${reasonParts.join(" | ") || "未知错误"}`;
+				safeFinalizeError(failMsg);
+				throw new Error(failMsg);
 			}
 
 			details.status = "completed";
-			const body = truncateSubagentOutput(latestAssistantText.trim() || streamingAssistantText.trim() || "(子代理未返回文本输出)");
+			workerFinalized = true;
+			const bodyRaw = latestAssistantText.trim() || streamingAssistantText.trim();
+			const verdictMatch = bodyRaw.match(/\bVERDICT:\s*(PASS|FAIL|REVISE|INCONCLUSIVE)\b/i);
+			const willRecordGate = Boolean(
+				verdictMatch && !details.roleViolation && (role === "verifier" || role === "reviewer" || role === "judge"),
+			);
+
+			dispatchFsm(
+				{
+					type: "WORKER_FINISH",
+					id: workerId,
+					outcome: details.roleViolation ? "role_violation" : "completed",
+					status: details.status,
+					turns: details.usage.turns,
+					cost: details.usage.cost,
+					inputTokens: details.usage.input,
+					outputTokens: details.usage.output,
+					lastActions: details.lastActions,
+					roleViolation: details.roleViolation,
+					budgetCutoffTriggered: details.budgetCutoffTriggered,
+				},
+				ctx,
+				!willRecordGate,
+				true,
+			);
+
+			if (willRecordGate && verdictMatch) {
+				const vNorm = verdictMatch[1].toUpperCase() as "PASS" | "FAIL" | "REVISE" | "INCONCLUSIVE";
+				const isFullHexSha = /^[0-9a-f]{40}$/i.test(rawBaseRef);
+				const targetSha = isFullHexSha
+					? rawBaseRef
+					: postSnapshot.head || store.getSnapshot().pinnedSha || rawBaseRef;
+				if (targetSha) {
+					dispatchFsm(
+						{
+							type: "RECORD_GATE_RESULT",
+							gate: role === "verifier" ? 1 : 2,
+							role: role as "verifier" | "reviewer" | "judge",
+							verdict: vNorm,
+							pinnedSha: targetSha,
+							family: workerFamily,
+						},
+						ctx,
+						true,
+						true,
+					);
+				} else {
+					pi.appendEntry("zee-fsm", toPersistedFsmEntry(store.getSnapshot()));
+					store.update((p) => ({ ...p, branchEntryTs: Date.now() }), false);
+				}
+			}
+			if (effectiveBusDir) hydrateFromDisk(ctx, effectiveBusDir);
+
+			const body = truncateSubagentOutput(bodyRaw || "(子代理未返回文本输出)");
 			const finalMeta = metaLine.replace("status=running", "status=completed");
 			return {
-				content: [{ type: "text", text: `${normNoticeBanner}${branchNote}${violationBanner}${budgetCutoffBanner}${body}${finalMeta}` }],
+				content: [{ type: "text", text: `${preflightWarningBanner}${normNoticeBanner}${branchNote}${violationBanner}${budgetCutoffBanner}${body}${finalMeta}` }],
 				details,
 			};
 		},

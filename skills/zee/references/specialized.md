@@ -1,6 +1,6 @@
-# Specialized Modes: Investigate, Perf/Hillclimb, Loop, Prototype & Sweep (`specialized.md` v4)
+# Specialized Modes: Investigate, Perf/Hillclimb, Loop, Prototype, Sweep, Verify, Recall & Triage (`specialized.md` v4.2)
 
-Loaded only when the task matches one of these 5 specialized workflows. **All reports, tables, and recommendations shown to the user MUST be in Simplified Chinese (简体中文).**
+Loaded only when the task matches one of these specialized workflows. **All reports, tables, briefs, and recommendations shown to the user MUST be in Simplified Chinese (简体中文).**
 
 ## 1. Read-Only Investigation (`investigate`)
 Triggered by "怎么工作的 / 为什么这样设计 / 查一下影响面 / 只看不改" or `/zee investigate <question>`.
@@ -17,7 +17,7 @@ Triggered when the goal is improving a measurable metric (latency, throughput, m
    - **Warm-up & Cache State**: separate cold vs warm cache / JIT warm-up explicitly.
    - **ABAB Alternation**: interleave Baseline (A) and Candidate (B) runs (`A -> B -> A -> B`) on the same quiet machine to cancel thermal throttling and OS drift; report **median + IQR / min-max**, not cherry-picked single runs.
    - **Physical Ceiling (`explain-the-number`)**: estimate the hardware/algorithmic theoretical bound (bandwidth, syscalls, allocations, O(N)) so you know whether 10x headroom exists before micro-tuning.
-   - **Profiler Forensics**: for CPU/memory/trace bottlenecks, capture a real profile (`cpuprofile`, `spindump`, Chrome trace, heap snapshot); for large trace dumps, import sampled events into a temporary `/tmp` SQLite table and query hot stacks/leak chains with SQL rather than guessing from raw JSON.
+   - **Profiler Forensics**: capture a real profile (`cpuprofile`, `spindump`, Chrome trace, heap snapshot); for large trace dumps, import sampled events into a temporary `/tmp/zee-*` SQLite table and query hot stacks/leak chains with SQL rather than guessing from raw JSON.
    - **Baseline Logged**: capture and log pre-change Baseline to `decisions.tsv` before touching code.
 2. **One-Change Scientific Loop**:
    - Follow cheapest-first order: eliminate unnecessary work -> reduce algorithmic/IO amplification -> tune hot path.
@@ -47,5 +47,21 @@ Triggered when auditing, migrating-analysis, or checking a pattern across many i
 
 ## 6. Project Verification Skill Bootstrap & Anti-Rot Maintenance (`verify-init` / `verify-maintain`)
 Load `<zeeDir>/disciplines/verification-skill.md`:
-- **`verify-init`**: interview the repo (Surface, Launch, Doctor, Drive, Evidence, Cleanup), generate `<projectSkillsDir>/verify-<app>/SKILL.md` + `features/`, and **prove it live end-to-end on 1 real feature** (verifying evidence survives cleanup) before declaring done.
-- **`verify-maintain`**: run index hygiene -> parallel read-only `Scout` source wave per feature -> mandatory serial live pass holding all 3 invariants -> strict triage (**doc drift** / **harness gap** / **product regression** — never mask a product bug by weakening docs).
+- **`verify-init`**: interview the repo (`Surface`, `Launch`, `Doctor`, `Drive`, `Evidence`, `Cleanup`), generate `<projectSkillsDir>/verify-<app>/SKILL.md` + `scripts/verify-ctl.(mjs|py|sh)` + `features/`, and **prove it live end-to-end on 1 real feature** (with zero repo scratch & confirming evidence survives cleanup) before declaring done.
+- **`verify-maintain`**: run index hygiene -> parallel read-only `Scout` source wave per feature -> mandatory serial live pass (plus `--fuzz` if requested) holding all 3 invariants -> strict triage (**doc drift** / **harness gap** / **product regression** — never mask a product bug by weakening docs).
+
+## 7. Historical Context Recall (`/zee recall <topic>`)
+Triggered by `/zee recall <topic>` (or "以前为什么这么做 / 查一下历史上下文"). Runs **strictly read-only** (works standalone without `~/.agents/zee-config.json` via `resolve-model --allow-standalone`):
+1. Run deterministic cross-source transcript & artifact search:
+   `node "<zeeDir>/scripts/zee-tool.mjs" mine-transcripts --mode recall --repo "<repoRoot>" --query "<topic>" [--days 14] [--limit 20]`
+   *(Searches local AGY/Pi/Claude/Codex session logs, Out-of-Tree Bus `decisions.tsv` / `artifacts/partial-*.md` / `context.md` / `plan.md`, `docs/adr/`, and `.agents/gardening-queue.jsonl` with automatic `<REDACTED>` secret scrubbing.)*
+2. Optionally inspect matched `docs/adr/`, `git log -S`, or `context.md`/`plan.md` files cited in the top matches.
+3. Synthesize and output a **`<= 40`-line** Simplified Chinese historical context brief (`核心结论 -> 关键历史决策/被否决方案 -> 关联 ADR/总线/文件 -> 当前仍有效的约束`), touching zero repo files.
+
+## 8. Outer-Loop Issue & Finding Triage (`/zee triage`)
+Triggered by `/zee triage` (or triaging queued bugs/gardening findings into clean work packages). Runs **read-only** first (supports zero-config standalone):
+1. **Verify Repro on `main`**: run `node "<zeeDir>/scripts/zee-tool.mjs" list-findings --repo "<repoRoot>"` (plus `mine-transcripts --mode retro` or user-supplied issues/logs) and dispatch read-only `Scout` verification on current `main` to filter out already-fixed issues, doc drift, and non-reproducible noise.
+2. **Cluster Shared Root Cause**: group confirmed reproductions and `gardening-queue.jsonl` findings by shared underlying module, invariant, or missing Test Seam (highlighting `systemic: true` patterns with `count >= 3` first).
+3. **Emit Actionable Chief-of-Staff Output**: present a concise Chinese triage table and emit either:
+   - a ready-to-run **`/zee-plan` or `/zee-night` execution brief** for the highest-leverage root-cause cluster, OR
+   - persisted deferred `P2` entries via `node "<zeeDir>/scripts/zee-tool.mjs" queue-finding --repo "<repoRoot>" --category <cat> --pattern <slug> --summary "<text>" [--file <path>] --source triage`.

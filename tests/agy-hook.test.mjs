@@ -327,6 +327,45 @@ test("v4.1 回归 [C4/H4]：Stop Hook 豁免 initialized/awaiting-approval 且�
       { PLUGIN_DATA: pluginData, NON_INTERACTIVE: "1" },
     );
     assert.equal(parenBlock.decision, "deny");
+
+    // 6. v4.2.0: Windows 反斜杠 Role 路径识别 + review 锁放行 .agents/gardening-queue.jsonl 与新 zee-tool.mjs 子命令
+    const winWorkerPrompt = "[zee-worker] Read C:\\zee\\worker.md\nRole: C:\\zee\\skills\\zee\\roles\\reviewer.md | Bus: " + busDir;
+    const winWorkerDeny = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "subagent-win-role-cid",
+        cwd: absRepo,
+        lastUserInput: winWorkerPrompt,
+        toolCall: { name: "write_file", args: { Path: path.join(absRepo, "src", "hack.ts") } },
+      },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.equal(winWorkerDeny.decision, "deny");
+
+    const allowQueueInReview = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "conv-verify-run",
+        cwd: absRepo,
+        lastUserInput: "/zee-verify run",
+        toolCall: { name: "write_file", args: { Path: path.join(absRepo, ".agents", "gardening-queue.jsonl") } },
+      },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.deepEqual(allowQueueInReview, {});
+
+    const toolScriptWin = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
+    const allowSandboxExportInReview = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "conv-verify-run",
+        cwd: absRepo,
+        lastUserInput: "/zee-verify run",
+        toolCall: { name: "run_command", args: { CommandLine: `node "${toolScriptWin}" sandbox-export --repo "${absRepo}" --prefix mut` } },
+      },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.deepEqual(allowSandboxExportInReview, {});
   } finally {
     fs.rmSync(pluginData, { recursive: true, force: true });
     fs.rmSync(repoDir, { recursive: true, force: true });

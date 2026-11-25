@@ -58,16 +58,71 @@ const PLAN_DOMAIN_ROOT_FILES = new Set([
 const READ_ONLY_SEARCH_PROGS = new Set(["grep", "rg", "egrep", "fgrep"]);
 const INLINE_INTERPRETERS = new Set(["python", "python3", "node", "ruby", "perl"]);
 
+const SHELL_ESCAPE_CHARS = new Set([
+  "\\",
+  '"',
+  "'",
+  "$",
+  "`",
+  " ",
+  "\t",
+  "\r",
+  "\n",
+  ";",
+  "|",
+  "&",
+  ">",
+  "<",
+  "(",
+  ")",
+]);
+
+function isShellEscapeTarget(nextCh) {
+  return nextCh !== undefined && SHELL_ESCAPE_CHARS.has(nextCh);
+}
+
+function normalizeForPathCompare(targetPath) {
+  const resolved = path.resolve(targetPath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function pathsEqual(a, b) {
+  if (!a || !b) return false;
+  return normalizeForPathCompare(a) === normalizeForPathCompare(b);
+}
+
+function exeBasename(token) {
+  const base = path.basename(String(token || "")).toLowerCase();
+  return process.platform === "win32" ? base.replace(/\.(exe|cmd|bat)$/i, "") : base.replace(/\.exe$/i, "");
+}
+
 export function isAllowedZeeTmpPath(targetPath, repoCwd = "") {
   if (!targetPath) return false;
   const resolved = path.resolve(targetPath);
   // 若目标就在当前被守卫仓库目录内（例如仓库本身建在 /tmp 或 os.tmpdir() 下），绝不借临时目录规则绕过写锁！
   if (repoCwd && isWithinDir(resolved, repoCwd)) return false;
-  const tmpRoots = new Set(["/tmp", "/private/tmp", path.resolve(os.tmpdir())]);
+  const tmpRoots = new Set([
+    "/tmp",
+    "/private/tmp",
+    path.resolve("/tmp"),
+    path.resolve("/private/tmp"),
+    path.resolve(os.tmpdir()),
+  ]);
+  if (process.platform === "win32") {
+    const driveRoot = path.parse(resolved).root;
+    if (driveRoot) {
+      tmpRoots.add(path.join(driveRoot, "tmp"));
+      tmpRoots.add(path.join(driveRoot, "private", "tmp"));
+    }
+  }
+  const normResolved = normalizeForPathCompare(resolved);
   for (const root of tmpRoots) {
-    const rel = path.relative(root, resolved);
-    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
-    const firstSeg = rel.split(path.sep)[0];
+    const normRoot = normalizeForPathCompare(root);
+    const rel = path.relative(normRoot, normResolved);
+    if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../") || path.isAbsolute(rel)) {
+      continue;
+    }
+    const firstSeg = rel.split(/[\\/]/)[0];
     // 统一放行所有合法 /tmp/zee-* 沙盒目录（与报错提示保持一致；第 65 行仍严禁逃逸进仓库目录）
     if (firstSeg && /^zee-[a-z0-9][a-z0-9_.-]*$/i.test(firstSeg)) {
       return true;
@@ -108,8 +163,11 @@ export function normalizeToolPath(rawPath, cwd) {
 
 export function isWithinDir(targetPath, parentDir) {
   if (!parentDir || !targetPath) return false;
-  const rel = path.relative(path.resolve(parentDir), path.resolve(targetPath));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  const rel = path.relative(normalizeForPathCompare(parentDir), normalizeForPathCompare(targetPath));
+  return (
+    rel === "" ||
+    (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel))
+  );
 }
 
 /**
@@ -129,12 +187,14 @@ export function isWriteAllowedUnderGate(rawPath, cwd, gateMode, extraAllowedDirs
 
   const repoRoot = path.resolve(effectiveCwd);
   const docsDir = path.join(repoRoot, "docs");
+  const gardeningQueuePath = path.join(repoRoot, ".agents", "gardening-queue.jsonl");
+  if (pathsEqual(target, gardeningQueuePath)) return true;
 
   if (gateMode === "plan") {
     if (isWithinDir(target, path.join(repoRoot, ".scratch"))) return true;
     if (isWithinDir(target, path.join(docsDir, "plans"))) return true;
     if (isWithinDir(target, path.join(docsDir, "adr"))) return true;
-    if ((path.dirname(target) === repoRoot || path.dirname(target) === docsDir) && PLAN_DOMAIN_ROOT_FILES.has(path.basename(target))) {
+    if ((pathsEqual(path.dirname(target), repoRoot) || pathsEqual(path.dirname(target), docsDir)) && PLAN_DOMAIN_ROOT_FILES.has(path.basename(target))) {
       return true;
     }
     return false;
@@ -146,18 +206,18 @@ export function isWriteAllowedUnderGate(rawPath, cwd, gateMode, extraAllowedDirs
     if (isWithinDir(target, path.join(docsDir, "adr"))) return true;
     if (isWithinDir(target, path.join(repoRoot, ".agents"))) return true;
     // 允许在仓库根或 docs/ 目录写入 0→1 冻结设计文档
-    if ((path.dirname(target) === repoRoot || path.dirname(target) === docsDir) && INIT_DESIGN_ROOT_FILES.has(path.basename(target))) {
+    if ((pathsEqual(path.dirname(target), repoRoot) || pathsEqual(path.dirname(target), docsDir)) && INIT_DESIGN_ROOT_FILES.has(path.basename(target))) {
       return true;
     }
     return false;
   }
 
-  // review 模式仅放行 RUNS_ROOT、/tmp/zee-* 沙盒与显式 extraAllowedDirs（如 artifactDirectoryPath）
+  // review 模式仅放行 RUNS_ROOT、/tmp/zee-* 沙盒、.agents/gardening-queue.jsonl 与显式 extraAllowedDirs（如 artifactDirectoryPath）
   return false;
 }
 
 /**
- * 轻量 POSIX Shell 分词器（保留引号内完整字面量，不丢转义）
+ * 轻量 POSIX/Windows 兼容 Shell 分词器（保留引号内完整字面量与 Windows 路径反斜杠）
  */
 export function tokenizeShell(segment) {
   const tokens = [];
@@ -179,7 +239,7 @@ export function tokenizeShell(segment) {
       continue;
     }
     if (quote === '"') {
-      if (ch === "\\") {
+      if (ch === "\\" && isShellEscapeTarget(segment[i + 1])) {
         escaping = true;
       } else if (ch === '"') {
         quote = null;
@@ -188,7 +248,7 @@ export function tokenizeShell(segment) {
       }
       continue;
     }
-    if (ch === "\\") {
+    if (ch === "\\" && isShellEscapeTarget(segment[i + 1])) {
       escaping = true;
       continue;
     }
@@ -252,11 +312,11 @@ export function splitShellSegments(command) {
     }
     if (quote === '"') {
       current += ch;
-      if (ch === "\\") escaping = true;
+      if (ch === "\\" && isShellEscapeTarget(command[i + 1])) escaping = true;
       else if (ch === '"') quote = null;
       continue;
     }
-    if (ch === "\\") {
+    if (ch === "\\" && isShellEscapeTarget(command[i + 1])) {
       current += ch;
       escaping = true;
       continue;
@@ -353,7 +413,7 @@ function extractCommandSubstitutions(command) {
       if (ch === "'") quote = null;
       continue;
     }
-    if (ch === "\\") {
+    if (ch === "\\" && isShellEscapeTarget(command[i + 1])) {
       escaping = true;
       continue;
     }
@@ -380,9 +440,9 @@ function extractCommandSubstitutions(command) {
         } else if (innerQuote === "'") {
           if (c === "'") innerQuote = null;
         } else if (innerQuote === '"') {
-          if (c === "\\") innerEsc = true;
+          if (c === "\\" && isShellEscapeTarget(command[j + 1])) innerEsc = true;
           else if (c === '"') innerQuote = null;
-        } else if (c === "\\") {
+        } else if (c === "\\" && isShellEscapeTarget(command[j + 1])) {
           innerEsc = true;
         } else if (c === "'" || c === '"') {
           innerQuote = c;
@@ -420,7 +480,7 @@ export function getAllNestedCommands(command, maxDepth = 5) {
     if (tokens.length === 0) continue;
 
     for (let i = 0; i < tokens.length; i++) {
-      const verb = path.basename(tokens[i]);
+      const verb = exeBasename(tokens[i]);
       if (["sh", "bash", "zsh", "dash", "ksh"].includes(verb) && i + 2 < tokens.length) {
         let j = i + 1;
         while (j < tokens.length) {
@@ -462,7 +522,7 @@ function isProtectedTarget(arg, cwd) {
     const resolved = normalizeToolPath(candidate, cwd || process.cwd());
     if (resolved === "/") return true;
     const homeResolved = path.resolve(os.homedir());
-    if (resolved === homeResolved) return true;
+    if (pathsEqual(resolved, homeResolved)) return true;
     for (const p of ["/etc", "/usr", "/bin", "/sbin", "/var", "/lib", "/boot", "/dev", "/home", "/root", "/System", "/Applications"]) {
       if (resolved === p) return true;
     }
@@ -515,7 +575,7 @@ function checkRootDeletion(allCmds, cwd) {
     for (const seg of splitShellSegments(cmd)) {
       const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
       if (tokens.length === 0) continue;
-      const verb = path.basename(tokens[0]);
+      const verb = exeBasename(tokens[0]);
       if (verb === "cd") {
         const dirArg = tokens[1] && !tokens[1].startsWith("-") ? tokens[1] : os.homedir();
         if (dirArg !== "-") virtualCwd = normalizeToolPath(dirArg, virtualCwd);
@@ -563,7 +623,7 @@ function checkTrunkForcePush(allCmds, cwd) {
   for (const cmd of allCmds) {
     for (const seg of splitShellSegments(cmd)) {
       const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
-      if (tokens.length < 2 || path.basename(tokens[0]) !== "git") continue;
+      if (tokens.length < 2 || exeBasename(tokens[0]) !== "git") continue;
 
       // 穿透 git 全局参数 (-C, -c, --git-dir, --work-tree)
       let subIdx = 1;
@@ -637,7 +697,7 @@ function checkDropDatabase(allCmds) {
     for (const seg of segments) {
       const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
       if (tokens.length === 0) continue;
-      const verb = path.basename(tokens[0]);
+      const verb = exeBasename(tokens[0]);
       if (DB_CLIENTS.has(verb)) {
         hasDbClient = true;
         onlyReadOnly = false;
@@ -678,7 +738,7 @@ export function evaluateDestructiveCommand(command, cwd) {
 function getExecutableDenyCandidate(seg) {
   const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
   if (tokens.length === 0) return "";
-  const verb = path.basename(tokens[0]);
+  const verb = exeBasename(tokens[0]);
 
   // 放行纯文本搜索命令（避免 rg "--live" src/ 误拦）
   if (READ_ONLY_SEARCH_PROGS.has(verb)) return "";
@@ -817,11 +877,11 @@ export function stripHeredocBodies(command) {
         continue;
       }
       if (quote === '"') {
-        if (ch === "\\") escaping = true;
+        if (ch === "\\" && isShellEscapeTarget(line[j + 1])) escaping = true;
         else if (ch === '"') quote = null;
         continue;
       }
-      if (ch === "\\") {
+      if (ch === "\\" && isShellEscapeTarget(line[j + 1])) {
         escaping = true;
         continue;
       }
@@ -876,11 +936,11 @@ function extractOutputRedirects(seg) {
       continue;
     }
     if (quote === '"') {
-      if (ch === "\\") escaping = true;
+      if (ch === "\\" && isShellEscapeTarget(seg[i + 1])) escaping = true;
       else if (ch === '"') quote = null;
       continue;
     }
-    if (ch === "\\") {
+    if (ch === "\\" && isShellEscapeTarget(seg[i + 1])) {
       escaping = true;
       continue;
     }
@@ -921,13 +981,13 @@ function extractOutputRedirects(seg) {
           continue;
         }
         if (tq === '"') {
-          if (c === "\\") tEsc = true;
+          if (c === "\\" && isShellEscapeTarget(seg[k + 1])) tEsc = true;
           else if (c === '"') tq = null;
           else target += c;
           k += 1;
           continue;
         }
-        if (c === "\\") {
+        if (c === "\\" && isShellEscapeTarget(seg[k + 1])) {
           tEsc = true;
           k += 1;
           continue;
@@ -1012,7 +1072,7 @@ function recordLeadingStaticVars(rawTokens, staticVars, repoCwd = "") {
 
 function isSafeZeeToolInvocation(tokens) {
   if (tokens.length < 3) return false;
-  const prog = path.basename(tokens[0]);
+  const prog = exeBasename(tokens[0]);
   if (prog !== "node") return false;
   const scriptArg = tokens[1] || "";
   if (path.basename(scriptArg) !== "zee-tool.mjs") return false;
@@ -1031,6 +1091,14 @@ function isSafeZeeToolInvocation(tokens) {
     "check-plan",
     "resolve-model",
     "doctor",
+    "sandbox-export",
+    "sandbox-clean",
+    "gate-tamper-diff",
+    "mine-transcripts",
+    "queue-finding",
+    "list-findings",
+    "readiness",
+    "match-skills",
   ]).has(sub);
 }
 
@@ -1177,8 +1245,10 @@ function isInlineCodeConfinedToAllowedPaths(code, repoCwd, virtualCwd, gateMode,
   }
 
   if (inSandbox) {
-    // 沙盒 cwd 内禁止脚本显式引用仓库绝对路径或上级逃逸 ".."
-    if (code.includes(absRepo) || /(?:^|['"`\s/])\.\.(?:\/|['"`\s]|$)/.test(code)) {
+    // 沙盒 cwd 内禁止脚本显式引用仓库绝对路径或上级逃逸 ".."（兼容 Windows 反斜杠与盘符大小写）
+    const normCode = process.platform === "win32" ? code.replace(/\\/g, "/").toLowerCase() : code;
+    const normAbsRepo = process.platform === "win32" ? absRepo.replace(/\\/g, "/").toLowerCase() : absRepo;
+    if (normCode.includes(normAbsRepo) || /(?:^|['"`\s/\\])\.\.(?:[\\/]|['"`\s]|$)/.test(code)) {
       return false;
     }
     return true;
@@ -1421,7 +1491,7 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
       const stripped = stripLeadingEnvAssignments(rawTokens).map((t) => expandStaticVars(t, staticVars));
       if (stripped.length === 0) continue;
 
-      const verb = path.basename(stripped[0]);
+      const verb = exeBasename(stripped[0]);
 
       // 追踪同命令内的 cd <dir>（仅影响后续片段的虚拟工作目录）
       if (verb === "cd") {

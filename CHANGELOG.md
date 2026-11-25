@@ -1,5 +1,28 @@
 # Changelog
 
+## [4.2.0] - 2026-11-26
+
+### Added
+- **Pi v1.6.1 双轴 FSM 与零冲突 Layer 0/1/2 HUD/Hub（`pi-extension/fsm.ts`, `bus-sync.ts`, `hub-ui.ts`）**：
+  - 实现 **14 个工作流阶段 × 9 个子代理车道状态** 双轴状态机与 **G-01..G-06** 守卫不变量，支持 `zee-fsm` 分支条目持久化与 `zee-mode`/`zee-gate` 向下兼容恢复，并在 `/tree` 切回时提供 `busAheadOfBranch` 保护（绝不覆写磁盘较新的 `state.json`）。
+  - 实现三层零冲突界面：**Layer 0** `setStatus("zee-mode")` 紧凑徽章（绝不调用 `setFooter()`，与 `pi-cometix-footer` 和平共存）；**Layer 1** `setWidget("zee-hud", ..., { placement: "aboveEditor" })` 响应式自适应卡片（`IDLE` 隐身 0 行、`full`/`compact`/`hidden`、RPC 降级、Print/JSON/`ZEE_WORKER=1` 全静默）；**Layer 2** `/zee-hub`（`Ctrl+Alt+H` / `F2`，避开保留 `Ctrl+G`）5-Tab 交互控制台（Overview & FSM / Workers + `partial-*.md` 预览 / Gates & Trail / Worktrees & Cost / Controls）。
+- **`zee-tool.mjs` 8 项确定性 CLI 原语（共 20 原语）**：
+  - `sandbox-export` / `sandbox-clean`：一键导出 `PINNED_SHA` 或 `--working-tree` 到隔离 `os.tmpdir()/zee-*` 沙盒并安全清理，取代 `verifier.md` / `reviewer.md` 长串手工 POSIX 模板。
+  - `gate-tamper-diff`：确定性扫描测试/CI/Lint 门禁文件变更与新增 `@ts-ignore`/`as any`/`eslint-disable` 等抑制注释。
+  - `mine-transcripts`（`retro` / `recall`）+ **新子模式 `/zee recall <topic>` 与 `/zee triage`**：跨 AGY/Pi/Claude/Codex 会话、总线、ADR 与花园队列挖掘并自动 `<REDACTED>` 脱敏；`/zee recall` 输出 `≤40` 行历史决策简报，`/zee triage` 执行 3 步外环聚类分诊。
+  - `queue-finding` / `list-findings` + **花园队列（`.agents/gardening-queue.jsonl`）**：沉淀非阻塞 `P2` 坏味道与缺失 Test Seam（累计 `≥3` 次标记 `systemic: true` 并在 `/zee-arch`、`/zee-retro` 置顶）；`/zee-retro` 新增第 5 演化选项 **Skill Creation / Dead-Rule Pruning**。
+  - `readiness` + **Autopilot 信任梯度（`T1 / T2 / T3`）**：机械校验 `.agents/zee.project.json` 与 `verify-*`/`verify-ctl.*`，自动向下钳位 `trustLevel`；`overnight.md` 新增低风险**定期外环只读巡检配方**。
+  - `match-skills` + **`pathSkills` 按需注入**：仅当改动文件命中 glob 时向子代理注入项目技能（零常驻上下文税）。
+- **零配置单兵开箱即用（"Own Set of Knives"）**：`resolve-model --allow-standalone` 支持缺省 `~/.agents/zee-config.json` 时返回 exit 0；`/zee-verify`、`/zee-retro`、`/zee-arch`、`/zee-review`、`/zee-plan` 与 `/zee` 只读/单兵子模式自动优雅退化为当前会话模型执行（附简短中文提示，不再阻塞）。
+- **`verify-<app>` 升级与 `--fuzz`**：要求提供 `verify-<app>/scripts/verify-ctl.(mjs|py|sh)`（`launch / doctor / snapshot / evidence / cleanup`），并新增探索式 `--fuzz` 实机压测（`L3`、`0→1 Stage 5` 与 `T3` 默认开启）。
+
+### Changed & Fixed
+- **清理 `verify-map.md` 文档漂移**：从 `roles/coder.md` 与 `roles/scout.md` 移除过时的 `.agents/verify-map.md` 主路径指令并统一收敛到 `<projectSkillsDir>/verify-<app>/`（`coder.md` 回执新增 `VERIFY_MAP_DELTA`）；强制要求全部测试产物/Playwright 报告/Scratch 隔离到 `/tmp/zee-verify-*` 或 `<busDir>`（严禁在 `review🔒` 锁下向仓库写入或清理 `test-results`/`dist`）。
+- **修复 Mac 实测 Bug A（`delegatesDispatched` 2x 重复记账）**：`zee_subagent` 与 `zee-tool.mjs update-state --delegate-id <id>` 引入 `countedDelegateIds` 幂等去重（保留最近 200 条），并在文档中明确 Pi 自动落账语义。
+- **全面修复 Windows 跨平台兼容性**：`guard-core.mjs` 修复反斜杠路径转义吞字符与盘符大小写无关的 `isAllowedZeeTmpPath` / `isWithinDir` 判定（且放行 `.agents/gardening-queue.jsonl` 与全部新原语）；`zee-tool.mjs cleanup-worktrees` 使用 `path.resolve` 对齐路径分隔符；`scripts/install.mjs` 在 Windows 下改用 `where`；`pi-extension/index.ts` 修复 `ZEE_PI_BIN` `.mjs`/`.js`/`.ts` 子进程 `spawn EFTYPE` 与 `"junction"` `node_modules` 挂载。
+- **文档瘦身**：精简 `SKILL.md`、`worker.md`、`protocols.md`、`overnight.md`、`greenfield.md` 中由运行时安全核物理兜底的重复散文。
+- **包清单同步**：`package.json` 与 `.antigravity-plugin/plugin.json` 同步升至 `4.2.0`，`package.json` 新增可选 `peerDependencies`: `"@earendil-works/pi-tui": "*"`。
+
 ## [4.1.1] - 2026-11-25
 
 ### Added

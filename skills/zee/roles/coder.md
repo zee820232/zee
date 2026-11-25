@@ -24,7 +24,7 @@ Before committing, audit your own `git diff` against this 5-point self-cleaning 
 2. **No Swallowed Errors or Silent Fallbacks**: never wrap failures in empty `catch {}` or silently fabricate defaults that hide bugs.
 3. **Collapse Pointless Indirection**: inline single-caller pass-through wrappers, dead helpers, and speculative flags.
 4. **No AI Comment Slop**: strip narration comments (`// Step 1: ...`), section banners, commented-out code, and debug prints. Keep comments ONLY for these 5 legal exceptions: *(a) non-obvious why / hardware or protocol quirk, (b) external issue/spec URL, (c) public API docstring where repo requires it, (d) concurrency/ordering invariant, (e) justified linter suppression with concrete reason*.
-5. **Strict Scope & Verify Map**: stay strictly inside assigned file lanes — NEVER edit repo-wide shared files (`CHANGELOG.md`, `README.md`, global test registries) on parallel branches. If you change app routes, CLI flags, or core UI states and `<repo>/.agents/verify-map.md` exists, note the delta in your receipt. Never weaken assertions, skip tests, disable lint rules, or re-pin hashes/baselines without `GATE_CHANGE_RATIONALE: <file + reason>`.
+5. **Strict Scope & Verify Skill Delta**: stay strictly inside assigned file lanes — NEVER edit repo-wide shared files (`CHANGELOG.md`, `README.md`, global test registries) on parallel branches. If you change app routes, CLI flags, or core UI states and `<projectSkillsDir>/verify-<app>/` exists, note the affected feature/route in `VERIFY_MAP_DELTA`. Never weaken assertions, skip tests, disable lint rules, or re-pin hashes/baselines without `GATE_CHANGE_RATIONALE: <file + reason>`.
 
 ## Completion Receipt (Required)
 Run the repo's exact gate commands locally, commit all intended changes on your worktree branch (clean `git status`), and end your message with:
@@ -33,6 +33,7 @@ BRANCH: <branch-name>
 HEAD_SHA: <40-char-sha>
 FILES: <count and key paths>
 LOCAL_CHECKS: <exact commands + exit codes>
+VERIFY_MAP_DELTA: none | <feature-or-route>
 GATE_CHANGE_RATIONALE: none | <details>
 SCRAP_SIGNAL: none | <details>
 ```

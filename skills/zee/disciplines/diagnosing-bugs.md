@@ -31,7 +31,9 @@ Insert targeted, low-noise instrumentation tagged with a unique run ID (e.g., `[
 
 ## Phase 5 · Fix at Root Cause + Seam Regression + Mutation Proof
 - Fix the underlying invariant rather than papering over downstream symptoms.
-- Add a permanent regression test at the **highest clean Test Seam** (if no clean Seam exists to test the bug without brittle mocks, explicitly record that as an **architecture finding** in your receipt!).
+- Add a permanent regression test at the **highest clean Test Seam**.
+- **Gardening Queue Capture**: whenever Bug Fast-Track reveals non-blocking `P2` smells, missing Test Seams (e.g., testing required brittle internal mocks), or repeated workarounds (≥2 occurrences), do NOT scope-creep mid-fix or let the insight die in a bus receipt — instruct the Orchestrator to persist it into `.agents/gardening-queue.jsonl` via:
+  `node "<zeeDir>/scripts/zee-tool.mjs" queue-finding --repo "<repoRoot>" --category <missing-seam|smell|workaround> --pattern <slug> --summary "<concise finding>" [--file <path>] --source bug-fix`
 - Prove the test is real: confirm it fails before the fix (or under a temporary revert) and exits 0 after.
 
 ## Phase 6 · Zero-Residue Cleanup

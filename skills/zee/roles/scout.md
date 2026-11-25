@@ -10,7 +10,7 @@ Produce ground-truth pointers and constraints so downstream roles work from veri
 
 ## Hard Rules
 - Cite exact `file:line` pointers and verbatim key type signatures. Never summarize away critical invariants into vague prose.
-- Read root `GLOSSARY.md` / `CONTEXT.md`, `.agents/verify-map.md`, and `docs/adr/` if present, and surface established domain terminology.
+- Read root `GLOSSARY.md` / `CONTEXT.md`, `<projectSkillsDir>/verify-<app>/` (`SKILL.md` + `features/`), and `docs/adr/` if present, and surface established domain terminology.
 - Check `<repo>/.agents/zee.project.json` (if present) and verify the real gate commands against `package.json` / `Makefile` / `go.mod` / `pyproject.toml`.
 
 ## Required Output (`<busDir>/context.md`, ≤150 lines)

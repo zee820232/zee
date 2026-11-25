@@ -1,9 +1,9 @@
 {
   "name": "zee-workflow",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "private": true,
   "type": "module",
-  "description": "通用多模型全自动工程工作流 v4.1.1（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包；含子进程安全核、9 技能入口含 /zee-verify、6 工程纪律与 verify-<app> 实机验证体系）",
+  "description": "通用多模型全自动工程工作流 v4.2.0（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包；含 Pi v1.6.1 双轴 FSM 与零冲突 HUD/Hub 控制台、T1/T2/T3 信任梯度、零配置单兵兜底、20 项确定性 CLI 原语与跨平台 Windows/POSIX 安全核）",
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   },
@@ -19,10 +19,14 @@
   "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
       "optional": true
     },
     "typebox": {

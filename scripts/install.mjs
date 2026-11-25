@@ -31,8 +31,9 @@ function isEphemeralSource(forceRemote) {
 }
 
 function hasBinary(bin) {
-  const res = spawnSync("which", [bin], { encoding: "utf8" });
-  return res.status === 0 && Boolean(res.stdout.trim());
+  const finder = process.platform === "win32" ? "where" : "which";
+  const res = spawnSync(finder, [bin], { encoding: "utf8" });
+  return res.status === 0 && Boolean(res.stdout && res.stdout.trim());
 }
 
 function findDuplicateSkillDirs(rootDir) {
@@ -59,7 +60,10 @@ function runCmd(cmd, args, dryRun) {
     return;
   }
   console.log(`▶ 执行: ${display}`);
-  execFileSync(cmd, args, { stdio: "inherit" });
+  execFileSync(cmd, args, {
+    stdio: "inherit",
+    shell: process.platform === "win32" && !path.isAbsolute(cmd),
+  });
 }
 
 function installPi(dryRun, useRemote) {
@@ -119,7 +123,7 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee v4.1.1 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
+  console.log(`zee v4.2.0 多宿主一键安装器 — 安装时自由选择目标宿主（装在哪就只管哪一个）
 
 用法：
   npx github:zee820232/zee                       无需克隆，交互式选择宿主安装

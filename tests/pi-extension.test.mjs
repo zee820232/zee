@@ -16,6 +16,9 @@ module.registerHooks({
     if (specifier === "@earendil-works/pi-coding-agent") {
       return { url: "zee-mock://pi-coding-agent", shortCircuit: true };
     }
+    if (specifier === "@earendil-works/pi-tui") {
+      return { url: "zee-mock://pi-tui", shortCircuit: true };
+    }
     if (specifier === "typebox") {
       return { url: "zee-mock://typebox", shortCircuit: true };
     }
@@ -29,6 +32,9 @@ module.registerHooks({
         source: `
           export const DEFAULT_MAX_BYTES = 32768;
           export const DEFAULT_MAX_LINES = 500;
+          export function copyToClipboard(text) {
+            globalThis.__zeePiExtMockClipboard = String(text ?? "");
+          }
           export function isToolCallEventType(name, evt) {
             return Boolean(evt && evt.toolName === name);
           }
@@ -40,6 +46,88 @@ module.registerHooks({
             }
             const sliced = buf.subarray(0, maxBytes).toString("utf8");
             return { truncated: true, content: sliced, totalBytes: buf.length, outputBytes: Buffer.byteLength(sliced, "utf8") };
+          }
+        `,
+      };
+    }
+    if (url === "zee-mock://pi-tui") {
+      return {
+        format: "module",
+        shortCircuit: true,
+        source: `
+          export const Key = {
+            ctrlAlt: (k) => "ctrl+alt+" + String(k).toLowerCase(),
+            ctrl: (k) => "ctrl+" + String(k).toLowerCase(),
+            shift: (k) => "shift+" + String(k).toLowerCase(),
+            f2: "f2",
+            escape: "escape",
+            tab: "tab",
+            left: "left",
+            right: "right",
+            up: "up",
+            down: "down",
+            enter: "enter",
+            space: "space",
+            backspace: "backspace",
+          };
+          export function matchesKey(data, key) {
+            if (data === key) return true;
+            const aliases = {
+              escape: ["\\x1b"],
+              tab: ["\\t"],
+              "shift+tab": ["\\x1b[Z"],
+              left: ["\\x1b[D"],
+              right: ["\\x1b[C"],
+              up: ["\\x1b[A"],
+              down: ["\\x1b[B"],
+              enter: ["\\r", "\\n"],
+              space: [" "],
+              backspace: ["\\x7f", "\\b"],
+              "ctrl+c": ["\\x03"],
+              f2: ["\\x1bOQ", "\\x1b[12~"],
+              "ctrl+alt+h": ["\\x1b\\x08"],
+            }[key];
+            return Boolean(aliases && aliases.includes(data));
+          }
+          function charDisplayWidth(cp) {
+            if (cp === 0 || cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0;
+            if (
+              (cp >= 0x1100 && cp <= 0x115f) ||
+              (cp >= 0x2e80 && cp <= 0xa4cf) ||
+              (cp >= 0xac00 && cp <= 0xd7a3) ||
+              (cp >= 0xf900 && cp <= 0xfaff) ||
+              (cp >= 0xfe10 && cp <= 0xfe6f) ||
+              (cp >= 0xff00 && cp <= 0xff60) ||
+              (cp >= 0x1f000 && cp <= 0x1fbff)
+            ) {
+              return 2;
+            }
+            return 1;
+          }
+          export function visibleWidth(str) {
+            const plain = String(str ?? "").replace(/\\x1b\\[[0-9;]*m/g, "");
+            let w = 0;
+            for (const ch of plain) {
+              w += charDisplayWidth(ch.codePointAt(0) ?? 0);
+            }
+            return w;
+          }
+          export function truncateToWidth(str, maxWidth, ellipsis = "…") {
+            if (maxWidth <= 0) return "";
+            const s = String(str ?? "");
+            if (visibleWidth(s) <= maxWidth) return s;
+            const ellW = visibleWidth(ellipsis);
+            const target = Math.max(0, maxWidth - ellW);
+            const plain = s.replace(/\\x1b\\[[0-9;]*m/g, "");
+            let out = "";
+            let w = 0;
+            for (const ch of plain) {
+              const cw = charDisplayWidth(ch.codePointAt(0) ?? 0);
+              if (w + cw > target) break;
+              out += ch;
+              w += cw;
+            }
+            return out + (ellW <= maxWidth ? ellipsis : "");
           }
         `,
       };
@@ -66,18 +154,25 @@ module.registerHooks({
   },
 });
 
-const { default: zeeExtension, resolvePiProviderModel, resolveSafeWorktreeBranch } = await import(
-  pathToFileURL(path.join(REPO_ROOT, "pi-extension", "index.ts")).href
-);
+const {
+  default: zeeExtension,
+  resolvePiProviderModel,
+  resolveSafeWorktreeBranch,
+  recordSubagentBudgetAndCutoff,
+  getPiInvocation,
+} = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "index.ts")).href);
 const { default: zeeWorkerGuard } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "worker-guard.ts")).href);
+const { Key } = await import("@earendil-works/pi-tui");
 
 function createMockPi() {
   const handlers = new Map();
   const commands = new Map();
+  const shortcuts = new Map();
   const tools = new Map();
   const entries = [];
   const messages = [];
   const flags = new Map();
+  const execCalls = [];
 
   const pi = {
     on(event, fn) {
@@ -93,31 +188,71 @@ function createMockPi() {
     registerCommand(name, spec) {
       commands.set(name, spec);
     },
+    registerShortcut(key, spec) {
+      shortcuts.set(key, spec);
+    },
     registerTool(spec) {
       tools.set(spec.name, spec);
     },
     appendEntry(customType, data) {
-      entries.push({ type: "custom", customType, data });
+      entries.push({ type: "custom", customType, data, timestamp: Date.now() });
     },
     sendUserMessage(msg, opts) {
       messages.push({ msg, opts });
     },
+    async exec(cmd, args = [], opts = {}) {
+      execCalls.push({ cmd, args, opts });
+      return { code: 0, stdout: "", stderr: "" };
+    },
   };
 
-  const makeCtx = (cwd, hasUI = true) => ({
+  const makeCtx = (cwd, hasUI = true, mode = "tui") => ({
     cwd,
     hasUI,
+    mode,
     sessionManager: {
       getBranch: () => entries,
     },
     ui: {
       statuses: new Map(),
+      widgets: new Map(),
       notices: [],
+      customCalls: [],
+      footerCalls: [],
+      onCustomOpen: null,
       setStatus(k, v) {
         this.statuses.set(k, v);
       },
+      setWidget(k, v, opts) {
+        this.widgets.set(k, { value: v, opts });
+      },
+      setFooter(...args) {
+        this.footerCalls.push(args);
+      },
       notify(msg, level) {
         this.notices.push({ msg, level });
+      },
+      async custom(factory, opts) {
+        this.customCalls.push({ factory, opts });
+        const fakeTui = { terminal: { rows: 40 }, requestRender() {} };
+        const fakeTheme = { fg: (_c, t) => t, bold: (t) => t };
+        return await new Promise((resolve) => {
+          let settled = false;
+          const done = (val) => {
+            if (!settled) {
+              settled = true;
+              resolve(val);
+            }
+          };
+          const comp = factory(fakeTui, fakeTheme, {}, done);
+          if (typeof this.onCustomOpen === "function") {
+            this.onCustomOpen(comp, opts, done);
+          } else {
+            comp.render(100);
+            comp.dispose?.();
+            done(undefined);
+          }
+        });
       },
     },
   });
@@ -131,7 +266,7 @@ function createMockPi() {
     return last;
   };
 
-  return { pi, handlers, commands, tools, entries, messages, flags, makeCtx, emit };
+  return { pi, handlers, commands, shortcuts, tools, entries, messages, flags, execCalls, makeCtx, emit };
 }
 
 test("行为测试 [H5]：/zee plan 空格子命令正确上锁、init-design 磁盘自动解锁、auto 模式注入 <zeeDir> 绝对路径", async () => {
@@ -139,10 +274,10 @@ test("行为测试 [H5]：/zee plan 空格子命令正确上锁、init-design �
   try {
     const mock = createMockPi();
     zeeExtension(mock.pi);
-    const ctx = mock.makeCtx(tmpRepo, true);
+    const ctx = mock.makeCtx(tmpRepo, true, "tui");
 
-    // 1. /zee 快捷命令支持 9 个技能入口（含新增 /zee-verify）+ /zee-mode
-    for (const cmd of ["zee", "zee-plan", "zee-init", "zee-review", "zee-verify", "zee-arch", "zee-retro", "zee-night", "zee-setup", "zee-mode"]) {
+    // 1. /zee 快捷命令支持 9 个技能入口（含 /zee-verify）+ /zee-mode + /zee-hub
+    for (const cmd of ["zee", "zee-plan", "zee-init", "zee-review", "zee-verify", "zee-arch", "zee-retro", "zee-night", "zee-setup", "zee-mode", "zee-hub"]) {
       assert.ok(mock.commands.has(cmd), `缺少命令 /${cmd}`);
     }
     // /zee-verify run 启用只读 review 锁，/zee-verify init 放行写验证技能
@@ -199,7 +334,7 @@ test("行为测试 [C2]：worker-guard.ts 在子进程内拦截 denyCommands、�
     process.env.ZEE_ROLE = "reviewer";
     assert.equal(mock.emit("tool_call", { toolName: "edit", input: { path: "src/a.ts" } }, ctx)?.block, true);
     assert.equal(mock.emit("tool_call", { toolName: "write", input: { path: "src/a.ts" } }, ctx)?.block, true);
-    assert.equal(mock.emit("tool_call", { toolName: "write", input: { path: "/tmp/zee-rev-1/report.md" } }, ctx), undefined);
+    assert.equal(mock.emit("tool_call", { toolName: "write", input: { path: path.join(os.tmpdir(), "zee-rev-1", "report.md") } }, ctx), undefined);
     assert.equal(mock.emit("tool_call", { toolName: "write", input: { path: path.join(RUNS_ROOT, "demo", "s", "r.md") } }, ctx), undefined);
 
     // scout 角色：纯只读 bash 拦截 git commit
@@ -222,18 +357,16 @@ test("行为测试 [C1/C2/C3/H6/M3]：真实驱动 zee_subagent 验证流式抢�
   const prevArgsDump = process.env.FAKE_ARGS_DUMP;
 
   try {
-    // 初始化真实 git 仓库并制造用户未提交修改（验证 C1 零误杀）
     execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "core.autocrlf", "false"], { stdio: "ignore" });
     execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
     execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
     fs.writeFileSync(path.join(tmpRepo, "user.txt"), "original-user\n");
     fs.writeFileSync(path.join(tmpRepo, "target.txt"), "original-target\n");
     execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
     execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
-    // 用户自己的未提交改动（绝不能被只读子代理脏区审计清掉！）
     fs.writeFileSync(path.join(tmpRepo, "user.txt"), "USER_UNCOMMITTED_WORK\n");
 
-    // 编写可编程的假 Pi JSONL 子进程
     fs.writeFileSync(
       fakeBin,
       `#!/usr/bin/env node
@@ -248,22 +381,18 @@ const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
 const scenario = process.env.FAKE_SCENARIO;
 
 if (scenario === "stream_rescue") {
-  // Turn 1 结束（产出过渡废话）
   emit({ type: "message_start", message: { role: "assistant" } });
   emit({ type: "message_end", message: { role: "assistant", content: "I will inspect the files first...", usage: { input: 10, output: 5, cost: { total: 0.01 } } } });
-  // Turn 2 流式输出真正的高价值报告但超时前未 message_end
   emit({ type: "message_start", message: { role: "assistant" } });
   emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "TURN2_REAL_FINAL_REPORT: " } });
   emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "all critical findings rescued!" } });
   setTimeout(() => {}, 30000);
 } else if (scenario === "dirty_audit_and_rg") {
-  // 连续 4 次只读 rg exit 1 不得触发 StagnancyTracker 误杀，且并发工具不缩看门狗
   for (let i = 1; i <= 4; i++) {
     const id = "rg-" + i;
     emit({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "rg pattern_" + i + " src/" } });
     emit({ type: "tool_execution_end", toolCallId: id, toolName: "bash", isError: true });
   }
-  // 模拟只读角色越权改了 target.txt 并新建 sneak.txt
   fs.writeFileSync(path.join(process.cwd(), "target.txt"), "CORRUPTED_BY_REVIEWER\\n");
   fs.writeFileSync(path.join(process.cwd(), "sneak.txt"), "untracked_sneak\\n");
   emit({ type: "message_end", message: { role: "assistant", content: "DONE_REVIEW", stopReason: "stop" } });
@@ -277,7 +406,7 @@ if (scenario === "stream_rescue") {
     zeeExtension(mock.pi);
     const subTool = mock.tools.get("zee_subagent");
     assert.ok(subTool);
-    const ctx = mock.makeCtx(tmpRepo, true);
+    const ctx = mock.makeCtx(tmpRepo, true, "tui");
 
     // M3: authorFamily 别名归一化拦截（anthropic === claude）
     await assert.rejects(
@@ -350,7 +479,6 @@ test("v4.1.1 回归 [P1-1/P1-2/P1-3/P2-1/P2-2]：provider 自动归一、嵌套�
   let wtPathToClean = "";
 
   try {
-    // 1. P1-2: resolvePiProviderModel 自动归一 remote-magpie + vm/... 与单模型名补全
     fs.writeFileSync(
       fakeCfg,
       JSON.stringify({
@@ -387,8 +515,8 @@ test("v4.1.1 回归 [P1-1/P1-2/P1-3/P2-1/P2-2]：provider 自动归一、嵌套�
 
     assert.throws(() => resolvePiProviderModel("remote-unknown", "vm/foo", fakeCfg), /Pi provider ID/);
 
-    // 2. 初始化带 node_modules/ 尾斜杠 .gitignore 和嵌套冲突分支的真实仓库
     execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "core.autocrlf", "false"], { stdio: "ignore" });
     execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
     execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
     fs.writeFileSync(path.join(tmpRepo, ".gitignore"), "node_modules/\n");
@@ -399,12 +527,10 @@ test("v4.1.1 回归 [P1-1/P1-2/P1-3/P2-1/P2-2]：provider 自动归一、嵌套�
     execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
     execFileSync("git", ["-C", tmpRepo, "branch", "zee/night-polish"], { stdio: "ignore" });
 
-    // P2-1: 嵌套分支 zee/night-polish/u1 必须自动扁平化为 zee/night-polish-u1
     const safeBr = resolveSafeWorktreeBranch(tmpRepo, "zee/night-polish/u1");
     assert.equal(safeBr.branch, "zee/night-polish-u1");
     assert.equal(safeBr.flattened, true);
 
-    // 3. 构造总线 state.json（预算 maxDelegates=3，70% 截断线为 3 -> 设 maxDelegates=4 截断线为 3，预置 dispatched=2 跑 1 次即触发！）
     fs.mkdirSync(path.join(busDir, "artifacts"), { recursive: true });
     fs.writeFileSync(
       path.join(busDir, "state.json"),
@@ -440,9 +566,8 @@ if (process.env.FAKE_SCENARIO === "big_partial") {
     const mock = createMockPi();
     zeeExtension(mock.pi);
     const subTool = mock.tools.get("zee_subagent");
-    const ctx = mock.makeCtx(tmpRepo, true);
+    const ctx = mock.makeCtx(tmpRepo, true, "tui");
 
-    // P1-3 + P1-1: Verifier detached worktree 预挂 node_modules（零 ROLE_VIOLATION）+ 触发 70% [ZEE_BUDGET_CUTOFF] + delegatesDispatched 自动 +1
     process.env.ZEE_PI_BIN = fakeBin;
     process.env.FAKE_SCENARIO = "verifier_ok";
     const verRes = await subTool.execute(
@@ -465,7 +590,6 @@ if (process.env.FAKE_SCENARIO === "big_partial") {
     const stAfter = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
     assert.equal(stAfter.delegatesDispatched, 3);
 
-    // P2-2: >2KB 流式抢救正文自动落盘到 busDir/artifacts/partial-*.md，并记录 abortedDelegates
     process.env.FAKE_SCENARIO = "big_partial";
     const partRes = await subTool.execute(
       "call-v411-part",
@@ -485,7 +609,6 @@ if (process.env.FAKE_SCENARIO === "big_partial") {
     const stAfterAbort = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
     assert.equal(stAfterAbort.abortedDelegates, 1);
 
-    // 清理测试创建的 runs 目录
     wtPathToClean = verRes.details.worktreePath || "";
   } finally {
     if (prevBin === undefined) delete process.env.ZEE_PI_BIN;
@@ -497,5 +620,197 @@ if (process.env.FAKE_SCENARIO === "big_partial") {
     if (wtPathToClean) {
       fs.rmSync(path.dirname(path.dirname(path.dirname(wtPathToClean))), { recursive: true, force: true });
     }
+  }
+});
+
+test("v4.2.0 回归：countedDelegateIds 去重、G-02 Gate1->Gate2 守卫、/zee-hub 与零冲突快捷键（无 ctrl+g / 无 setFooter）、Windows ZEE_PI_BIN (.mjs) 防 EFTYPE", async () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-pi-"));
+  const metaDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-meta-"));
+  const busDir = path.join(metaDir, "bus");
+  const fakeBin = path.join(metaDir, "fake-pi.mjs");
+  const prevBin = process.env.ZEE_PI_BIN;
+  const prevScenario = process.env.FAKE_SCENARIO;
+
+  try {
+    // 1. Windows spawn EFTYPE 修复：ZEE_PI_BIN 指向 .mjs/.js/.ts/.cjs 时必须通过 process.execPath 启动
+    process.env.ZEE_PI_BIN = fakeBin;
+    const inv = getPiInvocation(["--mode", "json"]);
+    assert.equal(inv.command, process.execPath);
+    assert.equal(inv.args[0], fakeBin);
+    assert.deepEqual(inv.args.slice(1), ["--mode", "json"]);
+
+    // 2. countedDelegateIds 去重（修复 2x 双计数）
+    fs.mkdirSync(busDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({ slug: "dedup-run", mode: "standard", delegatesDispatched: 1, budget: { maxDelegates: 10, cutoffRatio: 0.7 } }),
+    );
+    const t1 = recordSubagentBudgetAndCutoff(busDir, false, "tool-call-100");
+    assert.equal(t1.dispatched, 2);
+    assert.equal(t1.deduplicated, false);
+    const t2 = recordSubagentBudgetAndCutoff(busDir, false, "tool-call-100");
+    assert.equal(t2.dispatched, 2, "同 toolCallId 不得重复累加 delegatesDispatched");
+    assert.equal(t2.deduplicated, true);
+
+    // 3. 零冲突注册检查：必须注册 Key.ctrlAlt("h") 与 Key.f2 与 /zee-hub，绝不注册 ctrl+g / session_switch / session_fork / setFooter
+    const mock = createMockPi();
+    zeeExtension(mock.pi);
+    assert.ok(mock.shortcuts.has(Key.ctrlAlt("h")), "必须注册 Ctrl+Alt+H 快捷键");
+    assert.ok(mock.shortcuts.has(Key.f2), "必须注册 F2 快捷键");
+    assert.equal(mock.shortcuts.has("ctrl+g"), false, "严禁绑定 ctrl+g");
+    assert.equal(mock.handlers.has("session_switch"), false, "不得使用非 Pi 事件 session_switch");
+    assert.equal(mock.handlers.has("session_fork"), false, "不得使用非 Pi 事件 session_fork");
+    assert.ok(mock.handlers.has("session_start"));
+    assert.ok(mock.handlers.has("session_tree"));
+    assert.ok(mock.handlers.has("session_shutdown"));
+    assert.ok(mock.handlers.has("tool_result"));
+
+    // TUI session_start 挂载 aboveEditor widget（且不调用 setFooter）
+    const tuiCtx = mock.makeCtx(tmpRepo, true, "tui");
+    mock.emit("session_start", {}, tuiCtx);
+    assert.equal(tuiCtx.ui.footerCalls.length, 0, "严禁调用 ctx.ui.setFooter");
+    assert.equal(typeof tuiCtx.ui.widgets.get("zee-hud")?.value, "function");
+    assert.equal(tuiCtx.ui.widgets.get("zee-hud")?.opts?.placement, "aboveEditor");
+
+    // /zee-hub 在 TUI 中打开 overlay（无 blocked 属性）
+    await mock.commands.get("zee-hub").handler("", tuiCtx);
+    assert.equal(tuiCtx.ui.customCalls.length, 1);
+    const overlayCfg = tuiCtx.ui.customCalls[0].opts;
+    assert.equal(overlayCfg.overlay, true);
+    assert.equal("blocked" in overlayCfg.overlayOptions, false, "overlayOptions 不得包含 blocked");
+    assert.equal("blocked" in overlayCfg, false, "custom opts 不得包含 blocked");
+
+    // RPC 模式：降级为 string[] HUD + notify，绝不调用 custom
+    const rpcCtx = mock.makeCtx(tmpRepo, true, "rpc");
+    mock.emit("session_start", {}, rpcCtx);
+    await mock.commands.get("zee-hub").handler("", rpcCtx);
+    assert.equal(rpcCtx.ui.customCalls.length, 0);
+    assert.ok(rpcCtx.ui.notices.some((n) => n.msg.includes("[zee Hub]")));
+
+    // Print / JSON 模式 100% 静默
+    const printCtx = mock.makeCtx(tmpRepo, true, "print");
+    mock.emit("session_start", {}, printCtx);
+    await mock.commands.get("zee-hub").handler("", printCtx);
+    assert.equal(printCtx.ui.customCalls.length, 0);
+    assert.equal(printCtx.ui.notices.length, 0);
+    assert.equal(printCtx.ui.widgets.size, 0);
+
+    // 4. G-02 Gate 1 -> Gate 2 守卫端到端验证（strict 拦截未过 Gate 1 的 reviewer；Verifier PASS 后同 SHA 放行）
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "core.autocrlf", "false"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(tmpRepo, "app.ts"), "export const v = 1;\n");
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+    const headSha = execFileSync("git", ["-C", tmpRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    fs.writeFileSync(
+      fakeBin,
+      `#!/usr/bin/env node
+const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
+if (process.env.FAKE_SCENARIO === "ver_pass") {
+  emit({ type: "message_end", message: { role: "assistant", content: "VERDICT: PASS\\nPINNED_SHA: ${headSha}", stopReason: "stop" } });
+  process.exit(0);
+}
+emit({ type: "message_end", message: { role: "assistant", content: "VERDICT: PASS\\nREVIEW_OK", stopReason: "stop" } });
+process.exit(0);
+`,
+      { mode: 0o755 },
+    );
+
+    mock.emit("session_start", {}, tuiCtx);
+    await mock.commands.get("zee-mode").handler("strict", tuiCtx);
+    // 通过 tool_result(init-run) + state.json(level=L2) 进入 L2 运行态
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({ slug: "g2-run", mode: "standard", level: "L2", status: "running", updatedAt: new Date().toISOString() }),
+    );
+    mock.emit(
+      "tool_result",
+      {
+        toolName: "bash",
+        input: { command: `node zee-tool.mjs init-run "${tmpRepo}" g2-run` },
+        content: [{ type: "text", text: JSON.stringify({ ok: true, busDir, statePath: path.join(busDir, "state.json") }) }],
+      },
+      tuiCtx,
+    );
+
+    const subTool = mock.tools.get("zee_subagent");
+    // 未跑 Verifier 直接派发 Reviewer -> strict 模式必拦截 G-02
+    await assert.rejects(
+      () =>
+        subTool.execute(
+          "call-rev-early",
+          { role: "reviewer", model: "gemini-4-neon", cwd: tmpRepo, task: "[zee-worker] review" },
+          undefined,
+          undefined,
+          tuiCtx,
+        ),
+      /\[G-02\]/,
+    );
+
+    // auto 模式放行无 Gate 1 的 reviewer，但仅写入 1 条 G-02 告警（绝不重复双写）
+    await mock.commands.get("zee-mode").handler("auto", tuiCtx);
+    process.env.FAKE_SCENARIO = "rev_pass";
+    const beforeAutoViolations = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data?.violations?.length ?? 0;
+    const revWarnRes = await subTool.execute(
+      "call-rev-auto-warn",
+      { role: "reviewer", model: "gemini-4-neon", authorFamily: "claude", busDir, cwd: tmpRepo, task: "[zee-worker] review" },
+      undefined,
+      undefined,
+      tuiCtx,
+    );
+    assert.ok(revWarnRes.content[0].text.includes("[G-02]"));
+    const afterAutoViolations = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data?.violations ?? [];
+    assert.equal(afterAutoViolations.length, beforeAutoViolations + 1, "auto 模式每次 G-02 放行仅允许写入 1 条 violation");
+    assert.equal(afterAutoViolations.at(-1).guard, "G-02");
+
+    // 切回 strict，先跑 Verifier PASS（传 baseRef: "HEAD"，校验 gate1.pinnedSha 解析为真实 40 位 hex headSha）
+    await mock.commands.get("zee-mode").handler("strict", tuiCtx);
+    process.env.FAKE_SCENARIO = "ver_pass";
+    const verPassRes = await subTool.execute(
+      "call-ver-pass",
+      {
+        role: "verifier",
+        busDir,
+        worktree: { repoRoot: tmpRepo, slug: "g2-run", lane: "ver-head", baseRef: "HEAD" },
+        task: "[zee-worker] verify",
+      },
+      undefined,
+      undefined,
+      tuiCtx,
+    );
+    assert.equal(verPassRes.details.status, "completed");
+    const latestFsmAfterVer = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data;
+    assert.equal(latestFsmAfterVer?.gate1?.pinnedSha, headSha, "baseRef='HEAD' 时 gate1.pinnedSha 必须记录真实 40 位 SHA");
+
+    // 再派发 Reviewer -> Gate 1 PASS 已在同一 headSha 落账，放行通过！
+    process.env.FAKE_SCENARIO = "rev_pass";
+    const revPassRes = await subTool.execute(
+      "call-rev-pass",
+      { role: "reviewer", model: "gemini-4-neon", authorFamily: "claude", busDir, cwd: tmpRepo, task: "[zee-worker] review" },
+      undefined,
+      undefined,
+      tuiCtx,
+    );
+    assert.equal(revPassRes.details.status, "completed");
+    assert.ok(revPassRes.content[0].text.includes("REVIEW_OK"));
+
+    // 清理测试 runs 目录
+    if (verPassRes.details.worktreePath) {
+      fs.rmSync(path.dirname(path.dirname(path.dirname(verPassRes.details.worktreePath))), { recursive: true, force: true });
+    }
+
+    // 清理 session_shutdown 无报错
+    mock.emit("session_shutdown", {}, tuiCtx);
+    assert.equal(tuiCtx.ui.widgets.get("zee-hud")?.value, undefined);
+  } finally {
+    if (prevBin === undefined) delete process.env.ZEE_PI_BIN;
+    else process.env.ZEE_PI_BIN = prevBin;
+    if (prevScenario === undefined) delete process.env.FAKE_SCENARIO;
+    else process.env.FAKE_SCENARIO = prevScenario;
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(metaDir, { recursive: true, force: true });
   }
 });

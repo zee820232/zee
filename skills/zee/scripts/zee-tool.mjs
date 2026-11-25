@@ -1,21 +1,29 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v4.1.1 — 零依赖纯 Node 多模型工作流辅助引擎
+ * zee-tool.mjs v4.2.0 — 零依赖纯 Node 多模型工作流辅助引擎
  *
  * 子命令：
  *   validate [configPath] [--check-live]
  *   audit-rules [--all | --harness <name>]
  *   symlinks [--apply]
  *   init-run <repoRoot> <slug> [--conversation-id <cid>]
- *   update-state <busDir> [--status ...] [--mode ...] [--level ...] [--predicate ...] [--resume-next ...] [--conversation-id <cid>] [--budget '<json>'] [--unit-upsert '<json>'] [--inc-delegates [N]] [--inc-aborted [N]] [--fallback '<str>']
+ *   update-state <busDir> [--status ...] [--mode ...] [--level ...] [--predicate ...] [--resume-next ...] [--conversation-id <cid>] [--budget '<json>'] [--unit-upsert '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]] [--fallback '<str>']
  *   list-runs [repoRoot | --all]
  *   log-decision <busDir> <unit> <phase> <decision> <why> <evidence> <result>
  *   log-decision --bus <dir> --unit <u> --phase <p> --decision <d> --why <w> --evidence <e> --result <r>
  *   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
  *   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
  *   check-plan <planPath> [--strict-budget]
- *   resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <role> [--config <path>]
+ *   resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <role> [--config <path>] [--allow-standalone]
  *   doctor [--harness <name>] [--repo <path>] [--all]
+ *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
+ *   sandbox-clean <sandboxDir>
+ *   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
+ *   mine-transcripts [--mode retro|recall] [--repo <repoRoot>] [--days 14] [--harness auto|agy|pi|claude|codex] [--query <text>] [--limit 20] [--source-dir <extraDir>]
+ *   queue-finding --repo <repoRoot> --category <cat> --pattern <slug> --summary <text> [--file <path>] [--source <src>]
+ *   list-findings --repo <repoRoot> [--min-count 1]
+ *   readiness [repoRoot]
+ *   match-skills --repo <repoRoot> --files <csv> [--role <role>]
  */
 
 import fs from "node:fs";
@@ -24,6 +32,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isAllowedZeeTmpPath } from "./lib/guard-core.mjs";
 
 const HOME = os.homedir();
 const DEFAULT_CONFIG = path.join(HOME, ".agents", "zee-config.json");
@@ -90,12 +99,36 @@ const KNOWN_VALUE_FLAGS = new Set([
   "result",
   "branch",
   "base",
+  "head",
+  "sha",
+  "prefix",
+  "days",
+  "query",
+  "limit",
+  "source-dir",
+  "category",
+  "pattern",
+  "summary",
+  "file",
+  "source",
+  "min-count",
+  "files",
+  "delegate-id",
   "surface",
   "role",
   "config",
 ]);
 
-const KNOWN_BOOLEAN_FLAGS = new Set(["check-live", "all", "apply", "prune-safe", "strict-budget", "help"]);
+const KNOWN_BOOLEAN_FLAGS = new Set([
+  "check-live",
+  "all",
+  "apply",
+  "prune-safe",
+  "strict-budget",
+  "working-tree",
+  "allow-standalone",
+  "help",
+]);
 
 function parseFlags(args) {
   const flags = {};
@@ -155,7 +188,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v4.1.1 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v4.2.0 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
 
 可用命令：
   validate [配置文件] [--check-live]
@@ -163,13 +196,13 @@ function usage() {
   audit-rules [--all | --harness <名>]
                                  默认仅审计当前安装宿主的常驻规则冲突；加 --all 审计全机
   doctor [--harness <名>] [--repo <路径>] [--all]
-                                 一站式健康体检：配置校验 + 冲突审计 + 目录可写 + AGY Hook 实发载荷探活
+                                 一站式健康体检：配置校验 + 冲突审计 + 目录可写 + AGY Hook 实发载荷探活 + 仓库就绪度
   symlinks [--apply]             （仅用户显式要求同步多端时使用）检查或创建跨宿主软链
   init-run <仓库路径> <任务名>    创建仓库外运行总线（~/.local/state/zee/runs/...）
   update-state <总线目录> [--status <s>] [--mode <m>] [--level <l>] [--predicate <p>]
                           [--resume-next <r>] [--budget '<json>'] [--unit-upsert '<json>']
-                          [--inc-delegates [N]] [--inc-aborted [N]] [--fallback '<str>']
-                                 以 tmp+rename 原子更新 state.json 并刷新 updatedAt
+                          [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]] [--fallback '<str>']
+                                 以 tmp+rename 原子更新 state.json 并刷新 updatedAt（支持 --delegate-id 幂等去重）
   list-runs [仓库路径 | --all]    列出当前仓库（或全部）的活跃/暂停任务总线，用于跨会话一键续跑
   log-decision <总线> <单元> <阶段> <决策> <原因> <证据> <结果>
   log-decision --bus <总线> --unit <单元> --phase <阶段> --decision <决策> --why <原因> --evidence <证据> --result <结果>
@@ -180,8 +213,24 @@ function usage() {
                                  分级体检 worktree（含 squash-merge/patch-id 识别、wip vs scratch、干净 detached 识别），加 --prune-safe 执行安全回收
   check-plan <plan.md 路径> [--strict-budget]
                                  静态校验计划文档必备章节、切片环/悬空依赖与单切片预算（≤5 文件 / ≤400 LOC）
-  resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <角色> [--config <路径>]
-                                 按目标执行面确定性翻译角色模型标识
+  resolve-model --harness agy|pi|t3 [--surface invoke_subagent|swarm] --role <角色> [--config <路径>] [--allow-standalone]
+                                 按目标执行面确定性翻译角色模型标识（--allow-standalone 支持零配置单兵兜底）
+  sandbox-export --repo <仓库路径> [--sha <sha> | --working-tree] [--prefix rev|mut]
+                                 在 os.tmpdir()/zee-<prefix>-* 导出只读快照或工作区脏状态用于零污染验证/审查
+  sandbox-clean <sandboxDir>
+                                 安全校验并清理 os.tmpdir()/zee-* 或 /tmp/zee-* 沙盒目录
+  gate-tamper-diff --repo <仓库路径> [--base <ref>] [--head <ref> | --working-tree]
+                                 静态扫描变更是否触及测试/Lint/CI 门禁文件或新增类型/Lint 抑制注解
+  mine-transcripts [--mode retro|recall] [--repo <仓库路径>] [--days 14] [--harness auto|agy|pi|claude|codex] [--query <关键词>] [--limit 20] [--source-dir <dir>]
+                                 只读挖掘多宿主会话与运行总线中的纠偏信号（retro）或历史决策检索（recall），自动脱敏凭据
+  queue-finding --repo <仓库路径> --category <类别> --pattern <模式标识> --summary <摘要> [--file <路径>] [--source <来源>]
+                                 向 .agents/gardening-queue.jsonl 追加工程坏味道/重复问题并统计系统性频次
+  list-findings --repo <仓库路径> [--min-count 1]
+                                 聚合并排序展示 .agents/gardening-queue.jsonl 中的高频模式
+  readiness [仓库路径]
+                                 检查仓库 .agents/zee.project.json 与 verify-* 就绪度并计算有效信任等级 (T1/T2/T3)
+  match-skills --repo <仓库路径> --files <csv> [--role <角色>]
+                                 按 .agents/zee.project.json pathSkills 规则精准匹配受影响文件对应的项目技能
 `);
 }
 
@@ -480,7 +529,7 @@ function cmdSymlinks(apply) {
       }
 
       if (apply && status === "missing") {
-        fs.symlinkSync(src, dest);
+        fs.symlinkSync(src, dest, process.platform === "win32" ? "junction" : undefined);
         status = "created";
       }
       report.push({ harness: target.name, skill, status, dest });
@@ -747,9 +796,19 @@ function cmdUpdateState(args) {
   if (typeof flags["resume-next"] === "string") {
     st.resumeNext = flags["resume-next"] === "null" ? null : flags["resume-next"];
   }
-  if (flags["inc-delegates"]) {
-    const inc = Number(flags["inc-delegates"]) || 1;
-    st.delegatesDispatched = (Number(st.delegatesDispatched) || 0) + inc;
+  const delegateId = typeof flags["delegate-id"] === "string" && flags["delegate-id"].trim() ? flags["delegate-id"].trim() : "";
+  if (flags["inc-delegates"] || delegateId) {
+    if (!Array.isArray(st.countedDelegateIds)) st.countedDelegateIds = [];
+    if (!(delegateId && st.countedDelegateIds.includes(delegateId))) {
+      const inc = flags["inc-delegates"] ? Number(flags["inc-delegates"]) || 1 : 1;
+      st.delegatesDispatched = (Number(st.delegatesDispatched) || 0) + inc;
+      if (delegateId) {
+        st.countedDelegateIds.push(delegateId);
+        if (st.countedDelegateIds.length > 200) {
+          st.countedDelegateIds = st.countedDelegateIds.slice(-200);
+        }
+      }
+    }
   }
   if (flags["inc-aborted"]) {
     const inc = Number(flags["inc-aborted"]) || 1;
@@ -1043,18 +1102,19 @@ function cmdCleanupWorktrees(args) {
     process.exit(1);
   }
 
-  const blocks = porcelain.trim().split(/\n\n+/);
+  const blocks = porcelain.trim().split(/(?:\r?\n){2,}/);
   const worktrees = [];
   const pruned = [];
 
   blocks.forEach((blk, idx) => {
     const lines = blk.split(/\r?\n/);
-    const wtPath = lines.find((l) => l.startsWith("worktree "))?.slice(9).trim();
+    const rawWtPath = lines.find((l) => l.startsWith("worktree "))?.slice(9).trim();
     const head = lines.find((l) => l.startsWith("HEAD "))?.slice(5).trim();
     const branchRef = lines.find((l) => l.startsWith("branch "))?.slice(7).trim();
     const isDetached = !branchRef;
     const branch = branchRef ? branchRef.replace(/^refs\/heads\//, "") : "(detached)";
-    if (!wtPath) return;
+    if (!rawWtPath) return;
+    const wtPath = path.resolve(rawWtPath);
 
     let wipFiles = 0;
     let scratchFiles = 0;
@@ -1284,8 +1344,31 @@ function cmdResolveModel(args) {
   const surface = String(flags.surface || "invoke_subagent").toLowerCase();
   const role = String(flags.role || "coder.standard").toLowerCase();
   const configPath = typeof flags.config === "string" ? flags.config : DEFAULT_CONFIG;
+  const allowStandalone = Boolean(flags["allow-standalone"]);
 
   if (!fs.existsSync(configPath)) {
+    if (allowStandalone) {
+      const isAgy = harness === "agy" || harness === "antigravity";
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            standalone: true,
+            configPath,
+            resolved: {
+              harness,
+              surface,
+              role,
+              model: isAgy ? "inherit" : null,
+              standalone: true,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     console.log(
       JSON.stringify(
         { ok: false, error: `未找到配置文件：${configPath}，请先执行 /zee-setup 生成配置。`, configPath },
@@ -1423,10 +1506,1137 @@ function probeAgyHook() {
   };
 }
 
+function detectGitRepoRoot(startDir = process.cwd()) {
+  try {
+    const out = execFileSync("git", ["-C", startDir, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out ? path.resolve(out) : null;
+  } catch {
+    return null;
+  }
+}
+
+const PROJECT_SKILLS_SUBDIRS = [
+  path.join(".agents", "skills"),
+  path.join(".pi", "skills"),
+  path.join(".claude", "skills"),
+  path.join(".cursor", "skills"),
+];
+
+function computeReadiness(repoRootInput) {
+  const repoRoot = path.resolve(repoRootInput || process.cwd());
+  const projectJsonPath = path.join(repoRoot, ".agents", "zee.project.json");
+  let projCfg = null;
+  if (fs.existsSync(projectJsonPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(projectJsonPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        projCfg = parsed;
+      }
+    } catch {}
+  }
+
+  let verifySkillPath = null;
+  let verifyCtlPath = null;
+  for (const relSkillsDir of PROJECT_SKILLS_SUBDIRS) {
+    const absSkillsDir = path.join(repoRoot, relSkillsDir);
+    if (!fs.existsSync(absSkillsDir)) continue;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(absSkillsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      if (!ent.isDirectory() || !/^verify-/i.test(ent.name)) continue;
+      const skillDir = path.join(absSkillsDir, ent.name);
+      const skillMd = path.join(skillDir, "SKILL.md");
+      if (!fs.existsSync(skillMd)) continue;
+      if (!verifySkillPath) verifySkillPath = skillMd;
+      const scriptsDir = path.join(skillDir, "scripts");
+      if (fs.existsSync(scriptsDir)) {
+        try {
+          for (const f of fs.readdirSync(scriptsDir)) {
+            if (/^verify-ctl\./i.test(f)) {
+              verifyCtlPath = path.join(scriptsDir, f);
+              break;
+            }
+          }
+        } catch {}
+      }
+      if (verifySkillPath && verifyCtlPath) break;
+    }
+    if (verifySkillPath && verifyCtlPath) break;
+  }
+
+  const hasNonEmptyArray = (arr) => Array.isArray(arr) && arr.some((x) => typeof x === "string" && x.trim().length > 0);
+  const checks = {
+    projectJson: Boolean(projCfg),
+    testCmds: hasNonEmptyArray(projCfg?.testCmds),
+    lintCmd:
+      (typeof projCfg?.lintCmd === "string" && projCfg.lintCmd.trim().length > 0) ||
+      hasNonEmptyArray(projCfg?.lintCmds),
+    denyCommands: hasNonEmptyArray(projCfg?.denyCommands),
+    riskPaths: hasNonEmptyArray(projCfg?.riskPaths),
+    verifySkill: Boolean(verifySkillPath),
+    verifyCtl: Boolean(verifyCtlPath),
+  };
+
+  const t2Eligible = checks.projectJson && checks.testCmds && checks.lintCmd && checks.denyCommands && checks.verifySkill;
+  const t3Eligible = t2Eligible && checks.verifyCtl && checks.riskPaths;
+  const maxEligibleTrustLevel = t3Eligible ? "T3" : t2Eligible ? "T2" : "T1";
+
+  const rawTrust = typeof projCfg?.trustLevel === "string" ? projCfg.trustLevel.trim().toUpperCase() : "T1";
+  const configuredTrustLevel = ["T1", "T2", "T3"].includes(rawTrust) ? rawTrust : "T1";
+  const trustRank = { T1: 1, T2: 2, T3: 3 };
+  const effectiveTrustLevel =
+    trustRank[configuredTrustLevel] <= trustRank[maxEligibleTrustLevel] ? configuredTrustLevel : maxEligibleTrustLevel;
+
+  const blockers = [];
+  if (!checks.projectJson) blockers.push("缺少或无法解析 .agents/zee.project.json");
+  if (!checks.testCmds) blockers.push("zee.project.json 缺少 testCmds");
+  if (!checks.lintCmd) blockers.push("zee.project.json 缺少 lintCmd");
+  if (!checks.denyCommands) blockers.push("zee.project.json 缺少 denyCommands");
+  if (!checks.verifySkill) blockers.push("缺少 <projectSkillsDir>/verify-*/SKILL.md (T2 必需)");
+  if (!checks.verifyCtl) blockers.push("缺少 verify-*/scripts/verify-ctl.* (T3 必需)");
+  if (!checks.riskPaths) blockers.push("zee.project.json 缺少 riskPaths (T3 必需)");
+  if (effectiveTrustLevel !== configuredTrustLevel) {
+    blockers.push(`configuredTrustLevel=${configuredTrustLevel} 超过仓库当前资质上限 ${maxEligibleTrustLevel}，已钳制为 ${effectiveTrustLevel}`);
+  }
+
+  return {
+    ok: true,
+    repoRoot,
+    configuredTrustLevel,
+    maxEligibleTrustLevel,
+    effectiveTrustLevel,
+    clamped: effectiveTrustLevel !== configuredTrustLevel,
+    verifySkillPath,
+    verifyCtlPath,
+    checks,
+    blockers,
+  };
+}
+
+function cmdReadiness(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = flags.repo || positional[0] || process.cwd();
+  console.log(JSON.stringify(computeReadiness(repoRoot), null, 2));
+}
+
+function cmdSandboxExport(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  if (!fs.existsSync(repoRoot)) {
+    console.error(JSON.stringify({ ok: false, error: `仓库路径不存在：${repoRoot}` }));
+    process.exit(1);
+  }
+  let gitDirRaw = "";
+  try {
+    gitDirRaw = execFileSync("git", ["-C", repoRoot, "rev-parse", "--git-dir"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (e) {
+    console.error(JSON.stringify({ ok: false, error: `${repoRoot} 不是合法的 Git 仓库：${e.message}` }));
+    process.exit(1);
+  }
+  const gitDir = path.resolve(repoRoot, gitDirRaw);
+  const workingTree = Boolean(flags["working-tree"]);
+  const ALLOWED_SANDBOX_PREFIXES = new Set(["rev", "mut", "probe", "sim", "retro", "verify"]);
+  const rawPrefix = typeof flags.prefix === "string" ? flags.prefix.trim().toLowerCase() : "mut";
+  const prefix = ALLOWED_SANDBOX_PREFIXES.has(rawPrefix) ? rawPrefix : "mut";
+  const requestedSha = typeof flags.sha === "string" && flags.sha.trim() ? flags.sha.trim() : "HEAD";
+  const mode = workingTree ? "working-tree" : "sha";
+  const targetRef = workingTree ? "HEAD" : requestedSha;
+
+  let resolvedSha = null;
+  let hasCommit = false;
+  try {
+    resolvedSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", targetRef], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    hasCommit = Boolean(resolvedSha);
+  } catch {
+    if (!workingTree) {
+      console.error(JSON.stringify({ ok: false, error: `无法解析提交引用：${targetRef}` }));
+      process.exit(1);
+    }
+  }
+
+  const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), `zee-${prefix}-`));
+  try {
+    if (hasCommit) {
+      let exported = false;
+      const archRes = spawnSync("git", ["-c", "core.autocrlf=false", "-C", repoRoot, "archive", "--format=tar", targetRef], {
+        maxBuffer: 200 * 1024 * 1024,
+      });
+      if (archRes.status === 0 && archRes.stdout) {
+        const tarRes = spawnSync("tar", ["-xf", "-", "-C", sandboxDir], {
+          input: archRes.stdout,
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        if (tarRes.status === 0) exported = true;
+      }
+      if (!exported) {
+        const treeEntries = execFileSync("git", ["-C", repoRoot, "ls-tree", "--name-only", targetRef], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+        if (treeEntries) {
+          const tmpIndex = path.join(os.tmpdir(), `zee-idx-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+          try {
+            execFileSync(
+              "git",
+              ["-c", "core.autocrlf=false", `--git-dir=${gitDir}`, `--work-tree=${sandboxDir}`, "checkout", "-f", targetRef, "--", "."],
+              {
+                env: { ...process.env, GIT_INDEX_FILE: tmpIndex },
+                stdio: ["ignore", "pipe", "pipe"],
+              },
+            );
+          } finally {
+            fs.rmSync(tmpIndex, { force: true });
+          }
+        }
+      }
+    }
+
+    if (workingTree) {
+      if (hasCommit) {
+        const diffRes = spawnSync("git", ["-C", repoRoot, "-c", "core.autocrlf=false", "diff", "--binary", "HEAD"], {
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        if (diffRes.status === 0 && diffRes.stdout && diffRes.stdout.length > 0) {
+          const applyRes = spawnSync("git", ["-c", "core.autocrlf=false", "apply", "--allow-empty"], {
+            cwd: sandboxDir,
+            input: diffRes.stdout,
+            encoding: "utf8",
+          });
+          if (applyRes.status !== 0) {
+            const retryRes = spawnSync(
+              "git",
+              ["-c", "core.autocrlf=false", "apply", "--allow-empty", "--ignore-space-change", "--recount"],
+              {
+                cwd: sandboxDir,
+                input: diffRes.stdout,
+                encoding: "utf8",
+              },
+            );
+            if (retryRes.status !== 0) {
+              const nameStatus = execFileSync("git", ["-C", repoRoot, "diff", "--name-status", "-z", "HEAD"], {
+                encoding: "utf8",
+              });
+              const parts = nameStatus.split("\0");
+              for (let i = 0; i < parts.length; i += 1) {
+                const stCode = parts[i];
+                if (!stCode) continue;
+                if (stCode.startsWith("R") || stCode.startsWith("C")) {
+                  const oldRel = parts[i + 1];
+                  const newRel = parts[i + 2];
+                  i += 2;
+                  if (stCode.startsWith("R") && oldRel) fs.rmSync(path.join(sandboxDir, oldRel), { recursive: true, force: true });
+                  if (newRel && fs.existsSync(path.join(repoRoot, newRel)) && fs.statSync(path.join(repoRoot, newRel)).isFile()) {
+                    const dst = path.join(sandboxDir, newRel);
+                    fs.mkdirSync(path.dirname(dst), { recursive: true });
+                    fs.copyFileSync(path.join(repoRoot, newRel), dst);
+                  }
+                } else {
+                  const relFile = parts[i + 1];
+                  i += 1;
+                  if (!relFile) continue;
+                  const dst = path.join(sandboxDir, relFile);
+                  if (stCode === "D") {
+                    fs.rmSync(dst, { recursive: true, force: true });
+                  } else if (fs.existsSync(path.join(repoRoot, relFile)) && fs.statSync(path.join(repoRoot, relFile)).isFile()) {
+                    fs.mkdirSync(path.dirname(dst), { recursive: true });
+                    fs.copyFileSync(path.join(repoRoot, relFile), dst);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      const untrackedRaw = execFileSync("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], {
+        encoding: "utf8",
+      });
+      for (const rel of untrackedRaw.split("\0").filter(Boolean)) {
+        const src = path.join(repoRoot, rel);
+        const dst = path.join(sandboxDir, rel);
+        try {
+          const st = fs.lstatSync(src);
+          if (st.isFile()) {
+            fs.mkdirSync(path.dirname(dst), { recursive: true });
+            fs.copyFileSync(src, dst);
+          } else if (st.isSymbolicLink()) {
+            fs.mkdirSync(path.dirname(dst), { recursive: true });
+            fs.symlinkSync(fs.readlinkSync(src), dst);
+          }
+        } catch {}
+      }
+    }
+
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          sandboxDir,
+          mode,
+          ref: workingTree ? "WORKING_TREE" : targetRef,
+          sha: resolvedSha,
+        },
+        null,
+        2,
+      ),
+    );
+  } catch (e) {
+    fs.rmSync(sandboxDir, { recursive: true, force: true });
+    console.error(JSON.stringify({ ok: false, error: `sandbox-export 失败：${e.message}` }));
+    process.exit(1);
+  }
+}
+
+function cmdSandboxClean(args) {
+  const { flags, positional } = parseFlags(args);
+  const rawDir = flags.dir || positional[0];
+  if (!rawDir) {
+    console.error(JSON.stringify({ ok: false, error: "用法：sandbox-clean <sandboxDir>" }));
+    process.exit(1);
+  }
+  const sandboxDir = path.resolve(rawDir);
+  const baseName = path.basename(sandboxDir);
+  if (
+    !isAllowedZeeTmpPath(sandboxDir, process.cwd()) ||
+    !/^zee-(?:mut|rev|probe|sim|retro|verify)-[a-z0-9][a-z0-9_.-]*$/i.test(baseName) ||
+    fs.existsSync(path.join(sandboxDir, ".git"))
+  ) {
+    console.error(
+      JSON.stringify({
+        ok: false,
+        error: `拒绝清理非法的沙盒目录 "${sandboxDir}"（仅允许非 Git 仓库的 os.tmpdir()/zee-(mut|rev|probe|sim|retro|verify)-* 或 /tmp/zee-*）`,
+      }),
+    );
+    process.exit(1);
+  }
+  fs.rmSync(sandboxDir, { recursive: true, force: true });
+  console.log(JSON.stringify({ ok: true, removed: true, sandboxDir }, null, 2));
+}
+
+function isGateFilePath(rawRelPath) {
+  const p = String(rawRelPath || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!p) return false;
+  if (/(?:^|\/)tests\//i.test(p)) return true;
+  if (/(?:^|\/)__snapshots__\//i.test(p)) return true;
+  if (/(?:^|\/)\.github\/workflows\//i.test(p)) return true;
+  const base = path.posix.basename(p);
+  return (
+    /\.test\.[^/]+$/i.test(base) ||
+    /\.spec\.[^/]+$/i.test(base) ||
+    /^\.eslintrc/i.test(base) ||
+    /^eslint\.config\.[^/]+$/i.test(base) ||
+    /^biome\.json$/i.test(base) ||
+    /^tsconfig.*\.json$/i.test(base) ||
+    /^ruff\.toml$/i.test(base) ||
+    /^pyproject\.toml$/i.test(base) ||
+    /^jest\.config\.[^/]+$/i.test(base) ||
+    /^vitest\.config\.[^/]+$/i.test(base)
+  );
+}
+
+const SUPPRESSION_PATTERNS = [
+  { name: "@ts-ignore", re: /@ts-ignore\b/ },
+  { name: "@ts-expect-error", re: /@ts-expect-error\b/ },
+  { name: "as any", re: /\bas\s+any\b/ },
+  { name: "eslint-disable", re: /\beslint-disable(?:-next-line|-line)?\b/ },
+  { name: "# noqa", re: /#\s*noqa\b/i },
+  { name: "#[allow(...)]", re: /#\[allow\(/ },
+  { name: "//nolint", re: /\/\/\s*nolint\b/ },
+];
+
+function findLineSuppressions(line) {
+  const hits = [];
+  for (const pat of SUPPRESSION_PATTERNS) {
+    if (pat.re.test(line)) hits.push(pat.name);
+  }
+  return hits;
+}
+
+function unquoteGitDiffPath(raw) {
+  let s = String(raw || "").trim();
+  if (s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1);
+  if (s.startsWith("b/") || s.startsWith("a/")) s = s.slice(2);
+  return s;
+}
+
+function cmdGateTamperDiff(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  try {
+    execFileSync("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (e) {
+    console.error(JSON.stringify({ ok: false, error: `${repoRoot} 不是合法的 Git 仓库：${e.message}` }));
+    process.exit(1);
+  }
+
+  const hasBase = typeof flags.base === "string" && flags.base.trim().length > 0;
+  const hasHead = typeof flags.head === "string" && flags.head.trim().length > 0;
+  const useWorkingTree = Boolean(flags["working-tree"]) || (!hasBase && !hasHead);
+
+  const changedFiles = new Set();
+  const suppressionsAdded = [];
+
+  const scanDiffText = (diffText) => {
+    let currentFile = null;
+    let inHunk = false;
+    for (const line of String(diffText || "").split(/\r?\n/)) {
+      if (line.startsWith("diff --git ")) {
+        inHunk = false;
+        continue;
+      }
+      if (line.startsWith("+++ ")) {
+        inHunk = false;
+        const rawTarget = line.slice(4).trim();
+        currentFile = rawTarget === "/dev/null" ? null : unquoteGitDiffPath(rawTarget);
+        continue;
+      }
+      if (line.startsWith("--- ")) {
+        inHunk = false;
+        continue;
+      }
+      if (line.startsWith("@@ ")) {
+        inHunk = true;
+        continue;
+      }
+      if (inHunk && line.startsWith("+") && currentFile) {
+        const added = line.slice(1);
+        for (const hit of findLineSuppressions(added)) {
+          suppressionsAdded.push({
+            file: currentFile,
+            pattern: hit,
+            line: added.trim().slice(0, 240),
+          });
+        }
+      }
+    }
+  };
+
+  if (useWorkingTree) {
+    let hasHeadCommit = false;
+    try {
+      execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", "HEAD"], { stdio: ["ignore", "pipe", "ignore"] });
+      hasHeadCommit = true;
+    } catch {}
+
+    const nameArgs = hasHeadCommit ? ["diff", "--name-only", "-z", "HEAD"] : ["diff", "--name-only", "-z", "--cached"];
+    const diffArgs = hasHeadCommit ? ["diff", "-U0", "HEAD"] : ["diff", "-U0", "--cached"];
+    const namesRaw = execFileSync("git", ["-C", repoRoot, ...nameArgs], { encoding: "utf8" });
+    for (const f of namesRaw.split("\0").filter(Boolean)) changedFiles.add(f);
+    const diffRaw = execFileSync("git", ["-C", repoRoot, ...diffArgs], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
+    scanDiffText(diffRaw);
+
+    const untrackedRaw = execFileSync("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], {
+      encoding: "utf8",
+    });
+    for (const rel of untrackedRaw.split("\0").filter(Boolean)) {
+      changedFiles.add(rel);
+      const absFile = path.join(repoRoot, rel);
+      try {
+        const st = fs.statSync(absFile);
+        if (st.isFile() && st.size <= 512 * 1024) {
+          const text = fs.readFileSync(absFile, "utf8");
+          if (!text.includes("\0")) {
+            for (const line of text.split(/\r?\n/)) {
+              for (const hit of findLineSuppressions(line)) {
+                suppressionsAdded.push({
+                  file: rel.replace(/\\/g, "/"),
+                  pattern: hit,
+                  line: line.trim().slice(0, 240),
+                });
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  } else {
+    let range =
+      hasBase && hasHead
+        ? `${flags.base.trim()}..${flags.head.trim()}`
+        : hasBase
+          ? `${flags.base.trim()}..HEAD`
+          : `${flags.head.trim()}~1..${flags.head.trim()}`;
+    let useRootShow = false;
+    if (!hasBase && hasHead) {
+      try {
+        execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", `${flags.head.trim()}~1`], {
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+      } catch {
+        useRootShow = true;
+      }
+    }
+    if (useRootShow) {
+      const target = flags.head.trim();
+      const namesRaw = execFileSync("git", ["-C", repoRoot, "show", "--format=", "--name-only", "-z", target], { encoding: "utf8" });
+      for (const f of namesRaw.split("\0").filter(Boolean)) changedFiles.add(f);
+      const diffRaw = execFileSync("git", ["-C", repoRoot, "show", "--format=", "-U0", target], {
+        encoding: "utf8",
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      scanDiffText(diffRaw);
+    } else {
+      const namesRaw = execFileSync("git", ["-C", repoRoot, "diff", "--name-only", "-z", range], { encoding: "utf8" });
+      for (const f of namesRaw.split("\0").filter(Boolean)) changedFiles.add(f);
+      const diffRaw = execFileSync("git", ["-C", repoRoot, "diff", "-U0", range], {
+        encoding: "utf8",
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      scanDiffText(diffRaw);
+    }
+  }
+
+  const gateFilesTouched = [...changedFiles]
+    .map((f) => f.replace(/\\/g, "/"))
+    .filter((f) => isGateFilePath(f))
+    .sort();
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        repoRoot,
+        mode: useWorkingTree ? "working-tree" : "range",
+        gateFilesTouched,
+        suppressionsAdded,
+        requiresCountersign: gateFilesTouched.length > 0 || suppressionsAdded.length > 0,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function readFindingsFile(queuePath) {
+  if (!fs.existsSync(queuePath)) return [];
+  const rows = [];
+  const raw = fs.readFileSync(queuePath, "utf8");
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === "object") rows.push(obj);
+    } catch {}
+  }
+  return rows;
+}
+
+function cmdQueueFinding(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  const category = typeof flags.category === "string" ? flags.category.trim() : "";
+  const pattern = typeof flags.pattern === "string" ? flags.pattern.trim() : "";
+  const summary = typeof flags.summary === "string" ? flags.summary.trim() : "";
+  if (!category || !pattern || !summary) {
+    console.error("用法：queue-finding --repo <repoRoot> --category <cat> --pattern <slug> --summary <text> [--file <path>] [--source <src>]");
+    process.exit(1);
+  }
+  const queuePath = path.join(repoRoot, ".agents", "gardening-queue.jsonl");
+  fs.mkdirSync(path.dirname(queuePath), { recursive: true });
+  const entry = {
+    ts: new Date().toISOString(),
+    category,
+    pattern,
+    summary,
+    file: typeof flags.file === "string" && flags.file.trim() ? flags.file.trim() : null,
+    source: typeof flags.source === "string" && flags.source.trim() ? flags.source.trim() : "manual",
+  };
+  fs.appendFileSync(queuePath, JSON.stringify(entry) + "\n", "utf8");
+  const allRows = readFindingsFile(queuePath);
+  const patternCount = allRows.filter((r) => r.pattern === pattern).length;
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        queuePath,
+        entry,
+        patternCount,
+        systemic: patternCount >= 3,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function cmdListFindings(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  const minCount = Math.max(1, Number(flags["min-count"]) || 1);
+  const queuePath = path.join(repoRoot, ".agents", "gardening-queue.jsonl");
+  const rows = readFindingsFile(queuePath);
+
+  const byPattern = new Map();
+  for (const r of rows) {
+    const pat = String(r.pattern || "").trim();
+    if (!pat) continue;
+    let bucket = byPattern.get(pat);
+    if (!bucket) {
+      bucket = {
+        pattern: pat,
+        category: r.category || "general",
+        count: 0,
+        systemic: false,
+        latestTs: r.ts || null,
+        files: [],
+        summaries: [],
+      };
+      byPattern.set(pat, bucket);
+    }
+    bucket.count += 1;
+    bucket.systemic = bucket.count >= 3;
+    if (r.ts && (!bucket.latestTs || String(r.ts) > String(bucket.latestTs))) {
+      bucket.latestTs = r.ts;
+    }
+    if (r.file && !bucket.files.includes(r.file)) bucket.files.push(r.file);
+    if (r.summary && !bucket.summaries.includes(r.summary) && bucket.summaries.length < 5) {
+      bucket.summaries.push(r.summary);
+    }
+  }
+
+  const clusters = [...byPattern.values()]
+    .filter((c) => c.count >= minCount)
+    .sort((a, b) => b.count - a.count || String(b.latestTs || "").localeCompare(String(a.latestTs || "")));
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        queuePath,
+        totalEntries: rows.length,
+        clusters,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function redactSecrets(text) {
+  return String(text || "")
+    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, "<REDACTED>")
+    .replace(/-----BEGIN [^\r\n]*PRIVATE KEY-----/g, "<REDACTED>")
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, "<REDACTED>")
+    .replace(/\bghp_[A-Za-z0-9]{16,}/g, "<REDACTED>")
+    .replace(/Bearer\s+[A-Za-z0-9._+/=-]{12,}/g, "<REDACTED>");
+}
+
+function collectFilesBounded(rootDir, exts, cutoffMs, maxDepth = 5, maxFiles = 120) {
+  const results = [];
+  if (!rootDir || !fs.existsSync(rootDir)) return results;
+  const walk = (dir, depth) => {
+    if (depth > maxDepth || results.length >= maxFiles) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      if (results.length >= maxFiles) return;
+      if (ent.name === "node_modules" || ent.name === ".git") continue;
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (ent.isFile()) {
+        const ext = path.extname(ent.name).toLowerCase();
+        if (!exts.has(ext)) continue;
+        try {
+          const st = fs.statSync(full);
+          if (st.mtimeMs >= cutoffMs) {
+            results.push({ path: full, mtimeMs: st.mtimeMs });
+          }
+        } catch {}
+      }
+    }
+  };
+  walk(rootDir, 0);
+  return results;
+}
+
+function extractTextFromJsonValue(val, depth = 0) {
+  if (depth > 5 || val == null) return "";
+  if (typeof val === "string") return val;
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => extractTextFromJsonValue(item, depth + 1))
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (typeof val === "object") {
+    if (typeof val.text === "string") return val.text;
+    if (typeof val.prompt === "string") return val.prompt;
+    if (typeof val.summary === "string") return val.summary;
+    if (val.content !== undefined) return extractTextFromJsonValue(val.content, depth + 1);
+    if (val.message !== undefined) return extractTextFromJsonValue(val.message, depth + 1);
+    if (val.payload !== undefined) return extractTextFromJsonValue(val.payload, depth + 1);
+  }
+  return "";
+}
+
+function readTextBounded(filePath, maxBytes = 1024 * 1024) {
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile() || st.size === 0) return "";
+    if (st.size <= maxBytes) return fs.readFileSync(filePath, "utf8");
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const bytesRead = fs.readSync(fd, buf, 0, maxBytes, st.size - maxBytes);
+      return buf.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+const CORRECTION_RE =
+  /(?:\b(?:wrong|stop|don't|do not|instead|actually|mistake|correction|never use|revert|rollback)\b|不对|错了|不要|别这样|改成|禁止|撤销|回滚)/i;
+const RETRY_INTERRUPT_RE = /(?:\b(?:retry|re-run|failed|failure|broken|interrupt|aborted|timeout|timed out)\b|重来|重新|失败|报错|中断|超时)/i;
+const DECISION_FAIL_RE = /(?:FAIL|BLOCK|REVISE|ABORT|TIMEOUT|PARKED|INCONCLUSIVE|VIOLATION|ERROR)/i;
+
+function parseEntriesFromFile(filePath, mtimeMs) {
+  const entries = [];
+  const ext = path.extname(filePath).toLowerCase();
+  const baseName = path.basename(filePath).toLowerCase();
+  const fallbackTs = new Date(mtimeMs).toISOString();
+  const raw = readTextBounded(filePath);
+  if (!raw) return entries;
+
+  if (ext === ".tsv" || baseName === "decisions.tsv") {
+    const lines = raw.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i].trim();
+      if (!line || (i === 0 && line.startsWith("ts\t"))) continue;
+      const cols = line.split("\t");
+      if (cols.length < 7) continue;
+      const [ts, unit, phase, decision, why, evidence, result] = cols;
+      entries.push({
+        source: filePath,
+        kind: "decision",
+        role: "decision",
+        ts: ts || fallbackTs,
+        decision,
+        result,
+        text: `${unit} [${phase}] ${decision}: ${why} | ${evidence} -> ${result}`,
+      });
+    }
+    return entries;
+  }
+
+  if (ext === ".jsonl") {
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const obj = JSON.parse(trimmed);
+        if (!obj || typeof obj !== "object") continue;
+        if (obj.category && obj.pattern && obj.summary) {
+          entries.push({
+            source: filePath,
+            kind: "finding",
+            role: "finding",
+            pattern: String(obj.pattern),
+            category: String(obj.category),
+            ts: obj.ts || fallbackTs,
+            text: `[${obj.category}:${obj.pattern}] ${obj.summary}${obj.file ? ` (${obj.file})` : ""}`,
+          });
+          continue;
+        }
+        const role = String(
+          obj.role || obj.speaker || obj.author || obj.message?.role || obj.payload?.role || obj.sender || obj.type || "unknown",
+        ).toLowerCase();
+        const ts = String(obj.timestamp || obj.ts || obj.createdAt || fallbackTs);
+        const text = extractTextFromJsonValue(obj).replace(/\s+/g, " ").trim();
+        if (text) {
+          entries.push({
+            source: filePath,
+            kind: "transcript",
+            role,
+            ts,
+            text,
+          });
+        }
+      } catch {}
+    }
+    return entries;
+  }
+
+  // .md / .txt / .log
+  const isPartial = /^partial-/i.test(baseName);
+  const isAdr = /[\\/]docs[\\/]adr[\\/]/i.test(filePath);
+  const chunks = raw
+    .split(/\r?\n\s*\r?\n+/)
+    .map((c) => c.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  for (const chunk of chunks.slice(0, 80)) {
+    entries.push({
+      source: filePath,
+      kind: isPartial ? "partial_salvage" : isAdr ? "adr" : "doc",
+      role: "doc",
+      ts: fallbackTs,
+      text: chunk,
+    });
+  }
+  return entries;
+}
+
+function cmdMineTranscripts(args) {
+  const { flags, positional } = parseFlags(args);
+  const mode = String(flags.mode || "retro").toLowerCase() === "recall" ? "recall" : "retro";
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  const days = Math.max(1, Number(flags.days) || 14);
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const harness = String(flags.harness || "auto").toLowerCase();
+  const query = typeof flags.query === "string" ? flags.query.trim() : "";
+  const limit = Math.max(1, Math.min(200, Number(flags.limit) || 20));
+  const sourceDir = typeof flags["source-dir"] === "string" && flags["source-dir"].trim() ? path.resolve(flags["source-dir"].trim()) : "";
+
+  const textExts = new Set([".jsonl", ".md", ".tsv", ".txt", ".log"]);
+  const jsonlExts = new Set([".jsonl"]);
+  const fileMap = new Map();
+  const addFile = (fp, priority) => {
+    const resolved = path.resolve(fp);
+    if (fileMap.has(resolved) || !fs.existsSync(resolved)) return;
+    try {
+      const st = fs.statSync(resolved);
+      if (st.isFile() && st.mtimeMs >= cutoffMs) {
+        fileMap.set(resolved, { path: resolved, mtimeMs: st.mtimeMs, priority });
+      }
+    } catch {}
+  };
+
+  // 1. --source-dir 优先扫描（便于确定性测试与局部目录检索）
+  if (sourceDir) {
+    for (const f of collectFilesBounded(sourceDir, textExts, cutoffMs, 6, 150)) {
+      addFile(f.path, 3);
+    }
+  }
+
+  // 2. 仓库总线、ADR 与 gardening-queue
+  const repoBusDir = path.join(RUNS_ROOT, repoKeyFor(repoRoot));
+  if (fs.existsSync(repoBusDir)) {
+    try {
+      for (const slug of fs.readdirSync(repoBusDir)) {
+        const sDir = path.join(repoBusDir, slug);
+        addFile(path.join(sDir, "decisions.tsv"), 2);
+        addFile(path.join(sDir, "context.md"), 2);
+        addFile(path.join(sDir, "plan.md"), 2);
+        addFile(path.join(sDir, "bug-brief.md"), 2);
+        const artDir = path.join(sDir, "artifacts");
+        if (fs.existsSync(artDir)) {
+          for (const f of collectFilesBounded(artDir, new Set([".md"]), cutoffMs, 1, 30)) {
+            if (/^partial-/i.test(path.basename(f.path))) addFile(f.path, 2);
+          }
+        }
+      }
+    } catch {}
+  }
+  const adrDir = path.join(repoRoot, "docs", "adr");
+  for (const f of collectFilesBounded(adrDir, new Set([".md"]), cutoffMs, 2, 50)) {
+    addFile(f.path, 2);
+  }
+  addFile(path.join(repoRoot, ".agents", "gardening-queue.jsonl"), 2);
+
+  // 3. 多宿主历史会话（只读边界扫描）
+  const shouldScan = (h) => harness === "auto" || harness === h;
+  if (shouldScan("pi")) {
+    for (const f of collectFilesBounded(path.join(HOME, ".pi", "agent", "sessions"), jsonlExts, cutoffMs, 4, 60)) {
+      addFile(f.path, 1);
+    }
+  }
+  if (shouldScan("claude")) {
+    for (const f of collectFilesBounded(path.join(HOME, ".claude", "projects"), jsonlExts, cutoffMs, 4, 60)) {
+      addFile(f.path, 1);
+    }
+  }
+  if (shouldScan("codex")) {
+    for (const f of collectFilesBounded(path.join(HOME, ".codex", "sessions"), jsonlExts, cutoffMs, 4, 60)) {
+      addFile(f.path, 1);
+    }
+  }
+  if (shouldScan("agy")) {
+    for (const f of collectFilesBounded(path.join(HOME, ".gemini", "antigravity", "brain"), new Set([".jsonl", ".md"]), cutoffMs, 4, 60)) {
+      addFile(f.path, 1);
+    }
+    for (const f of collectFilesBounded(path.join(HOME, ".t3", "userdata", "providers", "antigravity"), jsonlExts, cutoffMs, 5, 40)) {
+      if (path.basename(f.path) === "transcript.jsonl") addFile(f.path, 1);
+    }
+  }
+
+  const candidateFiles = [...fileMap.values()]
+    .sort((a, b) => b.priority - a.priority || b.mtimeMs - a.mtimeMs)
+    .slice(0, 200);
+
+  const allEntries = [];
+  for (const f of candidateFiles) {
+    allEntries.push(...parseEntriesFromFile(f.path, f.mtimeMs));
+  }
+
+  if (mode === "retro") {
+    const snippets = [];
+    const clusterCounts = new Map();
+    const bumpCluster = (key, sample) => {
+      const cur = clusterCounts.get(key) || { signal: key, count: 0, sample };
+      cur.count += 1;
+      clusterCounts.set(key, cur);
+    };
+
+    for (const ent of allEntries) {
+      const safeText = redactSecrets(ent.text);
+      const compact = safeText.length > 280 ? `${safeText.slice(0, 277)}...` : safeText;
+      if (ent.kind === "decision") {
+        if (DECISION_FAIL_RE.test(`${ent.decision || ""} ${ent.result || ""}`)) {
+          bumpCluster("decision_failure", compact);
+          snippets.push({ signal: "decision_failure", source: ent.source, ts: ent.ts, snippet: compact });
+        }
+        continue;
+      }
+      if (ent.kind === "partial_salvage") {
+        bumpCluster("partial_salvage", compact);
+        snippets.push({ signal: "partial_salvage", source: ent.source, ts: ent.ts, snippet: compact });
+        continue;
+      }
+      if (ent.kind === "finding") {
+        const key = `finding:${ent.pattern || "general"}`;
+        bumpCluster(key, compact);
+        snippets.push({ signal: key, source: ent.source, ts: ent.ts, snippet: compact });
+        continue;
+      }
+      const isHumanOrLog = /^(?:user|human|operator|unknown|doc)/.test(ent.role || "");
+      if (!isHumanOrLog) continue;
+      if (CORRECTION_RE.test(safeText)) {
+        bumpCluster("human_correction", compact);
+        snippets.push({ signal: "human_correction", source: ent.source, ts: ent.ts, snippet: compact });
+      } else if (RETRY_INTERRUPT_RE.test(safeText)) {
+        bumpCluster("retry_or_interruption", compact);
+        snippets.push({ signal: "retry_or_interruption", source: ent.source, ts: ent.ts, snippet: compact });
+      }
+    }
+
+    const clusters = [...clusterCounts.values()].sort((a, b) => b.count - a.count);
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          mode: "retro",
+          totalScanned: candidateFiles.length,
+          totalEntries: allEntries.length,
+          clusters,
+          snippets: snippets.slice(0, limit),
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  // recall mode
+  const qLower = query.toLowerCase();
+  const tokens = qLower
+    .split(/[\s,.;:!?/\\|()[\]{}"'`]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+  const scored = [];
+  const seenSnippets = new Set();
+
+  for (const ent of allEntries) {
+    const safeText = redactSecrets(ent.text);
+    const low = safeText.toLowerCase();
+    let score = 0;
+    if (!qLower) {
+      score = 1;
+    } else {
+      if (low.includes(qLower)) score += 10;
+      for (const tok of tokens) {
+        if (low.includes(tok)) {
+          score += 3;
+          let idx = low.indexOf(tok);
+          let occ = 0;
+          while (idx >= 0 && occ < 4) {
+            occ += 1;
+            idx = low.indexOf(tok, idx + tok.length);
+          }
+          score += Math.max(0, occ - 1);
+        }
+      }
+    }
+    if (score <= 0) continue;
+    if (ent.kind === "adr" || ent.kind === "decision" || ent.kind === "finding") score += 2;
+    const compact = safeText.length > 320 ? `${safeText.slice(0, 317)}...` : safeText;
+    if (seenSnippets.has(compact)) continue;
+    seenSnippets.add(compact);
+    scored.push({
+      source: ent.source,
+      kind: ent.kind,
+      score,
+      ts: ent.ts,
+      snippet: compact,
+    });
+  }
+
+  scored.sort((a, b) => b.score - a.score || String(b.ts || "").localeCompare(String(a.ts || "")));
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        mode: "recall",
+        query,
+        totalScanned: candidateFiles.length,
+        matches: scored.slice(0, limit),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function globToRegExp(rawGlob) {
+  const pattern = String(rawGlob || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  let regexStr = "^";
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        if (pattern[i + 2] === "/") {
+          regexStr += "(?:.+/)?";
+          i += 3;
+          continue;
+        }
+        regexStr += ".*";
+        i += 2;
+        continue;
+      }
+      regexStr += "[^/]*";
+      i += 1;
+      continue;
+    }
+    if (ch === "?") {
+      regexStr += "[^/]";
+      i += 1;
+      continue;
+    }
+    if (ch === "{") {
+      const end = pattern.indexOf("}", i + 1);
+      if (end > i + 1) {
+        const alts = pattern
+          .slice(i + 1, end)
+          .split(",")
+          .map((s) => s.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        regexStr += `(?:${alts.join("|")})`;
+        i = end + 1;
+        continue;
+      }
+    }
+    regexStr += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    i += 1;
+  }
+  regexStr += "$";
+  return new RegExp(regexStr, process.platform === "win32" ? "i" : "");
+}
+
+function resolveSkillPath(repoRoot, rawSkill) {
+  const clean = String(rawSkill || "").trim();
+  if (!clean) return null;
+  const candidates = [path.resolve(repoRoot, clean)];
+  for (const subDir of PROJECT_SKILLS_SUBDIRS) {
+    candidates.push(path.join(repoRoot, subDir, clean, "SKILL.md"));
+    candidates.push(path.join(repoRoot, subDir, clean));
+  }
+  for (const cand of candidates) {
+    if (!fs.existsSync(cand)) continue;
+    try {
+      const st = fs.statSync(cand);
+      if (st.isDirectory()) {
+        const skillMd = path.join(cand, "SKILL.md");
+        if (fs.existsSync(skillMd) && fs.statSync(skillMd).isFile()) return skillMd;
+      } else if (st.isFile()) {
+        return cand;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function cmdMatchSkills(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  const files = String(flags.files || "")
+    .split(",")
+    .map((s) => s.trim().replace(/\\/g, "/").replace(/^\.\//, ""))
+    .filter(Boolean);
+  const role = typeof flags.role === "string" && flags.role.trim() ? flags.role.trim().toLowerCase() : "";
+
+  const projPath = path.join(repoRoot, ".agents", "zee.project.json");
+  let pathSkills = [];
+  if (fs.existsSync(projPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(projPath, "utf8"));
+      if (Array.isArray(cfg?.pathSkills)) pathSkills = cfg.pathSkills;
+    } catch {}
+  }
+
+  const matched = [];
+  const seenResolved = new Set();
+  for (const rule of pathSkills) {
+    if (!rule || typeof rule !== "object" || !rule.glob || !rule.skill) continue;
+    if (role && Array.isArray(rule.roles) && rule.roles.length > 0) {
+      const allowedRoles = rule.roles.map((r) => String(r).trim().toLowerCase());
+      if (!allowedRoles.includes(role)) continue;
+    }
+    const re = globToRegExp(rule.glob);
+    const hitFiles = files.filter((f) => re.test(f));
+    if (hitFiles.length === 0) continue;
+    const resolvedPath = resolveSkillPath(repoRoot, rule.skill);
+    if (!resolvedPath || seenResolved.has(resolvedPath)) continue;
+    seenResolved.add(resolvedPath);
+    matched.push({
+      skill: String(rule.skill),
+      glob: String(rule.glob),
+      path: resolvedPath,
+      matchedFiles: hitFiles,
+    });
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        repoRoot,
+        files,
+        role: role || null,
+        matched,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 function cmdDoctor(args) {
   const { flags } = parseFlags(args);
   const harness = typeof flags.harness === "string" ? flags.harness : detectActiveHarness();
   const auditAll = Boolean(flags.all);
+  const explicitRepo = typeof flags.repo === "string" && flags.repo.trim() ? path.resolve(flags.repo.trim()) : null;
+  const targetRepo = explicitRepo || detectGitRepoRoot(process.cwd());
+  const readiness = targetRepo ? computeReadiness(targetRepo) : null;
 
   const configReport = runValidate(DEFAULT_CONFIG, harness === "pi" || harness === "local" || auditAll);
   const rulesReport = runAuditRules(auditAll ? ["--all"] : ["--harness", harness]);
@@ -1462,6 +2672,7 @@ function cmdDoctor(args) {
         config: configReport,
         rules: rulesReport,
         agyHookProbe: hookProbe,
+        readiness,
       },
       null,
       2,
@@ -1507,6 +2718,30 @@ switch (cmd) {
     break;
   case "doctor":
     cmdDoctor(rest);
+    break;
+  case "sandbox-export":
+    cmdSandboxExport(rest);
+    break;
+  case "sandbox-clean":
+    cmdSandboxClean(rest);
+    break;
+  case "gate-tamper-diff":
+    cmdGateTamperDiff(rest);
+    break;
+  case "mine-transcripts":
+    cmdMineTranscripts(rest);
+    break;
+  case "queue-finding":
+    cmdQueueFinding(rest);
+    break;
+  case "list-findings":
+    cmdListFindings(rest);
+    break;
+  case "readiness":
+    cmdReadiness(rest);
+    break;
+  case "match-skills":
+    cmdMatchSkills(rest);
     break;
   default:
     usage();

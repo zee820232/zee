@@ -11,7 +11,11 @@ import {
   evaluateDestructiveCommand,
   extractModelFamily,
   getAllNestedCommands,
+  isAllowedZeeTmpPath,
+  isWithinDir,
   isWriteAllowedUnderGate,
+  splitShellSegments,
+  tokenizeShell,
 } from "../skills/zee/scripts/lib/guard-core.mjs";
 
 test("getAllNestedCommands 递归拆解 sh/bash/zsh -c 与 eval", () => {
@@ -287,6 +291,65 @@ test("v4.1.1 回归 [P0-1/P0-2/P0-3]：封堵括号/花括号/perl -0pi/$(...) �
     assert.equal(checkProjectDenyCommands("rm -rf /tmp/zee-retro-*", tmpRepo), null);
     assert.equal(checkProjectDenyCommands("node run.js --livestream", tmpRepo), null);
     assert.ok(checkProjectDenyCommands("node run.js --live=true", tmpRepo));
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("v4.2.0 跨平台：Windows 反斜杠路径保留、tmpRoots/盘符大小写、gardening-queue 与新 zee-tool 子命令白名单", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-guard-"));
+  try {
+    // 1. tokenizeShell & splitShellSegments 仅对 shell 特殊字符转义，完整保留 Windows 路径反斜杠
+    const winToolPath = "C:\\Users\\47847\\zee\\skills\\zee\\scripts\\zee-tool.mjs";
+    const winBusPath = "C:\\Users\\47847\\.local\\state\\zee\\runs\\demo\\bus";
+    const toksUnquoted = tokenizeShell(`node ${winToolPath} update-state ${winBusPath}`);
+    assert.deepEqual(toksUnquoted, ["node", winToolPath, "update-state", winBusPath]);
+
+    const toksQuoted = tokenizeShell(`cp "${winBusPath}\\plan.md" "hello \\"world\\"" hello\\ space`);
+    assert.deepEqual(toksQuoted, ["cp", `${winBusPath}\\plan.md`, 'hello "world"', "hello space"]);
+
+    const segs = splitShellSegments(`echo "${winBusPath}\\a.md" && echo ok; echo "escaped\\;semi"`);
+    assert.equal(segs.length, 3);
+    assert.ok(segs[0].includes(`${winBusPath}\\a.md`));
+    assert.equal(segs[2], 'echo "escaped\\;semi"');
+
+    // 2. isAllowedZeeTmpPath / isWithinDir 兼容 /tmp/zee-*、os.tmpdir()/zee-* 与 Windows 盘符大小写
+    const osTmpSandboxFile = path.join(os.tmpdir(), "zee-mut-win1", "out.txt");
+    assert.equal(isAllowedZeeTmpPath("/tmp/zee-probe-win", tmpRepo), true);
+    assert.equal(isAllowedZeeTmpPath(osTmpSandboxFile, tmpRepo), true);
+    assert.equal(isAllowedZeeTmpPath(path.join(tmpRepo, "src", "app.ts"), tmpRepo), false);
+    assert.equal(checkBashUnderGate(`echo "ok" > "${osTmpSandboxFile}"`, tmpRepo, "review"), null);
+    assert.ok(checkBashUnderGate(`echo "evil" > "${path.join(tmpRepo, "src", "app.ts")}"`, tmpRepo, "review"));
+
+    if (process.platform === "win32") {
+      const lowerSandbox = osTmpSandboxFile.replace(/^[A-Z]:/, (d) => d.toLowerCase());
+      const upperRoot = os.tmpdir().replace(/^[a-z]:/, (d) => d.toUpperCase());
+      assert.equal(isWithinDir(lowerSandbox, upperRoot), true);
+      assert.equal(isAllowedZeeTmpPath(lowerSandbox, tmpRepo), true);
+    }
+
+    // 3. .agents/gardening-queue.jsonl 在 review / plan / init-design 锁态均放行
+    assert.equal(isWriteAllowedUnderGate(".agents/gardening-queue.jsonl", tmpRepo, "review"), true);
+    assert.equal(isWriteAllowedUnderGate(".agents/gardening-queue.jsonl", tmpRepo, "plan"), true);
+    assert.equal(isWriteAllowedUnderGate(".agents/gardening-queue.jsonl", tmpRepo, "init-design"), true);
+
+    // 4. v4.2.0 新增安全 zee-tool.mjs 子命令在锁态精准放行
+    for (const subCmd of [
+      `sandbox-export --repo "${tmpRepo}" --prefix mut`,
+      `sandbox-clean "${path.join(os.tmpdir(), "zee-mut-win1")}"`,
+      `gate-tamper-diff --repo "${tmpRepo}" --working-tree`,
+      `mine-transcripts --mode recall --repo "${tmpRepo}" --query auth`,
+      `queue-finding --repo "${tmpRepo}" --category smell --pattern test-gap --summary "missing seam"`,
+      `list-findings --repo "${tmpRepo}"`,
+      `readiness "${tmpRepo}"`,
+      `match-skills --repo "${tmpRepo}" --files src/a.ts`,
+    ]) {
+      assert.equal(
+        checkBashUnderGate(`node "${winToolPath}" ${subCmd}`, tmpRepo, "review"),
+        null,
+        `review lock should allow zee-tool ${subCmd}`,
+      );
+    }
   } finally {
     fs.rmSync(tmpRepo, { recursive: true, force: true });
   }

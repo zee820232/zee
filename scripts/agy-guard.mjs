@@ -120,7 +120,7 @@ function extractWorkerRole(text) {
   const envRole = String(process.env.ZEE_ROLE || "").trim().toLowerCase();
   if (envRole) return envRole;
   const s = String(text || "");
-  const m = s.match(/Role:\s*[^\s|]*\/roles\/(scout|architect|ui|coder|verifier|reviewer|judge)\.md/i);
+  const m = s.match(/Role:\s*[^\s|]*[\\/]roles[\\/](scout|architect|ui|coder|verifier|reviewer|judge)\.md/i);
   if (m) return m[1].toLowerCase();
   const m2 = s.match(/\[zee-worker:(scout|architect|ui|coder|verifier|reviewer|judge)\]/i);
   return m2 ? m2[1].toLowerCase() : "";

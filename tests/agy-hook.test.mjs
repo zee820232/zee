@@ -213,3 +213,94 @@ test("agy-guard Stop Hook 仅在 night 模式未结项且未续跑过时返回 c
     fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
   }
 });
+
+test("v4.1 回归 [C4/H4]：Stop Hook 豁免 initialized/awaiting-approval 且按 conversationId 绑定、次日自动退出 night 态、独立子代理受写白名单保护", () => {
+  const pluginData = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v41-pdata-"));
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v41-night-"));
+  const absRepo = path.resolve(repoDir);
+  const hash = crypto.createHash("sha256").update(absRepo).digest("hex").slice(0, 8);
+  const base = path.basename(absRepo).toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+  const busDir = path.join(RUNS_ROOT, `${base}-${hash}`, "night-c4");
+
+  try {
+    fs.mkdirSync(busDir, { recursive: true });
+    const cid = "conv-night-c4";
+
+    // 1. status="initialized"（等待 Trust Gate 人类确认）-> Stop 必须放行 {} 绝不抢跑！
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({ slug: "night-c4", mode: "night", status: "initialized", conversationId: cid, updatedAt: new Date().toISOString() }),
+    );
+    runHook(
+      { hookEventName: "PreInvocation", conversationId: cid, cwd: absRepo, lastUserInput: "/zee-night 跑完" },
+      { PLUGIN_DATA: pluginData },
+    );
+    const waitingStop = runHook(
+      { hookEventName: "Stop", conversationId: cid, cwd: absRepo, fullyIdle: true, continuationActive: false, terminationReason: "NO_TOOL_CALL" },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.deepEqual(waitingStop, {});
+
+    // 2. 其他会话的 running night 状态不误伤本会话
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({ slug: "night-c4", mode: "night", status: "running", conversationId: "other-conv", updatedAt: new Date().toISOString() }),
+    );
+    const otherConvStop = runHook(
+      { hookEventName: "Stop", conversationId: cid, cwd: absRepo, fullyIdle: true, continuationActive: false, terminationReason: "NO_TOOL_CALL" },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.deepEqual(otherConvStop, {});
+
+    // 3. 过夜完成后次日 followup 自动退出 night 模式（破坏性命令恢复为交互 force_ask 而非 headless deny）
+    fs.writeFileSync(
+      path.join(busDir, "state.json"),
+      JSON.stringify({ slug: "night-c4", mode: "night", status: "completed", conversationId: cid, updatedAt: new Date().toISOString() }),
+    );
+    runHook(
+      { hookEventName: "PreInvocation", conversationId: cid, cwd: absRepo, lastUserInput: "早上好，帮我看下日志" },
+      { PLUGIN_DATA: pluginData },
+    );
+    const nextDayDanger = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: cid,
+        cwd: absRepo,
+        lastUserInput: "早上好，帮我看下日志",
+        toolCall: { name: "run_command", args: { CommandLine: 'bash -e -c "rm -rf /"' } },
+      },
+      { PLUGIN_DATA: pluginData, CI: "", NON_INTERACTIVE: "", HEADLESS: "" },
+    );
+    assert.equal(nextDayDanger.decision, "force_ask");
+
+    // 4. [H4] 独立 conversationId 的只读/门禁子代理（reviewer）尝试写业务源码 -> 必须拦截；写总线/tmp 放行
+    const workerPrompt = "[zee-worker] Read /x/worker.md\nRole: /x/roles/reviewer.md | Bus: " + busDir;
+    const workerBlock = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "subagent-independent-cid",
+        cwd: absRepo,
+        lastUserInput: workerPrompt,
+        toolCall: { name: "write_file", args: { Path: path.join(absRepo, "src", "hack.ts") } },
+      },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.equal(workerBlock.decision, "deny");
+
+    const workerAllowBus = runHook(
+      {
+        hookEventName: "PreToolUse",
+        conversationId: "subagent-independent-cid",
+        cwd: absRepo,
+        lastUserInput: workerPrompt,
+        toolCall: { name: "write_file", args: { Path: path.join(busDir, "artifacts", "review-r1.md") } },
+      },
+      { PLUGIN_DATA: pluginData },
+    );
+    assert.deepEqual(workerAllowBus, {});
+  } finally {
+    fs.rmSync(pluginData, { recursive: true, force: true });
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+  }
+});

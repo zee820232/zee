@@ -31,11 +31,11 @@ Triggered when the user wants an iterative repair/convergence loop against a con
 3. **Stagnancy Stop**: if the exact same failure signature repeats 2 rounds in a row, stop patching and escalate via the 4-Level Failure Ladder (`Scrap` or `heavy` tier) instead of spinning.
 4. Once `--verify` exits 0 cleanly, run 1 cross-family `Reviewer` pass over the consolidated diff before reporting completion in Chinese.
 
-## 4. Throwaway Technical Prototype (`prototype`)
-Triggered to settle an empirical technical fork (e.g., library A vs B, protocol/API feasibility, perf behavior) instead of guessing or asking the user.
-1. Isolate throwaway code on branch `prototype/<slug>` or inside `<busDir>/artifacts/proto/` — never mix prototype hacks into production branches.
-2. Run the minimal experiment to observe real behavior/output/timing and record the measured result in `<busDir>/artifacts/proto-result.md`.
-3. Clean up throwaway branch/files after the decision is locked, then proceed with clean production design.
+## 4. Dual-Mode Throwaway Prototype (`prototype`)
+Triggered to settle an empirical technical, logic, or UI fork instead of guessing or debating abstractly:
+1. **Logic / State-Machine Prototype**: emit a zero-dependency, single-file double-clickable pure HTML sandbox (`<busDir>/artifacts/proto/<slug>.html`) with guided scenario tabs where the core transition logic lives as clean pure functions directly portable into production.
+2. **UI / Layout Prototype**: prefer embedding genuinely distinct structural variants (never cosmetic recolors) on the real host page via `?variant=a|b|c` + a minimal floating switcher bar so stakeholders judge in real layout context.
+3. Isolate throwaway code on branch `prototype/<slug>` (or `<busDir>/artifacts/proto/`), record measured observations in `<busDir>/artifacts/proto-result.md`, archive or clean up throwaway edits cleanly before merging into production branches.
 
 ## 5. Parallel Read-Only Sweep (`sweep`)
 Triggered when auditing, migrating-analysis, or checking a pattern across many independent files/modules (e.g., ≥5 disjoint slices) to produce one consolidated report.
@@ -44,3 +44,8 @@ Triggered when auditing, migrating-analysis, or checking a pattern across many i
    - **On Google Antigravity (`≥5` slices)**: prefer native **`run_workflow`** (`parallel(slices, lambda s: agent(..., type_name="zee-scout", model="flash", workspace="inherit", schema={...}))`) for schema-validated JSON results in one run.
    - **On Pi / T3 / other harnesses**: fan out parallel read-only `Scout` workers (cap concurrency conservatively for CPU/rate limits).
 3. **Aggregate Strictly**: drop any worker result missing required evidence or SHA (respawn once max; record a gap after 2nd miss — a gap never counts as `PASS`). Never dump raw worker logs; deliver one consolidated Chinese summary table + proven issue one-liners + gaps.
+
+## 6. Project Verification Skill Bootstrap & Anti-Rot Maintenance (`verify-init` / `verify-maintain`)
+Load `<zeeDir>/disciplines/verification-skill.md`:
+- **`verify-init`**: interview the repo (Surface, Launch, Doctor, Drive, Evidence, Cleanup), generate `<projectSkillsDir>/verify-<app>/SKILL.md` + `features/`, and **prove it live end-to-end on 1 real feature** (verifying evidence survives cleanup) before declaring done.
+- **`verify-maintain`**: run index hygiene -> parallel read-only `Scout` source wave per feature -> mandatory serial live pass holding all 3 invariants -> strict triage (**doc drift** / **harness gap** / **product regression** — never mask a product bug by weakening docs).

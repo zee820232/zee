@@ -2,13 +2,13 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "zee",
   "displayName": "zee Workflow",
-  "version": "4.0.1",
-  "description": "通用多模型全自动工程工作流：支持 0→1 建项、风险定级编排、Grill 深度规划、跨家族三轴审查与过夜自治，原生适配 Antigravity CLI 与子代理体系。",
+  "version": "4.1.0",
+  "description": "通用多模型全自动工程工作流：支持 0→1 建项、风险定级编排、Grill+领域建模规划、深模块巡检、跨家族三轴审查、4 级纠错复盘与过夜自治，原生适配 Antigravity CLI 与子代理体系。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "/zee-plan 先做需求访谈并沉淀计划文档，不改业务代码",
-    "/zee-review 对当前改动做只读跨家族三轴对抗审查",
-    "/zee-setup 初始化或审计当前宿主的模型与工作流配置"
+    "/zee-plan 先做需求访谈与领域建模并沉淀计划文档，不改业务代码",
+    "/zee-review 对当前改动（含未提交工作区）做只读跨家族三轴对抗审查",
+    "/zee-arch 对当前代码库做深模块抗熵增巡检"
   ],
   "author": {
     "name": "zee820232",

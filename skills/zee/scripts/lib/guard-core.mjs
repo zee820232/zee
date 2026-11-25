@@ -45,9 +45,50 @@ const INIT_DESIGN_ROOT_FILES = new Set([
   "SPEC.md",
   "ARCHITECTURE.md",
   "GLOSSARY.md",
+  "GLOSSARY-MAP.md",
   "DESIGN.md",
   "README.md",
 ]);
+
+const PLAN_DOMAIN_ROOT_FILES = new Set([
+  "GLOSSARY.md",
+  "GLOSSARY-MAP.md",
+]);
+
+const READ_ONLY_SEARCH_PROGS = new Set(["grep", "rg", "egrep", "fgrep"]);
+const INLINE_INTERPRETERS = new Set(["python", "python3", "node", "ruby", "perl"]);
+
+export function isAllowedZeeTmpPath(targetPath, repoCwd = "") {
+  if (!targetPath) return false;
+  const resolved = path.resolve(targetPath);
+  // 若目标就在当前被守卫仓库目录内（例如仓库本身建在 /tmp 或 os.tmpdir() 下），绝不借临时目录规则绕过写锁！
+  if (repoCwd && isWithinDir(resolved, repoCwd)) return false;
+  const tmpRoots = new Set(["/tmp", "/private/tmp", path.resolve(os.tmpdir())]);
+  for (const root of tmpRoots) {
+    const rel = path.relative(root, resolved);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    const firstSeg = rel.split(path.sep)[0];
+    if (firstSeg && /^zee-(?:probe|mut|rev|review|retro|doc|note|tmp|sandbox|verify|bench|proto)(?:[-_]|$)/.test(firstSeg)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 判断只读/门禁子代理（verifier/reviewer/scout/architect）的写入目标是否落在允许的总线或隔离临时目录
+ */
+export function isReadOnlyRoleWriteAllowed(rawPath, cwd, extraAllowedDirs = []) {
+  if (!rawPath) return false;
+  const effectiveCwd = cwd || process.cwd();
+  const target = normalizeToolPath(rawPath, effectiveCwd);
+  if (isWithinDir(target, RUNS_ROOT)) return true;
+  if (isAllowedZeeTmpPath(target, effectiveCwd)) return true;
+  for (const dir of extraAllowedDirs) {
+    if (dir && isWithinDir(target, dir)) return true;
+  }
+  return false;
+}
 
 export function normalizeToolPath(rawPath, cwd) {
   let cleaned = String(rawPath || "").trim();
@@ -80,28 +121,37 @@ export function isWriteAllowedUnderGate(rawPath, cwd, gateMode, extraAllowedDirs
   const target = normalizeToolPath(rawPath, effectiveCwd);
 
   if (isWithinDir(target, RUNS_ROOT)) return true;
+  if (isAllowedZeeTmpPath(target, effectiveCwd)) return true;
   for (const dir of extraAllowedDirs) {
     if (dir && isWithinDir(target, dir)) return true;
   }
 
-  if (gateMode === "plan") {
-    if (isWithinDir(target, path.join(effectiveCwd, ".scratch"))) return true;
-    if (isWithinDir(target, path.join(effectiveCwd, "docs", "plans"))) return true;
-    return false;
-  }
+  const repoRoot = path.resolve(effectiveCwd);
+  const docsDir = path.join(repoRoot, "docs");
 
-  if (gateMode === "init-design") {
-    if (isWithinDir(target, path.join(effectiveCwd, ".scratch"))) return true;
-    if (isWithinDir(target, path.join(effectiveCwd, "docs", "plans"))) return true;
-    if (isWithinDir(target, path.join(effectiveCwd, ".agents"))) return true;
-    // 允许在仓库根写入 0→1 冻结设计文档
-    if (path.dirname(target) === path.resolve(effectiveCwd) && INIT_DESIGN_ROOT_FILES.has(path.basename(target))) {
+  if (gateMode === "plan") {
+    if (isWithinDir(target, path.join(repoRoot, ".scratch"))) return true;
+    if (isWithinDir(target, path.join(docsDir, "plans"))) return true;
+    if (isWithinDir(target, path.join(docsDir, "adr"))) return true;
+    if ((path.dirname(target) === repoRoot || path.dirname(target) === docsDir) && PLAN_DOMAIN_ROOT_FILES.has(path.basename(target))) {
       return true;
     }
     return false;
   }
 
-  // review 模式仅放行 RUNS_ROOT 与显式 extraAllowedDirs（如 artifactDirectoryPath）
+  if (gateMode === "init-design") {
+    if (isWithinDir(target, path.join(repoRoot, ".scratch"))) return true;
+    if (isWithinDir(target, path.join(docsDir, "plans"))) return true;
+    if (isWithinDir(target, path.join(docsDir, "adr"))) return true;
+    if (isWithinDir(target, path.join(repoRoot, ".agents"))) return true;
+    // 允许在仓库根或 docs/ 目录写入 0→1 冻结设计文档
+    if ((path.dirname(target) === repoRoot || path.dirname(target) === docsDir) && INIT_DESIGN_ROOT_FILES.has(path.basename(target))) {
+      return true;
+    }
+    return false;
+  }
+
+  // review 模式仅放行 RUNS_ROOT、/tmp/zee-* 沙盒与显式 extraAllowedDirs（如 artifactDirectoryPath）
   return false;
 }
 
@@ -219,7 +269,7 @@ export function splitShellSegments(command) {
 }
 
 /**
- * 递归剥离 sh/bash/zsh/dash/ksh -c 与 eval 嵌套子命令（最大深度 5）
+ * 递归剥离 sh/bash/zsh/dash/ksh（含前置选项如 -e / --norc / -o pipefail） -c 与 eval 嵌套子命令（最大深度 5）
  */
 export function getAllNestedCommands(command, maxDepth = 5) {
   const results = [String(command || "")];
@@ -233,9 +283,25 @@ export function getAllNestedCommands(command, maxDepth = 5) {
     for (let i = 0; i < tokens.length; i++) {
       const verb = path.basename(tokens[i]);
       if (["sh", "bash", "zsh", "dash", "ksh"].includes(verb) && i + 2 < tokens.length) {
-        const flag = tokens[i + 1];
-        if (flag === "-c" || (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(flag) && !flag.startsWith("--"))) {
-          results.push(...getAllNestedCommands(tokens[i + 2], maxDepth - 1));
+        let j = i + 1;
+        while (j < tokens.length) {
+          const opt = tokens[j];
+          if (opt === "--") break;
+          if (opt === "-c" || (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(opt) && !opt.startsWith("--"))) {
+            if (j + 1 < tokens.length) {
+              results.push(...getAllNestedCommands(tokens[j + 1], maxDepth - 1));
+            }
+            break;
+          }
+          if ((opt === "-o" || opt === "+o") && j + 1 < tokens.length) {
+            j += 2;
+            continue;
+          }
+          if (opt.startsWith("-") || opt.startsWith("+")) {
+            j += 1;
+            continue;
+          }
+          break;
         }
       } else if (verb === "eval" && i + 1 < tokens.length) {
         const inner = tokens.slice(i + 1).join(" ");
@@ -246,13 +312,15 @@ export function getAllNestedCommands(command, maxDepth = 5) {
   return results;
 }
 
-function isProtectedTarget(arg) {
+function isProtectedTarget(arg, cwd) {
   const clean = String(arg || "").trim();
   if (!clean) return false;
   if (PROTECTED_PATHS.has(clean)) return true;
   if (clean.endsWith("/*") && PROTECTED_PATHS.has(clean.slice(0, -2))) return true;
+  const candidate = clean.endsWith("/*") ? clean.slice(0, -2) || "/" : clean;
   try {
-    const resolved = normalizeToolPath(clean, "/");
+    // 关键修复：相对路径按真实 cwd 解析，防止 rm -rf lib/bin/var/dev 被误判为删 /lib 等系统目录
+    const resolved = normalizeToolPath(candidate, cwd || process.cwd());
     if (resolved === "/") return true;
     const homeResolved = path.resolve(os.homedir());
     if (resolved === homeResolved) return true;
@@ -267,6 +335,13 @@ function isProtectedTarget(arg) {
 
 function stripLeadingEnvAssignments(tokens) {
   let idx = 0;
+  if (tokens[idx] === "export" || tokens[idx] === "local" || tokens[idx] === "readonly") {
+    let j = idx + 1;
+    while (j < tokens.length && (tokens[j].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[j]) || /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[j]))) {
+      j += 1;
+    }
+    if (j >= tokens.length) return [];
+  }
   while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx])) {
     idx += 1;
   }
@@ -294,12 +369,19 @@ function getCurrentGitBranch(cwd) {
   }
 }
 
-function checkRootDeletion(allCmds) {
+function checkRootDeletion(allCmds, cwd) {
+  const effectiveCwd = cwd || process.cwd();
   for (const cmd of allCmds) {
+    let virtualCwd = effectiveCwd;
     for (const seg of splitShellSegments(cmd)) {
       const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
       if (tokens.length === 0) continue;
       const verb = path.basename(tokens[0]);
+      if (verb === "cd") {
+        const dirArg = tokens[1] && !tokens[1].startsWith("-") ? tokens[1] : os.homedir();
+        if (dirArg !== "-") virtualCwd = normalizeToolPath(dirArg, virtualCwd);
+        continue;
+      }
       if (verb !== "rm") continue;
 
       let hasR = false;
@@ -330,7 +412,7 @@ function checkRootDeletion(allCmds) {
       if (hasNoPreserve) {
         return "检测到 rm --no-preserve-root 极端破坏性删除命令";
       }
-      if (hasR && hasF && targets.some((t) => isProtectedTarget(t))) {
+      if (hasR && hasF && targets.some((t) => isProtectedTarget(t, virtualCwd))) {
         return "检测到针对系统保护目录或家目录的递归强制删除命令 (rm -rf)";
       }
     }
@@ -433,14 +515,16 @@ function checkDropDatabase(allCmds) {
 
 /**
  * 评估通用破坏性命令（无论是否处于 plan/review 锁均检测）
+ * 先剥离 Heredoc 正文防止文档/代码正文误报，再递归拆解嵌套子 shell
  * 返回 { level: "destructive", reason } 或 null
  */
 export function evaluateDestructiveCommand(command, cwd) {
   const trimmed = String(command || "").trim();
   if (!trimmed) return null;
-  const allCmds = getAllNestedCommands(trimmed, 5);
+  const cleaned = stripHeredocBodies(trimmed);
+  const allCmds = getAllNestedCommands(cleaned, 5);
 
-  const rootDel = checkRootDeletion(allCmds);
+  const rootDel = checkRootDeletion(allCmds, cwd);
   if (rootDel) return { level: "destructive", reason: rootDel };
 
   const forcePush = checkTrunkForcePush(allCmds, cwd);
@@ -452,8 +536,51 @@ export function evaluateDestructiveCommand(command, cwd) {
   return null;
 }
 
+function getExecutableDenyCandidate(seg) {
+  const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
+  if (tokens.length === 0) return "";
+  const verb = path.basename(tokens[0]);
+
+  // 放行纯文本搜索命令（避免 rg "--live" src/ 误拦）
+  if (READ_ONLY_SEARCH_PROGS.has(verb)) return "";
+  // 放行 zee-tool.mjs 日志/状态更新（避免 log-decision --why "block --live" 误拦）
+  if (isSafeZeeToolInvocation(tokens)) return "";
+
+  if (verb === "git") {
+    let subIdx = 1;
+    while (subIdx < tokens.length && tokens[subIdx].startsWith("-")) {
+      const opt = tokens[subIdx];
+      if (["-C", "-c", "--git-dir", "--work-tree", "--namespace"].includes(opt) && subIdx + 1 < tokens.length) {
+        subIdx += 2;
+      } else {
+        subIdx += 1;
+      }
+    }
+    const sub = tokens[subIdx] || "";
+    if (["log", "show", "diff", "grep", "status", "rev-parse", "merge-base"].includes(sub)) {
+      return "";
+    }
+    if (sub === "commit") {
+      // 剥离 commit message 文本，仅检查其余参数
+      const kept = [];
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if ((t === "-m" || t === "--message") && i + 1 < tokens.length) {
+          i += 1;
+          continue;
+        }
+        if (t.startsWith("--message=") || t.startsWith("-m")) continue;
+        kept.push(t);
+      }
+      return kept.join(" ");
+    }
+  }
+
+  return seg;
+}
+
 /**
- * 检查项目级 .agents/zee.project.json 中的 denyCommands（穿透嵌套子 shell）
+ * 检查项目级 .agents/zee.project.json 中的 denyCommands（先剥 Heredoc、穿透嵌套子 shell、排除只读搜索与 commit 消息）
  */
 export function checkProjectDenyCommands(command, cwd) {
   if (!command || !cwd) return null;
@@ -468,10 +595,19 @@ export function checkProjectDenyCommands(command, cwd) {
   }
   if (denies.length === 0) return null;
 
-  const allCmds = getAllNestedCommands(command, 5);
+  const cleaned = stripHeredocBodies(String(command || ""));
+  const allCmds = getAllNestedCommands(cleaned, 5);
+  const checkableSegments = [];
+  for (const c of allCmds) {
+    for (const seg of splitShellSegments(c)) {
+      const cand = getExecutableDenyCandidate(seg);
+      if (cand) checkableSegments.push(cand);
+    }
+  }
+
   for (const entry of denies) {
     if (typeof entry !== "string" || !entry.trim()) continue;
-    if (allCmds.some((c) => c.includes(entry))) {
+    if (checkableSegments.some((s) => s.includes(entry))) {
       return `命中项目安全红线（.agents/zee.project.json denyCommands: "${entry}"），已硬拦截该命令。`;
     }
   }
@@ -648,6 +784,10 @@ function expandStaticVars(str, staticVars) {
 
 function recordLeadingStaticVars(rawTokens, staticVars) {
   let idx = 0;
+  if (rawTokens[0] === "export" || rawTokens[0] === "local" || rawTokens[0] === "readonly") {
+    idx = 1;
+    while (idx < rawTokens.length && rawTokens[idx].startsWith("-")) idx += 1;
+  }
   while (idx < rawTokens.length) {
     const m = rawTokens[idx].match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     if (!m) break;
@@ -664,12 +804,16 @@ function recordLeadingStaticVars(rawTokens, staticVars) {
 }
 
 function isSafeZeeToolInvocation(tokens) {
-  if (tokens.length < 2) return false;
+  if (tokens.length < 3) return false;
   const prog = path.basename(tokens[0]);
   if (prog !== "node") return false;
   const scriptArg = tokens[1] || "";
   if (path.basename(scriptArg) !== "zee-tool.mjs") return false;
   const sub = tokens[2] || "";
+  if (sub === "cleanup-worktrees") {
+    // 锁态仅允许只读审计，禁止 --prune-safe 删除工作树
+    return !tokens.includes("--prune-safe");
+  }
   return new Set([
     "validate",
     "audit-rules",
@@ -677,7 +821,6 @@ function isSafeZeeToolInvocation(tokens) {
     "update-state",
     "list-runs",
     "log-decision",
-    "cleanup-worktrees",
     "check-plan",
     "resolve-model",
     "doctor",
@@ -699,17 +842,22 @@ function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, ext
   if (args.length === 0) return false;
 
   const isAllowed = (rawTarget) => {
+    if (isProtectedTarget(rawTarget, virtualCwd)) return false;
     const resolved = normalizeToolPath(rawTarget, virtualCwd);
     return isWriteAllowedUnderGate(resolved, repoCwd, gateMode, extraAllowedDirs);
   };
 
-  if (verb === "mkdir" || verb === "touch" || verb === "tee") {
+  if (verb === "mkdir" || verb === "touch" || verb === "tee" || verb === "rm") {
     return args.every(isAllowed);
   }
   if (verb === "cp") {
     if (args.length < 2) return false;
     const dst = args[args.length - 1];
     return isAllowed(dst);
+  }
+  if (verb === "mv") {
+    if (args.length < 2) return false;
+    return args.every(isAllowed);
   }
   return false;
 }
@@ -753,13 +901,88 @@ const BLOCKED_JS_PKG_SUBCMDS = new Set([
 const BLOCKED_OTHER_PKG_VERBS = new Set(["pip", "pip3", "uv", "poetry", "cargo", "brew"]);
 const BLOCKED_OTHER_PKG_SUBCMDS = new Set(["install", "add", "remove", "uninstall", "upgrade"]);
 
-const MUTATING_FILE_VERBS = new Set(["rm", "mv", "chmod", "chown", "truncate", "dd", "mkfs", "patch"]);
-const ALLOWLISTABLE_FILE_VERBS = new Set(["mkdir", "cp", "touch", "tee"]);
+const MUTATING_FILE_VERBS = new Set(["chmod", "chown", "truncate", "dd", "mkfs", "patch"]);
+const ALLOWLISTABLE_FILE_VERBS = new Set(["mkdir", "cp", "touch", "tee", "rm", "mv"]);
+
+const INTERPRETER_WRITE_PATTERNS = {
+  python: [
+    /\bopen\s*\([^)]*['"][wax+]/i,
+    /\.(write_text|write_bytes)\s*\(/,
+    /\bshutil\.(copy|copy2|copytree|move|rmtree)\s*\(/,
+    /\bos\.(remove|unlink|rename|replace|makedirs|mkdir)\s*\(/,
+  ],
+  node: [
+    /\b(writeFileSync|writeFile|appendFileSync|appendFile|rmSync|unlinkSync|renameSync|mkdirSync|cpSync|createWriteStream)\b/,
+  ],
+  ruby: [/\bFile\.(write|delete|unlink|rename|open\s*\([^)]*['"][wa+])/],
+  perl: [/\bopen\s*\([^)]*['"]>/, /\bunlink\b/],
+};
+
+function extractHeredocBodyText(command) {
+  const lines = String(command || "").split(/\r?\n/);
+  const bodies = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const m = line.match(/<<(-?)\s*(?:'([^']+)'|"([^"]+)"|\\([A-Za-z0-9_.-]+)|([A-Za-z0-9_.-]+))/);
+    i += 1;
+    if (!m) continue;
+    const stripTabs = m[1] === "-";
+    const delim = m[2] || m[3] || m[4] || m[5];
+    while (i < lines.length) {
+      const candidate = stripTabs ? lines[i].replace(/^\t+/, "") : lines[i];
+      if (candidate === delim) {
+        i += 1;
+        break;
+      }
+      bodies.push(lines[i]);
+      i += 1;
+    }
+  }
+  return bodies.join("\n");
+}
+
+function checkInterpreterInlineWrite(verb, tokens, rawCommand) {
+  if (!INLINE_INTERPRETERS.has(verb)) return null;
+  const family = verb.startsWith("python") ? "python" : verb;
+  const patterns = INTERPRETER_WRITE_PATTERNS[family] || [];
+  if (patterns.length === 0) return null;
+
+  const snippets = [];
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i];
+    if ((t === "-c" || t === "-e" || t === "--eval") && i + 1 < tokens.length) {
+      snippets.push(tokens[i + 1]);
+      i += 1;
+    }
+  }
+  if (/<<-?\s*/.test(rawCommand)) {
+    const body = extractHeredocBodyText(rawCommand);
+    if (body) snippets.push(body);
+  }
+
+  for (const code of snippets) {
+    if (patterns.some((re) => re.test(code))) {
+      return `解释器内联文件写入命令 (${verb})`;
+    }
+  }
+  return null;
+}
 
 /**
  * 基于词法 token 精确识别变更类命令（彻底消除 git merge-base 与引号内参数误拦）
  */
 function checkBlockedMutatingVerb(verb, tokens) {
+  if (verb === "node" && tokens.length >= 3 && path.basename(tokens[1] || "") === "zee-tool.mjs") {
+    const sub = tokens[2] || "";
+    if (sub === "cleanup-worktrees" && tokens.includes("--prune-safe")) {
+      return "删除 Git worktree 的 zee-tool 变更命令 (cleanup-worktrees --prune-safe)";
+    }
+    if (sub === "worktree-create" || (sub === "symlinks" && tokens.includes("--apply"))) {
+      return `修改工作树或软链的 zee-tool 变更命令 (${sub})`;
+    }
+  }
+
   if (verb === "git") {
     let subIdx = 1;
     while (subIdx < tokens.length && tokens[subIdx].startsWith("-")) {
@@ -788,10 +1011,38 @@ function checkBlockedMutatingVerb(verb, tokens) {
             a === "--delete" ||
             a === "--move" ||
             a === "--copy" ||
-            (/^-[a-zA-Z]*[dDmM]/.test(a) && !a.startsWith("--")),
+            a === "-f" ||
+            a === "--force" ||
+            (/^-[a-zA-Z]*[dDmMcCf]/.test(a) && !a.startsWith("--")),
         )
       ) {
         return "修改 Git 工作区或提交历史的命令";
+      }
+      // 检测创建新分支（无 --list/-l/--contains 等查询标志却带位置参数）
+      const isListQuery = rest.some((a) => a === "-l" || a === "--list" || a === "--contains" || a === "--no-contains" || a === "--merged" || a === "--no-merged" || a === "--points-at" || a === "--show-current");
+      if (!isListQuery) {
+        const positionals = [];
+        const branchValOpts = new Set(["--format", "--sort", "--color", "--column", "--abbrev"]);
+        for (let i = 0; i < rest.length; i++) {
+          const a = rest[i];
+          if (a === "--") break;
+          if (branchValOpts.has(a) && i + 1 < rest.length) {
+            i += 1;
+            continue;
+          }
+          if (!a.startsWith("-")) positionals.push(a);
+        }
+        if (positionals.length > 0) {
+          return "创建 Git 分支的变更命令 (git branch)";
+        }
+      }
+    }
+    if (sub === "tag") {
+      const rest = tokens.slice(subIdx + 1);
+      const isListOrVerify = rest.length === 0 || rest.some((a) => a === "-l" || a === "--list" || a === "-v" || a === "--verify");
+      const isMutating = rest.some((a) => a === "-d" || a === "--delete" || a === "-a" || a === "--annotate" || a === "-s" || a === "--sign" || a === "-f" || a === "--force");
+      if (isMutating || !isListOrVerify) {
+        return "修改 Git 标签的变更命令 (git tag)";
       }
     }
     return null;
@@ -908,6 +1159,11 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
         return `当前处于 zee ${modeLabel}模式，已拦截文件增删改命令 (${verb})。`;
       }
 
+      const interpBlocked = checkInterpreterInlineWrite(verb, stripped, trimmed);
+      if (interpBlocked) {
+        return `当前处于 zee ${modeLabel}模式，已拦截${interpBlocked}。`;
+      }
+
       const blockedLabel = checkBlockedMutatingVerb(verb, stripped);
       if (blockedLabel) {
         return `当前处于 zee ${modeLabel}模式，已拦截${blockedLabel}。`;
@@ -918,12 +1174,33 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
   return null;
 }
 
+const FAMILY_ALIASES = new Map([
+  ["anthropic", "claude"],
+  ["claude", "claude"],
+  ["openai", "openai"],
+  ["google", "gemini"],
+  ["gemini", "gemini"],
+  ["xai", "grok"],
+  ["grok", "grok"],
+  ["devin", "devin"],
+  ["deepseek", "deepseek"],
+  ["qwen", "qwen"],
+  ["alibaba", "qwen"],
+  ["meta", "meta"],
+  ["meta-llama", "meta"],
+  ["mistral", "mistral"],
+  ["mistralai", "mistral"],
+]);
+
 /**
- * 统一提取模型底层家族（绝不将代理网关名如 pi/vm/devin 当家族）
+ * 统一提取模型底层家族（归一化 anthropic→claude / google→gemini / xai→grok，绝不将代理网关名当家族）
  */
 export function extractModelFamily(modelId) {
   if (!modelId || typeof modelId !== "string") return "";
-  const tail = modelId.trim().toLowerCase().split("/").pop() || "";
+  const trimmed = modelId.trim().toLowerCase();
+  if (FAMILY_ALIASES.has(trimmed)) return FAMILY_ALIASES.get(trimmed);
+  const tail = trimmed.split("/").pop() || "";
+  if (FAMILY_ALIASES.has(tail)) return FAMILY_ALIASES.get(tail);
   if (/(claude|fable|sonnet|opus|haiku)/.test(tail)) return "claude";
   if (/(^|[-_])(gpt|o1|o3|o4|codex)/.test(tail)) return "openai";
   if (/gemini/.test(tail)) return "gemini";
@@ -932,7 +1209,9 @@ export function extractModelFamily(modelId) {
   if (/grok/.test(tail)) return "grok";
   if (/qwen/.test(tail)) return "qwen";
   if (/llama/.test(tail)) return "meta";
-  return tail.split(/[-_.]/)[0] || "";
+  if (/mistral|mixtral|codestral/.test(tail)) return "mistral";
+  const prefix = tail.split(/[-_.]/)[0] || "";
+  return FAMILY_ALIASES.get(prefix) || prefix;
 }
 
 /**

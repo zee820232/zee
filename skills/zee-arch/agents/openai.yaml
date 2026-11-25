@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Arch"
+  short_description: "代码库深模块抗熵增巡检：热点扫描 + 删除测试 + Before/After 报告（不改业务代码）"
+policy:
+  allow_implicit_invocation: false

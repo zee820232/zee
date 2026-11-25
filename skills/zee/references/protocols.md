@@ -30,11 +30,10 @@ Create via `node "<zeeDir>/scripts/zee-tool.mjs" init-run "<repoRoot>" "<slug>"`
 Start every delegated `SPAWN` prompt with this exact English header (ensures cross-model compliance and neutralizes ambient plugin/CLAUDE.md interference):
 ```text
 [zee-worker] Read <zeeDir>/worker.md before anything else.
-You are already running as a delegate. Do this directly, no subagents. Do not invoke zee, poteto-mode, or omc.
-Do not create implementation_plan.md or request user feedback. This brief is the whole bar.
-Use the repository's existing language and the exact gate commands below, not generic templates.
-Never ask the user anything. Never edit CHANGELOG.md/README.md unless explicitly assigned.
-Never run denyCommands, sign, broadcast, --live, or read secrets/keys.
+You are already running as a delegate. Execute directly without subagents or any competing orchestrator.
+This brief is the whole bar: use the repository's existing language and exact gate commands below.
+Leave shared index files (CHANGELOG.md/README.md) untouched unless explicitly assigned.
+Stay within hard safety redlines (no denyCommands, signing, --live, or secret reads).
 Role: <zeeDir>/roles/<role>.md | Bus: <abs-busDir> | Base/Pinned SHA: <sha> | Return: ≤30-line receipt
 ```
 Follow the header with: **Goal**, **Relevant Bus Paths**, **Exact Gate Commands**, **`denyCommands`**, **Assigned File Lane / Scope**, (on AGY) **Parent Conversation ID**, and (on retry) **Prior Directives + Findings + Root-Cause Requirement**.
@@ -55,7 +54,7 @@ Follow the header with: **Goal**, **Relevant Bus Paths**, **Exact Gate Commands*
 ## 6. Optional Delivery, PR Babysit & Review Triage (Only When Requested)
 Execute only when the user asks to open or shepherd a PR (or after confirming the push one-way door):
 1. **Commit Hygiene**: ensure verified changes are organized into clean, logical commits on the feature branch (no stray debug logs, no unrequested files, no force-push to shared branches).
-2. **Push & Open PR**: push the feature branch and open a concise PR (`gh pr create`, ready unless user asked for draft) whose body stays ≤40 lines covering: **Why / Goal**, **Key Changes**, **Verification Receipts** (commands + exit codes + Pinned SHA), **Blast Radius & One-Way Doors**, and **Cross-Family Review Verdict**.
+2. **Push & Open PR**: push the feature branch and open a concise Ketchup-style PR (`gh pr create`, ≤40 lines, see `disciplines/phase-boundaries.md`) covering: **Visual Summary** (smallest clear diagram/tree/diff), **Evidence** (Before/After screenshots S-tier + exact command receipts & Pinned SHA A-tier), **Merge Danger** (two-way vs one-way doors & blast radius), and **Cross-Family Review Verdict**.
 3. **CI Watch & Comment 3-Way Triage**:
    - Use native watch tools (e.g. T3 `watch_pull_request`) when asked to babysit checks; distinguish pre-existing base CI flakes from regressions introduced by the branch.
    - Triage every human or bot PR comment strictly into 3 buckets: **`fix`** (valid bug/defect -> fix, re-verify, reply with commit SHA), **`dismiss`** (false positive or out-of-scope -> reply once with factual code/test evidence), or **`ask`** (genuine product/API trade-off -> surface to user in Chinese).

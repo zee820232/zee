@@ -32,12 +32,12 @@ npx github:zee820232/zee --target both
 pi install git:github.com/zee820232/zee
 ```
 
-一次安装自动获得（v4.0.0）：
-- 6 个完整工作流技能（`zee` / `zee-plan` / `zee-init` / `zee-review` / `zee-night` / `zee-setup`）
-- **常驻自动路由开关 `/zee-mode`（`auto | strict | off`）**：按分支持久化状态，内置 4 层防子代理递归与 `~/CLAUDE.md` 冲突隔离
-- **免前缀短命令**：直接输入 `/zee`、`/zee-plan`、`/zee-init`、`/zee-review`、`/zee-night`、`/zee-setup`
-- **跨回合持久化保护锁 + 共享安全核**：`/zee-plan` 与 `/zee-init`（Stage 1–2）跨多轮访谈保持防写锁（自动放行白名单目录上的 `mkdir/cp` 与 `zee-tool.mjs`），`/zee-review` 强制只读，日常编码常驻拦截 `.agents/zee.project.json` `denyCommands` 与递归子 shell 破坏性命令
-- **内置并行子代理引擎 `zee_subagent` v2**：支持角色分级超时、120s 空闲看门狗、`StagnancyTracker` 4 连错早停、超时/中止保留 `PARTIAL_RECEIPT`、声明式原子 `worktree` 托管（零竞态不污染桌面）、按角色硬剥离 `Verifier/Reviewer` 的 `edit` 权限与事后脏区审计、以及 `authorFamily` 同家族审查硬拦截
+一次安装自动获得（v4.1.0）：
+- **8 个完整工作流技能**（`zee` / `zee-plan` / `zee-init` / `zee-review` / `zee-arch` / `zee-retro` / `zee-night` / `zee-setup`）+ **6 份按需工程纪律**（`skills/zee/disciplines/`）
+- **常驻自动路由开关 `/zee-mode`（`auto | strict | off`）**：按分支持久化状态，直注 `<zeeDir>` 绝对路径，内置 4 层防子代理递归与全局模板隔离
+- **免前缀短命令**：直接输入 `/zee`（含 `/zee plan|review|init|arch` 自动上锁）、`/zee-plan`、`/zee-init`、`/zee-review`、`/zee-arch`、`/zee-retro`、`/zee-night`、`/zee-setup`
+- **跨回合持久化保护锁 + 双端词法安全核 + 子进程 `worker-guard.ts`**：`/zee-plan`/`/zee-arch` 与 `/zee-init`（Stage 1–2）跨多轮保持防写锁（自动放行 `GLOSSARY.md`/`docs/adr/`/`/tmp/zee-*` 与白名单文件操作），子进程通过 `-ne -e worker-guard.ts` 消灭安全真空，日常编码常驻拦截 `denyCommands` 与嵌套子 shell 破坏性命令
+- **内置并行子代理引擎 `zee_subagent` v2.1**：流式正文优先抢救（`PARTIAL_RECEIPT`）、并发 Map 工具双态看门狗、15s 节流心跳、精准增量脏区回滚（零误杀用户未提交改动）、Worktree 活锁（`.zee-lock.json` 防误删）与归一化 `authorFamily` 同家族硬拦截
 
 ### 方式三：Google Antigravity（`agy` CLI / App / IDE 原生插件形态）
 
@@ -45,11 +45,11 @@ pi install git:github.com/zee820232/zee
 agy plugin install https://github.com/zee820232/zee
 ```
 
-一次安装自动获得（v4.0.0）：
+一次安装自动获得（v4.1.0）：
 - **专属主控代理 `zee`（零劫持闲聊）**：终端运行 **`agy --agent zee`**（或在 CLI `/agents` / Antigravity App 中切换 `zee`），插件绝不内置劫持普通对话的 `rules/AGENTS.md`
-- **6 个硬权限隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 与精确 OneHarness `tools:` 白名单（硬剥离 `scout`/`verifier`/`reviewer` 的 `edit_file` 与嵌套派发权）
-- **6 个原生斜杠命令** + **AGY 原生体验满血**：支持 Brain Artifacts（`implementation_plan.md` 原生「Proceed」审批按钮、`walkthrough.md` + 截图 `carousel`、虚拟化 `decisions.tsv`）、`TimerCondition: "never"` 响应式全局看门狗、`run_workflow` 宽扇出与 429 自动降级
-- **三事件生命周期 Hook**（`hooks.json` -> `PreInvocation` + `PreToolUse` + `Stop`）：`$PLUGIN_DATA` 跨回合保持规划/初始化锁、与 Pi 共用 `guard-core.mjs` 递归子 shell 防危、`{}` 零副作用透传，以及 `Stop` 过夜防断尾兜底
+- **6 个硬权限隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 与精确 OneHarness `tools:` 白名单（`zee-scout`/`zee-architect` 纯只读，`zee-verifier`/`zee-reviewer` 硬剥离 `edit_file`）
+- **8 个原生斜杠命令** + **AGY 原生体验满血**：支持 Brain Artifacts（`implementation_plan.md` 原生「Proceed」审批按钮、`walkthrough.md` + 截图 `carousel`、虚拟化 `decisions.tsv`）、`TimerCondition: "never"` 响应式全局看门狗、`run_workflow` 宽扇出与 429 自动降级
+- **三事件生命周期 Hook**（`hooks.json` -> `PreInvocation` + `PreToolUse` + `Stop`）：`$PLUGIN_DATA` 跨回合保持规划/初始化锁、与 Pi 共用 `guard-core.mjs` 词法防危、保护独立 `conversationId` 子代理写边界、`{}` 零副作用透传，以及按 `conversationId` 精准绑定 `status==="running"` 的 `Stop` 过夜防断尾兜底
 
 > ⚠️ **防冲突提示**：使用 `pi install` 或 `agy plugin install` 安装后，请勿同时在对应宿主的 `skills/` 目录保留旧的 `zee*` 手动拷贝，以免触发重名警告（`install.mjs` 会自动检测清理，也可运行 `zee-tool.mjs audit-rules` 排查）。
 
@@ -71,11 +71,13 @@ npx skills add zee820232/zee
 | :--- | :--- | :--- |
 | **`/zee-mode`** / **`agy --agent zee`** | **常驻自动路由入口**（Pi 用 `/zee-mode auto\|strict\|off`；Antigravity 用 `agy --agent zee`） | `/zee-mode auto` 或 `agy --agent zee` |
 | **`/zee`** | 全自动主入口（按风险自动定级，也可直接接棒已确认的 `plan.md`） | `/zee 修复重试超时导致的重复提交` |
-| **`/zee-plan`** | **先 Grill 访谈 → 沉淀正式计划文档并停机**（Pi 下自动加路径级防写锁） | `/zee-plan 给面板加多账户支持` |
-| **`/zee-init`** | **项目 0→1 模式**：从想法访谈到可运行、冷启动验收通过的 v1 | `/zee-init 做一个本地书签管理 CLI` |
-| **`/zee-review`** | **只读跨家族三轴对抗审查**（Pi 下自动加只读锁，仅保留实证问题） | `/zee-review` |
-| **`/zee-night`** | **无人值守过夜模式**（独立分支、断点日志、预算熔断、中文晨报） | `/zee-night 执行 .scratch/auth/plan.md` |
-| **`/zee-setup`** | 一次配置 6 个角色模型与思考强度、审计当前宿主规则冲突 | `/zee-setup` |
+| **`/zee-plan`** | **Grill 访谈 + 主动领域建模（`GLOSSARY.md`/3 条件 ADR）→ 沉淀计划停机**（跨回合写锁） | `/zee-plan 给面板加多账户支持` |
+| **`/zee-init`** | **项目 0→1 模式**：从想法访谈到生成实机跑通的 `verify-<app>` 与验收通过 v1 | `/zee-init 做一个本地书签管理 CLI` |
+| **`/zee-review`** | **只读跨家族三轴对抗审查**（支持未提交工作区 + Fowler 12 坏味道参考基线） | `/zee-review` |
+| **`/zee-arch`** | **代码库深模块抗熵增巡检**（热点扫描 + 删除测试 + HTML 报告，不改业务代码） | `/zee-arch 巡检核心状态机` |
+| **`/zee-retro`** | **会话复盘与 4 级纠错飞轮**（将重复错因机械化固化进架构/Lint/Hook/测试） | `/zee-retro` |
+| **`/zee-night`** | **无人值守过夜模式**（独立分支、断点日志、70% 收口、Ketchup 中文晨报） | `/zee-night 执行 .scratch/auth/plan.md` |
+| **`/zee-setup`** | 配置模型槽位、执行当前宿主全面体检并按需生成项目级 `verify-<app>` 技能 | `/zee-setup` |
 
 ---
 
@@ -129,20 +131,24 @@ scripts/
 └── agy-guard.mjs                 # Antigravity PreToolUse 路径级防写锁与 denyCommands 守卫
 package.json                      # Pi Package 清单（导出 pi-extension 与 skills）
 pi-extension/
-└── index.ts                      # Pi 原生扩展：/zee-mode、短命令、Plan/Review 路径锁、并行 zee_subagent
+├── index.ts                      # Pi 原生扩展：/zee-mode、8 短命令、跨回合路径锁、并行 zee_subagent v2.1
+└── worker-guard.ts               # Pi 子进程极简安全守卫（-ne -e 挂载，消灭子代理安全真空）
 skills/
 ├── zee/                          # 核心工作流（唯一真源）
-│   ├── SKILL.md                  # 宿主无关总控内核
+│   ├── SKILL.md                  # 宿主无关总控内核（L0–L3 + L2 单 Owner 快轨 + 专项轨道）
 │   ├── worker.md                 # 子代理通用前置契约（含 [zee-worker] 防递归哨兵）
 │   ├── agents/openai.yaml        # Codex 触发策略
 │   ├── roles/                    # scout / architect / ui / coder / verifier / reviewer
+│   ├── disciplines/              # domain-modeling / deep-modules / diagnosing-bugs / code-smells / phase-boundaries / verification-skill
 │   ├── references/               # harness / antigravity / interop / protocols / plan-mode / greenfield / overnight / specialized
-│   └── scripts/zee-tool.mjs      # 零依赖工具：配置校验、单端与双安装冲突审计、总线/续跑寻址、Worktree 体检与 TSV 日志
-├── zee-plan/                     # 快捷入口：Grill 深度访谈 → 沉淀计划文档（只规划不写码）
-├── zee-init/                     # 快捷入口：项目 0→1 全自动建项
-├── zee-review/                   # 快捷入口：只读跨家族对抗审查
+│   └── scripts/                  # zee-tool.mjs（12 确定性原语）+ lib/guard-core.mjs（双端共享词法安全核）
+├── zee-plan/                     # 快捷入口：Grill 访谈 + 领域建模 → 沉淀计划文档（只规划不写码）
+├── zee-init/                     # 快捷入口：项目 0→1 全自动建项（含实机跑通的 verify-<app>）
+├── zee-review/                   # 快捷入口：只读跨家族三轴对抗审查（支持未提交工作区）
+├── zee-arch/                     # 快捷入口：代码库深模块抗熵增巡检（热点 + 删除测试 + HTML 报告）
+├── zee-retro/                    # 快捷入口：会话复盘与 4 级结构化纠错飞轮
 ├── zee-night/                    # 快捷入口：无人值守过夜模式
-└── zee-setup/                    # 一次模型装配与当前宿主配置引导
+└── zee-setup/                    # 一次模型装配、当前宿主体检与 verify-<app> 生成引导
 ```
 
 ---

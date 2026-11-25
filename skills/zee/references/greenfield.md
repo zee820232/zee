@@ -2,7 +2,7 @@
 
 Auto-triggers on `/zee init`, an empty repository / missing Git `HEAD`, or an explicit request to build a new product/project from scratch. **All product interviews, spec summaries, sign-off prompts, and delivery notes presented to the user MUST be in Simplified Chinese (简体中文).**
 
-> **Stage 1–2 Write Lock (`init-design`)**: both Pi Extension and AGY `agy-guard.mjs` automatically hold the `init-design` write lock across Stage 1–2 (allowing only `<busDir>`, `.scratch/`, `.agents/`, and root `SPEC.md`/`ARCHITECTURE.md`/`GLOSSARY.md`/`DESIGN.md`) until Stage 3 M0 writes `<repo>/.agents/zee.project.json`.
+> **Stage 1–2 Write Lock (`init-design`)**: both Pi Extension and AGY `agy-guard.mjs` automatically hold the `init-design` write lock across Stage 1–2 (allowing `<busDir>`, `/tmp/zee-*`, `.scratch/`, `.agents/`, `docs/adr/`, and root or `docs/` `SPEC.md`/`ARCHITECTURE.md`/`GLOSSARY.md`/`DESIGN.md`) until Stage 3 M0 writes `<repo>/.agents/zee.project.json`.
 
 ## Pre-Check · Non-Empty Repo Guard
 Before starting Stage 1, inspect the current working directory. If it already contains source code or existing Git commits (and the user did not explicitly ask to build inside this existing repo), pause in Chinese and ask whether to create a new subdirectory or switch to an empty folder before writing anything.
@@ -31,8 +31,8 @@ Orchestrator works directly with the user in Chinese (never delegate user interv
 ## Stage 3 · M0 Foundation Commit + M1 Walking Skeleton
 1. **M0 · Bootstrap Foundation** (single `Coder`, before any worktree fan-out):
    - Initialize `git init` (if needed), create `.gitignore`, minimal runnable project scaffold, formatter/linter/typecheck, 1 runnable smoke test, and `<repo>/.agents/zee.project.json` (populating real `testCmds`, `buildCmd`, `lintCmd`, `riskPaths`, `uiGlobs`, `denyCommands`).
-   - Copy locked `SPEC.md`, `ARCHITECTURE.md`, `GLOSSARY.md`, and `DESIGN.md` into repo docs.
-   - **Optional Persistent Verification Feature Map**: for multi-screen UI or multi-command CLI apps, also create a lightweight `<repo>/.agents/verify-map.md` (or `.agents/skills/verify-<app>/SKILL.md`) mapping the app's boot command, routes/controls, and deterministic screenshot/assertion targets so every subsequent Verifier run reuses one consistent harness.
+   - Copy locked `SPEC.md`, `ARCHITECTURE.md`, `GLOSSARY.md`, `DESIGN.md`, and any 3-condition `docs/adr/` entries into repo docs.
+   - **Project-Local Verification Skill (`verify-<app>`)**: for any real UI, CLI/TUI, game, desktop, or service app, follow `<zeeDir>/disciplines/verification-skill.md` once M0/M1 runs to generate `<projectSkillsDir>/verify-<app>/SKILL.md` + `features/` (`Launch`, `Doctor`, `Drive`, `Evidence`, `Cleanup`) AND **prove it live end-to-end on 1 mapped feature** (confirming evidence survives cleanup) so every downstream M2..Mk `Verifier` executes one proven harness.
    - Verify build + smoke test exit 0, then make **`chore: bootstrap foundation`** (Initial Commit). Update `state.json` via `zee-tool.mjs update-state`. Worktrees, Pinned SHA, and deterministic gates are now unlocked.
 2. **M1 · Walking Skeleton** (single owner, serial end-to-end):
    - Implement the single thinnest vertical slice piercing every layer (entry/UI -> logic/API -> storage/audio -> real E2E test) to prove the architecture runs live before parallelizing. Run Gate 1 `Verifier` `PASS` before starting M2.

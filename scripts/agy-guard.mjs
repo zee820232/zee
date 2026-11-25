@@ -21,6 +21,7 @@ import {
   checkBashUnderGate,
   checkProjectDenyCommands,
   evaluateDestructiveCommand,
+  isReadOnlyRoleWriteAllowed,
   isWriteAllowedUnderGate,
 } from "../skills/zee/scripts/lib/guard-core.mjs";
 
@@ -31,6 +32,9 @@ const WRITE_TOOLS = new Set([
   "replace_file_content",
   "multi_replace_file_content",
 ]);
+
+const READ_ONLY_WORKER_ROLES = new Set(["scout", "architect", "judge", "verifier", "reviewer"]);
+const STRICT_BASH_WORKER_ROLES = new Set(["scout", "architect", "judge"]);
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -112,6 +116,16 @@ function isWorkerPrompt(text) {
   );
 }
 
+function extractWorkerRole(text) {
+  const envRole = String(process.env.ZEE_ROLE || "").trim().toLowerCase();
+  if (envRole) return envRole;
+  const s = String(text || "");
+  const m = s.match(/Role:\s*[^\s|]*\/roles\/(scout|architect|ui|coder|verifier|reviewer|judge)\.md/i);
+  if (m) return m[1].toLowerCase();
+  const m2 = s.match(/\[zee-worker:(scout|architect|ui|coder|verifier|reviewer|judge)\]/i);
+  return m2 ? m2[1].toLowerCase() : "";
+}
+
 function isHeadless(sessionState) {
   if (sessionState?.mode === "night") return true;
   return Boolean(
@@ -126,7 +140,12 @@ function parseUserIntent(lastUserInput) {
   const trimmed = String(lastUserInput || "").trim();
   if (!trimmed || isWorkerPrompt(trimmed)) return { kind: "ignore" };
 
-  if (/^\/zee-plan\b/i.test(trimmed) || /^\/zee\s+plan\b/i.test(trimmed)) {
+  if (
+    /^\/zee-plan\b/i.test(trimmed) ||
+    /^\/zee\s+plan\b/i.test(trimmed) ||
+    /^\/zee-arch\b/i.test(trimmed) ||
+    /^\/zee\s+arch\b/i.test(trimmed)
+  ) {
     return { kind: "set", gate: "plan", mode: "standard" };
   }
   if (/^\/zee-review\b/i.test(trimmed) || /^\/zee\s+review\b/i.test(trimmed)) {
@@ -138,7 +157,7 @@ function parseUserIntent(lastUserInput) {
   if (/^\/zee-night\b/i.test(trimmed) || /^\/zee\s+night\b/i.test(trimmed)) {
     return { kind: "set", gate: "none", mode: "night" };
   }
-  if (/^\/zee(?:-setup)?\b/i.test(trimmed)) {
+  if (/^\/zee(?:-(?:setup|retro))?\b/i.test(trimmed)) {
     return { kind: "clear" };
   }
   if (/^(解锁|解除锁定|开始写代码|开始实现|执行计划)\b/.test(trimmed)) {
@@ -207,6 +226,15 @@ function handlePreInvocation(payload, cwd) {
     return;
   }
 
+  // night 模式在过夜任务已结项/暂停/未运行且用户开始新交互回合时自动退回 standard，避免次日被永久视为 headless
+  if (existing.mode === "night" && intent.kind === "followup") {
+    const runningNight = findLatestNightStateForRepo(cwd || existing.cwd, cid);
+    if (!runningNight || String(runningNight.status || "") !== "running") {
+      if (existing.gate === "none") clearSessionState(cid);
+      else saveSessionState(cid, { ...existing, mode: "standard" });
+    }
+  }
+
   respond({});
 }
 
@@ -231,8 +259,9 @@ function handlePreToolUse(payload, cwd) {
   }
 
   const workerCall = isWorkerPrompt(payload?.lastUserInput);
+  const workerRole = workerCall ? extractWorkerRole(payload?.lastUserInput) : "";
 
-  // 1. run_command：无条件执行项目 denyCommands 与破坏性命令护栏；锁态下再执行路径/写命令拦截
+  // 1. run_command：无条件执行项目 denyCommands 与破坏性命令护栏；只读子代理与锁态下执行词法级拦截
   if (toolName === "run_command") {
     const cmd = extractCommand(args);
 
@@ -252,6 +281,15 @@ function handlePreToolUse(payload, cwd) {
       return;
     }
 
+    // 独立 conversationId 的只读子代理（scout/architect/judge）始终受只读 Bash 锁保护
+    if (workerCall && STRICT_BASH_WORKER_ROLES.has(workerRole)) {
+      const workerViolation = checkBashUnderGate(cmd, cwd, "review", extraDirs);
+      if (workerViolation) {
+        respond({ decision: "deny", reason: `[zee-worker:${workerRole}] ${workerViolation}` });
+        return;
+      }
+    }
+
     if (gateMode !== "none" && (!workerCall || gateMode === "review")) {
       const gateViolation = checkBashUnderGate(cmd, cwd, gateMode, extraDirs);
       if (gateViolation) {
@@ -265,16 +303,28 @@ function handlePreToolUse(payload, cwd) {
     return;
   }
 
-  // 2. 文件写工具：锁态下执行路径白名单拦截
+  // 2. 独立 conversationId 的只读/门禁子代理（scout/architect/judge/verifier/reviewer）文件写路径硬白名单
+  if (workerCall && READ_ONLY_WORKER_ROLES.has(workerRole) && WRITE_TOOLS.has(toolName)) {
+    const rawPath = extractTargetPath(args);
+    if (rawPath && !isReadOnlyRoleWriteAllowed(rawPath, cwd, extraDirs)) {
+      respond({
+        decision: "deny",
+        reason: `[zee-worker:${workerRole}] 只读/门禁角色禁止写入仓库路径 "${rawPath}"（仅允许写入 ~/.local/state/zee/runs/、/tmp/zee-* 或 Artifact 目录）。`,
+      });
+      return;
+    }
+  }
+
+  // 3. 主会话锁态下执行路径白名单拦截
   if (gateMode !== "none" && WRITE_TOOLS.has(toolName) && (!workerCall || gateMode === "review")) {
     const rawPath = extractTargetPath(args);
     if (rawPath) {
       const allowed = isWriteAllowedUnderGate(rawPath, cwd, gateMode, extraDirs);
       if (!allowed) {
         const hintMap = {
-          plan: "~/.local/state/zee/runs/、.scratch/、docs/plans/ 或 Antigravity Artifact 目录",
-          "init-design": "~/.local/state/zee/runs/、.scratch/、.agents/、SPEC/ARCHITECTURE/DESIGN.md 或 Artifact 目录",
-          review: "~/.local/state/zee/runs/ 或 Antigravity Artifact 目录",
+          plan: "~/.local/state/zee/runs/、/tmp/zee-*、.scratch/、docs/plans/、docs/adr/、GLOSSARY.md 或 Artifact 目录",
+          "init-design": "~/.local/state/zee/runs/、/tmp/zee-*、.scratch/、.agents/、docs/adr/、SPEC/ARCHITECTURE/GLOSSARY/DESIGN.md 或 Artifact 目录",
+          review: "~/.local/state/zee/runs/、/tmp/zee-* 或 Artifact 目录",
         };
         respond({
           decision: "deny",
@@ -289,7 +339,7 @@ function handlePreToolUse(payload, cwd) {
   respond({});
 }
 
-function findLatestNightStateForRepo(cwd) {
+function findLatestNightStateForRepo(cwd, conversationId = "") {
   if (!cwd || !fs.existsSync(RUNS_ROOT)) return null;
   const absRepo = path.resolve(cwd);
   const base = path.basename(absRepo).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "task";
@@ -304,6 +354,8 @@ function findLatestNightStateForRepo(cwd) {
     try {
       const st = JSON.parse(fs.readFileSync(sp, "utf8"));
       if (st.mode !== "night") continue;
+      // 若 state.json 显式绑定了 conversationId，则仅匹配当前会话，防止跨会话串扰
+      if (st.conversationId && conversationId && st.conversationId !== conversationId) continue;
       if (!latest || String(st.updatedAt || "").localeCompare(String(latest.updatedAt || "")) > 0) {
         latest = st;
       }
@@ -330,12 +382,13 @@ function handleStop(payload, cwd) {
     return;
   }
 
-  const nightState = findLatestNightStateForRepo(cwd || sessionState.cwd);
-  const terminalStatuses = new Set(["completed", "paused", "planned"]);
-  if (nightState && !terminalStatuses.has(String(nightState.status || ""))) {
+  const nightState = findLatestNightStateForRepo(cwd || sessionState.cwd, cid);
+  // 关键修复 [C4]：仅在已通过人类 Trust Gate 真正进入 status==="running" 时守护断尾；
+  // initialized / awaiting-approval 阶段必须放行，允许人类确认！
+  if (nightState && String(nightState.status || "") === "running") {
     respond({
       decision: "continue",
-      reason: `[zee-night] 检测到当前过夜任务 (${nightState.slug}) 仍处于 status="${nightState.status}" 且尚未交付最终中文晨报或安全暂停。请先用 zee-tool.mjs update-state 更新 state.json 并输出中文晨报后再结束回合。`,
+      reason: `[zee-night] 检测到当前过夜任务 (${nightState.slug}) 仍处于 status="running" 且尚未交付最终中文晨报或安全暂停。请先用 zee-tool.mjs update-state 更新 state.json 并输出中文晨报后再结束回合。`,
     });
     return;
   }

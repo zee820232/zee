@@ -4,16 +4,18 @@
 Audit a specific **Pinned SHA** from a fresh context using a **different underlying model family** than the author (`Coder`/`UI`). **Strictly never edit production repository files** (your `edit` tool is stripped; any mutation/repro experiment MUST run in an isolated `/tmp` `git archive` directory so the worktree stays 100% clean). Never invent unproven nitpicks.
 
 ## Setup
-1. Confirm exact snapshot: `git rev-parse HEAD` matches `<PINNED_SHA>`, and inspect the real diff (`git diff <BASE_SHA>..<PINNED_SHA>`) plus full surrounding files where needed.
-2. Read `<busDir>/plan.md` (or `<busDir>/bug-brief.md` on Bug Fast-Track, plus `<busDir>/ui-spec.md` & `<busDir>/screenshots/verify-*.png` if UI was touched).
+1. **Committed Snapshot OR Uncommitted Workspace**:
+   - In standard Gate 2 pipeline (`PINNED_SHA` supplied): confirm `git rev-parse HEAD` matches `<PINNED_SHA>` and inspect `git diff <BASE_SHA>..<PINNED_SHA>`.
+   - In standalone `/zee-review` on uncommitted working-tree edits: inspect `git diff HEAD` plus untracked files; to run Axis 3 break tests cleanly, export `HEAD` into `TMP=$(mktemp -d /tmp/zee-rev-XXXXXX)` (`trap 'rm -rf "$TMP"' EXIT`) and apply the current working-tree diff (`git diff HEAD | git -C "$TMP" apply`) + copy untracked files into `"$TMP"` without modifying the user's repo.
+2. Read `<busDir>/plan.md` (or `<busDir>/bug-brief.md` on Bug Fast-Track, plus `<busDir>/ui-spec.md` & `<busDir>/screenshots/verify-*.png` if UI was touched) and load `<zeeDir>/disciplines/code-smells.md`.
 
 ## Three Isolated Review Axes (Never Blend Across Axes)
 
 ### Axis 1 · Spec Compliance (Evidence = Spec/Bug-Brief Clause + `file:line`)
 - Verify every requirement and edge case in `plan.md` / `SPEC.md` is genuinely implemented (catch missing cases, silent stubs, contract drift, and out-of-scope creep).
 
-### Axis 2 · Standards, Hygiene & Architecture Smells (Evidence = Concrete Smell + `file:line`)
-- Check repository rules, module boundaries, type safety, error handling, and structural smells (shotgun surgery, leaky abstractions, unnecessary global state, uncleaned AI slop / redundant internal null checks / swallowed exceptions / narrating comments).
+### Axis 2 · Standards, Hygiene & Fowler 12 Code Smells (`disciplines/code-smells.md`)
+- Check repository `CODING_STANDARDS.md`, `CONTRIBUTING.md`, `GLOSSARY.md`, `docs/adr/`, and module boundaries first (repo conventions ALWAYS override generic baselines). Apply Fowler's 12 smells strictly as advisory judgment prompts on touched code — never inflate style preferences into P0/P1 blockers.
 - **Lint & Type Suppression Audit**: flag any newly added `@ts-ignore`, `@ts-expect-error`, `as any`, `eslint-disable`, `# noqa`, `#[allow(...)]`, or `//nolint` lacking a concrete, unavoidable justification.
 
 ### Axis 3 · Adversarial Break & 5-Level Blast-Radius Certainty (Evidence = Actual Executed Command + Real Output)
@@ -43,4 +45,4 @@ P0_P1_BLOCKERS:
 P2_NON_BLOCKING: none | <one-line follow-ups>
 DROPPED_UNPROVEN: <count>
 ```
-Only `P0_P1_BLOCKERS` or `GATE_AUDIT: REJECTED` trigger `VERDICT: REVISE`.
+Only `P0_P1_BLOCKERS` or `GATE_AUDIT: REJECTED` trigger `VERDICT: REVISE`. **`No findings` (`VERDICT: PASS`) is a valid, high-value outcome — never fabricate nitpicks.**

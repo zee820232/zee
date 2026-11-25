@@ -60,14 +60,15 @@ For every slot, store:
 ## Step 4: Active-Harness Conflict Review & Optional AGY Auto-Routing (Approval Required)
 
 Present ONLY the conflicts relevant to the active harness surfaced by `doctor` / `audit-rules`, explaining each risk in Chinese.
-- **Never modify user rules or settings silently.** Ask the user in Chinese before applying any change (for example, unblocking masked models in `~/.pi/agent/settings.json` `enabledModels`, excluding conflicting skills, disabling `agystack` in `~/.gemini/config/config.json`, or cleaning hardcoded rules in `~/CLAUDE.md`).
+- **Never modify user rules or settings silently.** Ask the user in Chinese before applying any change (for example, unblocking masked models in `~/.pi/agent/settings.json` `enabledModels`, excluding conflicting orchestrator skills, disabling conflicting global-rule plugins in `~/.gemini/config/config.json`, or cleaning hardcoded rules in `~/CLAUDE.md`).
 - **Google Antigravity Only (Opt-In, Default OFF)**: ask whether the user wants to enable an optional lightweight global auto-routing rule (`~/.gemini/config/rules/zee-auto.md`, ≤15 lines, exempting casual chat and ≤1-file trivial edits with explicit opt-out — equivalent to Pi `/zee-mode auto`). Default recommendation is **关闭（仅用 `agy --agent zee` 与显式 `/zee*` 命令，零打扰）**; if enabled, it can be removed anytime via `/zee-setup`.
 - Only if the user explicitly asks to replicate `zee` into other harnesses, run:
   ```bash
   node "<zeeDir>/scripts/zee-tool.mjs" symlinks --apply
   ```
 
-## Step 5: Optional Project Contract, Verify Map & Summary
+## Step 5: Optional Project Contract, `verify-<app>` Skill & Summary
 
-1. If inside a git repo without `<repo>/.agents/zee.project.json`, ask in Chinese whether to generate it with discovered `testCmds`, `buildCmd`, `lintCmd`, `riskPaths`, `uiGlobs`, and `denyCommands` (plus optional `.agents/verify-map.md` for multi-screen UI / multi-command CLI projects).
-2. Summarize the saved config path, active harness, `doctor` health status, budget preset, and usage examples in Chinese (`/zee-plan`、`/zee-init`、`/zee <需求>`、`/zee-review`、`/zee-night`).
+1. If inside a git repo without `<repo>/.agents/zee.project.json`, ask in Chinese whether to generate it with discovered `testCmds`, `buildCmd`, `lintCmd`, `riskPaths`, `uiGlobs`, and `denyCommands`.
+2. If the repo is a real UI, CLI/TUI, game, desktop, or service app without `<projectSkillsDir>/verify-<app>/SKILL.md`, offer in Chinese to run `disciplines/verification-skill.md` (`verify-init` / `verify-maintain`) to generate and **live-prove** a committed project verification skill + `features/` map.
+3. Summarize the saved config path, active harness, `doctor` health status, budget preset, and usage examples in Chinese (`/zee-plan`、`/zee-init`、`/zee <需求>`、`/zee-review`、`/zee-arch`、`/zee-retro`、`/zee-night`).

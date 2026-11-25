@@ -172,4 +172,65 @@ test("extractModelFamily 与 enforcePiRoleTools 保持最小权限与家族精�
 
   const judgeTools = enforcePiRoleTools("judge", ["read", "bash", "edit", "write"]);
   assert.deepEqual(judgeTools, ["read"]);
+
+  // v4.1 家族别名归一化
+  assert.equal(extractModelFamily("anthropic"), "claude");
+  assert.equal(extractModelFamily("anthropic/claude-sonnet-4"), "claude");
+  assert.equal(extractModelFamily("google"), "gemini");
+  assert.equal(extractModelFamily("xai"), "grok");
+});
+
+test("v4.1 回归 [H1/H2]：放行项目内 rm -rf lib/bin/var/dev，同时穿透 bash -e -c / sh --norc -c 拦截删根", () => {
+  const proj = "/Users/zee/my-project";
+  assert.equal(evaluateDestructiveCommand("rm -rf lib", proj), null);
+  assert.equal(evaluateDestructiveCommand("rm -rf bin var dev", proj), null);
+  assert.ok(evaluateDestructiveCommand("rm -rf /lib", proj));
+  assert.ok(evaluateDestructiveCommand("rm -rf /", proj));
+  assert.ok(evaluateDestructiveCommand('bash -e -c "rm -rf /"', proj));
+  assert.ok(evaluateDestructiveCommand('sh --norc -c "rm -rf /"', proj));
+  assert.ok(evaluateDestructiveCommand('bash -o pipefail -c "rm -rf ~"', proj));
+
+  // Heredoc 文档正文包含 rm -rf / 不得误报
+  const docHeredoc = `cat <<'EOF' > /tmp/zee-doc/note.md
+Never run rm -rf / in production!
+EOF`;
+  assert.equal(evaluateDestructiveCommand(docHeredoc, proj), null);
+});
+
+test("v4.1 回归 [H3]：denyCommands 放行只读搜索与 commit 消息；词法锁支持 export/rm 白名单/领域文档并拦截内联写码", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v41-guard-"));
+  try {
+    fs.mkdirSync(path.join(tmpRepo, ".agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRepo, ".agents", "zee.project.json"),
+      JSON.stringify({ denyCommands: ["--live", "deploy --prod"] }),
+    );
+    // 只读搜索、commit 消息与 heredoc 文档放行
+    assert.equal(checkProjectDenyCommands('rg "--live" src/', tmpRepo), null);
+    assert.equal(checkProjectDenyCommands('git commit -m "block --live in prod"', tmpRepo), null);
+    assert.equal(checkProjectDenyCommands(`cat <<'EOF' > /tmp/zee-note/a.md\nforbid --live\nEOF`, tmpRepo), null);
+    // 嵌套带前缀标志的真实违规命令仍必须硬拦
+    assert.ok(checkProjectDenyCommands('bash -e -c "node run.js --live"', tmpRepo));
+
+    const busDir = path.join(RUNS_ROOT, "demo-v41", "s");
+    // export 变量跟踪、白名单 rm/tmp、GLOSSARY/ADR/docs/SPEC 均放行
+    assert.equal(checkBashUnderGate(`export B=${busDir}; echo hi > $B/context.md`, tmpRepo, "plan"), null);
+    assert.equal(checkBashUnderGate("rm .scratch/old.md && rm -rf /tmp/zee-probe-123", tmpRepo, "plan"), null);
+    assert.equal(checkBashUnderGate("echo x > /tmp/zee-probe-123/a.js", tmpRepo, "review"), null);
+    assert.equal(checkBashUnderGate("cat > docs/adr/0001-auth.md", tmpRepo, "plan"), null);
+    assert.equal(checkBashUnderGate("cat > GLOSSARY.md", tmpRepo, "plan"), null);
+    assert.equal(checkBashUnderGate("cat > docs/SPEC.md", tmpRepo, "init-design"), null);
+
+    // 此前可绕过的假阴性必须硬拦截
+    assert.ok(checkBashUnderGate(`python3 - <<'EOF'\nopen("src/app.ts","w").write("hack")\nEOF`, tmpRepo, "plan"));
+    assert.ok(checkBashUnderGate(`node -e "require('fs').writeFileSync('src/app.ts','x')"`, tmpRepo, "review"));
+    assert.ok(checkBashUnderGate("git branch rogue-branch", tmpRepo, "plan"));
+    assert.ok(checkBashUnderGate(`node /path/to/zee-tool.mjs cleanup-worktrees ${tmpRepo} --prune-safe`, tmpRepo, "review"));
+    // 只读 cleanup-worktrees（不带 --prune-safe）仍放行
+    assert.equal(checkBashUnderGate(`node /path/to/zee-tool.mjs cleanup-worktrees ${tmpRepo}`, tmpRepo, "review"), null);
+    // 业务目录 rm 仍硬拦截
+    assert.ok(checkBashUnderGate("rm src/app.ts", tmpRepo, "plan"));
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
 });

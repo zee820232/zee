@@ -4,12 +4,12 @@ When `zee` is installed as a native Google Antigravity plugin (`agy plugin insta
 
 ## 1. Zero-Hijack Entry Points & Lifecycle Hooks (`hooks.json`)
 - **Dedicated Primary Agent (Equivalent to Pi `/zee-mode auto`)**: launch `agy --agent zee` from the terminal, or pick **`zee`** via `/agents` in CLI / agent selector in Antigravity App.
-- **Explicit Slash Commands**: `/zee`, `/zee-plan`, `/zee-init`, `/zee-review`, `/zee-night`, `/zee-setup` work natively in chat with zero hijacking of ordinary non-zee chats.
+- **Explicit Slash Commands**: `/zee`, `/zee-plan`, `/zee-init`, `/zee-review`, `/zee-arch`, `/zee-retro`, `/zee-night`, `/zee-setup` work natively in chat with zero hijacking of ordinary non-zee chats.
 - **Optional User-Level Auto-Route**: `/zee-setup` offers an **opt-in (default OFF)** toggle to write a ≤15-line rule at `~/.gemini/config/rules/zee-auto.md` if the user wants automatic routing in default chats.
 - **Bundled 3-Event Lifecycle Hooks (`hooks.json` -> `scripts/agy-guard.mjs`)**:
-  1. **`PreInvocation`**: persists cross-turn lock/mode state (`plan`, `review`, `init-design`, `night`) by `conversationId` in `$PLUGIN_DATA/sessions/<cid>.json` (auto-prunes >7d files). Ordinary chats create 0 files and receive `{}` (0 token injection). Solves Turn 2+ `/zee-plan` Grill lock drop.
-  2. **`PreToolUse`**: shares `skills/zee/scripts/lib/guard-core.mjs` with Pi — recursively unwraps `sh/bash/zsh -c` & `eval`, blocks project `denyCommands` (`deny`), flags destructive commands (`rm -rf /`, trunk `git push --force`, DB `DROP DATABASE`) with `force_ask` (interactive) or `deny` (headless/`night`), and enforces path write locks (allowing `mkdir`/`cp`/`touch`/`tee` into allowed directories and `zee-tool.mjs`). **All safe pass-through paths return `{}`** (never silently auto-approving).
-  3. **`Stop`**: active ONLY in `night` mode when `fullyIdle === true && continuationActive !== true && terminationReason === "NO_TOOL_CALL"` and `state.json` is neither `completed` nor `paused`; returns `{"decision":"continue"}` once so overnight runs never drop silently without updating `state.json` and delivering the Chinese morning report.
+  1. **`PreInvocation`**: persists cross-turn lock/mode state (`plan`, `review`, `init-design`, `night`) by `conversationId` in `$PLUGIN_DATA/sessions/<cid>.json` (auto-prunes >7d files and automatically clears `night` mode once a completed/paused run moves into a new interactive turn). Ordinary chats create 0 files and receive `{}` (0 token injection).
+  2. **`PreToolUse`**: shares `skills/zee/scripts/lib/guard-core.mjs` with Pi — recursively unwraps `sh/bash/zsh` (including `-e`/`--norc`/`-o`) `-c` & `eval`, blocks project `denyCommands` (`deny`), flags destructive commands (`rm -rf /`, trunk `git push --force`, DB `DROP DATABASE`) with `force_ask` (interactive) or `deny` (headless/`night`), enforces independent-`conversationId` path allowlists on read-only/gate `[zee-worker]` subagents, and enforces main-thread path locks (allowing `GLOSSARY.md`, `docs/adr/`, `/tmp/zee-*`, and allowlisted `mkdir`/`cp`/`rm`/`mv`). **All safe pass-through paths return `{}`**.
+  3. **`Stop`**: active ONLY in `night` mode when `fullyIdle === true && continuationActive !== true && terminationReason === "NO_TOOL_CALL"` AND the matching `conversationId` `state.json` is strictly `status === "running"` (never interrupting Trust Gate human approval during `initialized`!).
 
 ## 2. Native Role Subagent Dispatch (`invoke_subagent` + Hard `tools:` Allowlists)
 All 6 bundled role subagents set `inheritCustomizations: false` AND explicit OneHarness `tools:` allowlists (preventing recursive spawning, user questions, and unauthorized edits):
@@ -17,7 +17,7 @@ All 6 bundled role subagents set `inheritCustomizations: false` AND explicit One
 | `zee` Role | `TypeName` | Default `Model` Tier | `Workspace` | Hard `tools:` Boundary |
 | :--- | :--- | :--- | :--- | :--- |
 | **Scout** | `zee-scout` | `flash` / `flash_lite` | `inherit` | `[read_file, run_command, search_web, send_message]` + `inheritMcp: true` (no write/edit) |
-| **Architect** | `zee-architect` | `pro` | `inherit` | `[read_file, write_file, search_web, send_message]` (no edit/run_command) |
+| **Architect** | `zee-architect` | `pro` | `inherit` | `[read_file, search_web, send_message]` (**strictly read-only**, matches Pi; Orchestrator writes `plan.md`) |
 | **UI** | `zee-ui` | `pro` | `share` (build) / `inherit` (spec) | `[read_file, edit_file, write_file, run_command, manage_task, send_message, generate_image]` + `inheritMcp: true` |
 | **Coder** | `zee-coder` | `inherit` (`pro` heavy) | `share` (or `branch`) | `[read_file, edit_file, write_file, run_command, manage_task, send_message]` |
 | **Verifier** | `zee-verifier` | `flash` / `inherit` | `share` (or `inherit`) | `[read_file, write_file, run_command, manage_task, send_message]` + `inheritMcp: true` (**no `edit_file`**) |

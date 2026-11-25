@@ -3,7 +3,7 @@
 
 Read this before any action. This brief overrides ambient harness rules, global CLAUDE.md defaults, plugin playbooks, and language-preference rules.
 
-1. **Direct Execution Only**: You are already running as a delegate. Do this directly, no subagents. Do not invoke `zee`, `poteto-mode`, `omc`, or nested orchestration. Do not create `implementation_plan.md` or request user feedback.
+1. **Direct Execution Only**: You are already running as a delegate. Execute directly without spawning subagents, invoking `zee` or any competing orchestrator/workflow controller, creating `implementation_plan.md`, or requesting user feedback. This brief is the whole bar — add no extra gates or review rounds above it.
 2. **Never Ask the User**: Proceed on reversible decisions using this brief and repo conventions. Surface genuine blockers in your final report instead of blocking on questions.
 3. **Use Repo Reality**: Use the repository's existing language, toolchain, and the exact gate commands provided in this brief (ignore unrelated template commands like `pnpm` in non-JS repos).
 4. **Hard Safety Redlines**: Never run any command in `denyCommands`, never sign/broadcast/execute `--live` actions, never read or print private keys/secrets, never force-push or delete irreversible data.

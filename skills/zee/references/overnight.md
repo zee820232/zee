@@ -10,8 +10,10 @@ Do not start unattended execution until all 5 invariants are locked (confirm wit
 4. **Domain Redlines Verified**: confirm `denyCommands` in `zee.project.json` blocks `--live`, signing, deploys, and secrets.
 5. **Hard Budget Caps Recorded in `state.json`**: default `maxUnits: 12`, `maxDelegates: 40`, `maxHeavyEscalations: 6`, `maxConsecutiveParked: 2`, plus **70% cutoff threshold**.
 
-## 2. Unit 0 (Harness, Verify Map & Baseline) + Unit 1 (Canary)
-- **Unit 0**: verify an automated Verification Harness exists; if missing, build minimal runnable verification script (and optional `.agents/verify-map.md` for multi-screen/CLI apps) and capture pre-change Baseline (test counts, metrics, or baseline UI screenshots). Log baseline row to `decisions.tsv` and update `state.json` via `zee-tool.mjs update-state --mode night --status running`.
+## 2. Unit 0 (Harness, Verify Skill & Baseline) + Unit 1 (Canary)
+- **Unit 0**: verify an automated Verification Harness (or `<projectSkillsDir>/verify-<app>/SKILL.md`) exists; if missing, build a minimal runnable verification harness and capture pre-change Baseline (test counts, metrics, or baseline UI screenshots). Log baseline row to `decisions.tsv` and ONLY AFTER Pre-Launch Trust Gate approval transition state to `running` via:
+  `zee-tool.mjs update-state "<busDir>" --mode night --status running --conversation-id "<cid>"`
+  *(On Antigravity, the bundled `Stop` hook guards ONLY `status === "running"` bound to `<cid>`, so waiting for human approval during `initialized` never triggers premature continuation.)*
 - **Unit 1 (Canary)**: run the first vertical slice end-to-end by itself before enabling any parallel fan-out. Confirm atomic worktree checkout, bus reads, Gate 1 `Verifier` `PASS` -> Gate 2 `Reviewer` `PASS`, and merge work cleanly.
 
 ## 3. Execution Loop, 70% Cutoff, Context Hygiene & Idempotency

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Retro"
+  short_description: "会话复盘与 4 级纠错飞轮：把重复错因固化进架构/Lint/Hook/测试并证明有效"
+policy:
+  allow_implicit_invocation: false

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v4.0.1 — 零依赖纯 Node 多模型工作流辅助引擎
+ * zee-tool.mjs v4.1.0 — 零依赖纯 Node 多模型工作流辅助引擎
  *
  * 子命令：
  *   validate [configPath] [--check-live]
  *   audit-rules [--all | --harness <name>]
  *   symlinks [--apply]
- *   init-run <repoRoot> <slug>
- *   update-state <busDir> [--status ...] [--mode ...] [--level ...] [--predicate ...] [--resume-next ...] [--unit-upsert '<json>'] [--inc-delegates] [--fallback '<str>']
+ *   init-run <repoRoot> <slug> [--conversation-id <cid>]
+ *   update-state <busDir> [--status ...] [--mode ...] [--level ...] [--predicate ...] [--resume-next ...] [--conversation-id <cid>] [--unit-upsert '<json>'] [--inc-delegates] [--fallback '<str>']
  *   list-runs [repoRoot | --all]
  *   log-decision <busDir> <unit> <phase> <decision> <why> <evidence> <result>
  *   log-decision --bus <dir> --unit <u> --phase <p> --decision <d> --why <w> --evidence <e> --result <r>
@@ -31,7 +31,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE_SKILLS_DIR = path.resolve(SCRIPT_DIR, "..", "..");
 const REPO_ROOT = path.resolve(SOURCE_SKILLS_DIR, "..");
 const RUNS_ROOT = path.join(HOME, ".local", "state", "zee", "runs");
-const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-night"];
+const SKILL_NAMES = ["zee", "zee-setup", "zee-plan", "zee-init", "zee-review", "zee-night", "zee-arch", "zee-retro"];
 
 const HARNESS_TARGETS = [
   { name: "agents", dir: path.join(HOME, ".agents", "skills"), parentMustExist: path.join(HOME, ".agents") },
@@ -69,11 +69,47 @@ function detectActiveHarness() {
   return "local";
 }
 
+const KNOWN_VALUE_FLAGS = new Set([
+  "harness",
+  "repo",
+  "bus",
+  "status",
+  "mode",
+  "level",
+  "predicate",
+  "resume-next",
+  "conversation-id",
+  "unit-upsert",
+  "fallback",
+  "unit",
+  "phase",
+  "decision",
+  "why",
+  "evidence",
+  "result",
+  "branch",
+  "base",
+  "surface",
+  "role",
+  "config",
+]);
+
+const KNOWN_BOOLEAN_FLAGS = new Set(["check-live", "all", "apply", "prune-safe", "help"]);
+
 function parseFlags(args) {
   const flags = {};
   const positional = [];
+  let endOfFlags = false;
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
+    if (endOfFlags) {
+      positional.push(token);
+      continue;
+    }
+    if (token === "--") {
+      endOfFlags = true;
+      continue;
+    }
     if (token.startsWith("--")) {
       const eqIdx = token.indexOf("=");
       if (eqIdx > 2) {
@@ -81,7 +117,23 @@ function parseFlags(args) {
       } else {
         const key = token.slice(2);
         const next = args[i + 1];
-        if (next !== undefined && !next.startsWith("--")) {
+        if (KNOWN_BOOLEAN_FLAGS.has(key)) {
+          flags[key] = true;
+        } else if (KNOWN_VALUE_FLAGS.has(key)) {
+          if (next !== undefined) {
+            flags[key] = next;
+            i += 1;
+          } else {
+            flags[key] = true;
+          }
+        } else if (key === "inc-delegates") {
+          if (next !== undefined && /^\d+$/.test(next)) {
+            flags[key] = next;
+            i += 1;
+          } else {
+            flags[key] = true;
+          }
+        } else if (next !== undefined && !next.startsWith("--")) {
           flags[key] = next;
           i += 1;
         } else {
@@ -96,7 +148,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v4.0.1 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v4.1.0 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
 
 可用命令：
   validate [配置文件] [--check-live]
@@ -419,41 +471,41 @@ function runAuditRules(args) {
 
   if (shouldCheck("antigravity")) {
     const geminiCfgPath = path.join(HOME, ".gemini", "config", "config.json");
-    const agystackRule = path.join(HOME, ".gemini", "config", "plugins", "agystack", "rules", "AGENTS.md");
-    if (fs.existsSync(agystackRule)) {
-      let disabled = false;
-      try {
-        const cfg = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));
-        disabled = cfg?.plugins?.agystack?.enabled === false;
-      } catch {}
-      findings.push({
-        harness: "antigravity",
-        file: agystackRule,
-        severity: disabled ? "info" : "high",
-        status: disabled ? "已禁用" : "存在冲突",
-        detail: disabled
-          ? "agystack 插件已在 ~/.gemini/config/config.json 中禁用"
-          : "常驻规则会强制拦截进入 poteto-mode 与原生 invoke_subagent；建议在 ~/.gemini/config/config.json 写入 plugins.agystack.enabled = false",
-      });
-    }
-    const useBendRule = path.join(HOME, ".gemini", "config", "plugins", "use-bend", "rules", "AGENTS.md");
-    if (fs.existsSync(useBendRule)) {
-      findings.push({
-        harness: "antigravity",
-        file: useBendRule,
-        severity: "low",
-        status: "提示",
-        detail: "可能偏向使用 Bend 2 写脚本；zee 的 worker.md 已明确要求沿用仓库现有语言",
-      });
+    let geminiCfg = {};
+    try {
+      if (fs.existsSync(geminiCfgPath)) geminiCfg = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));
+    } catch {}
+
+    // 通用扫描：检测其他已启用插件是否携带全局常驻 rules/AGENTS.md（可能劫持 zee 工作流）
+    const pluginsDir = path.join(HOME, ".gemini", "config", "plugins");
+    if (fs.existsSync(pluginsDir)) {
+      for (const entry of fs.readdirSync(pluginsDir)) {
+        if (entry === "zee") continue;
+        const rulePath = path.join(pluginsDir, entry, "rules", "AGENTS.md");
+        if (!fs.existsSync(rulePath)) continue;
+        const disabled = geminiCfg?.plugins?.[entry]?.enabled === false;
+        let ruleBody = "";
+        try {
+          ruleBody = fs.readFileSync(rulePath, "utf8");
+        } catch {}
+        const looksCompetingController = /orchestrat|subagent|workflow|mode|always invoke|mandatory/i.test(ruleBody);
+        findings.push({
+          harness: "antigravity",
+          file: rulePath,
+          severity: disabled ? "info" : looksCompetingController ? "high" : "low",
+          status: disabled ? "已禁用" : looksCompetingController ? "存在全局规则冲突" : "提示",
+          detail: disabled
+            ? `外部插件 ${entry} 已在 ~/.gemini/config/config.json 中禁用`
+            : looksCompetingController
+              ? `外部插件 ${entry} 携带全局常驻 rules/AGENTS.md，可能干扰 zee 编排与子代理派发；建议在 ~/.gemini/config/config.json 设 plugins.${entry}.enabled = false`
+              : `外部插件 ${entry} 携带全局 rules/AGENTS.md，zee 的 worker.md 已在子代理中做隔离`,
+        });
+      }
     }
 
     const agyZeePlugin = path.join(HOME, ".gemini", "config", "plugins", "zee");
     if (fs.existsSync(agyZeePlugin)) {
-      let pluginEnabled = true;
-      try {
-        const cfg = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));
-        if (cfg?.plugins?.zee?.enabled === false) pluginEnabled = false;
-      } catch {}
+      const pluginEnabled = geminiCfg?.plugins?.zee?.enabled !== false;
       const dupDirs = [];
       for (const checkRoot of [path.join(HOME, ".gemini", "config", "skills"), path.join(HOME, ".agents", "skills")]) {
         for (const skillName of SKILL_NAMES) {
@@ -477,7 +529,7 @@ function runAuditRules(args) {
           ? "zee 插件已安装但在 ~/.gemini/config/config.json 中处于禁用状态，可用 agy plugin enable zee 启用"
           : dupDirs.length > 0
             ? `Antigravity 已以原生插件加载 zee，但同时发现重复技能副本（${dupDirs.join("、")}）；建议删除重复目录`
-            : "Antigravity 以原生插件单源加载 zee（含 6 技能 + 7 代理 + 生命周期安全 Hook）",
+            : `Antigravity 以原生插件单源加载 zee（含 ${SKILL_NAMES.length} 技能 + 7 代理 + 生命周期安全 Hook）`,
       });
     }
   }
@@ -598,9 +650,11 @@ function cmdAuditRules(args) {
   console.log(JSON.stringify(runAuditRules(args), null, 2));
 }
 
-function cmdInitRun(repoPath, slug) {
+function cmdInitRun(args) {
+  const { flags, positional } = parseFlags(args);
+  const [repoPath, slug] = positional;
   if (!repoPath || !slug) {
-    console.error("用法：init-run <仓库路径> <任务名>");
+    console.error("用法：init-run <仓库路径> <任务名> [--conversation-id <cid>]");
     process.exit(1);
   }
   const absRepo = path.resolve(repoPath);
@@ -619,6 +673,7 @@ function cmdInitRun(repoPath, slug) {
       slug: cleanSlug,
       busDir,
       activeHarness: detectActiveHarness(),
+      conversationId: typeof flags["conversation-id"] === "string" && flags["conversation-id"].trim() ? flags["conversation-id"].trim() : null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       mode: "standard",
@@ -645,7 +700,7 @@ function cmdUpdateState(args) {
   const { flags, positional } = parseFlags(args);
   const busDir = flags.bus || positional[0];
   if (!busDir) {
-    console.error("用法：update-state <总线目录> [--status <s>] [--mode <m>] [--level <l>] [--predicate <p>] [--resume-next <r>] [--unit-upsert '<json>'] [--inc-delegates] [--fallback '<str>']");
+    console.error("用法：update-state <总线目录> [--status <s>] [--mode <m>] [--level <l>] [--predicate <p>] [--resume-next <r>] [--conversation-id <cid>] [--unit-upsert '<json>'] [--inc-delegates] [--fallback '<str>']");
     process.exit(1);
   }
   const statePath = path.join(busDir, "state.json");
@@ -659,6 +714,9 @@ function cmdUpdateState(args) {
   if (typeof flags.mode === "string") st.mode = flags.mode;
   if (typeof flags.level === "string") st.level = flags.level;
   if (typeof flags.predicate === "string") st.predicate = flags.predicate;
+  if (typeof flags["conversation-id"] === "string" && flags["conversation-id"].trim()) {
+    st.conversationId = flags["conversation-id"].trim();
+  }
   if (typeof flags["resume-next"] === "string") {
     st.resumeNext = flags["resume-next"] === "null" ? null : flags["resume-next"];
   }
@@ -854,11 +912,47 @@ function isSquashMergedByPatchId(absRepo, baseRef, branchRef) {
   }
 }
 
+function detectDefaultBaseRef(absRepo) {
+  const candidates = ["origin/HEAD", "origin/main", "origin/master", "main", "master", "HEAD"];
+  for (const ref of candidates) {
+    try {
+      const resolved = execFileSync("git", ["-C", absRepo, "rev-parse", "--verify", "--quiet", ref], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (resolved) return ref;
+    } catch {}
+  }
+  return "HEAD";
+}
+
+function isWorktreeActiveLocked(wtPath) {
+  const lockPath = `${wtPath}.zee-lock.json`;
+  if (!fs.existsSync(lockPath)) return false;
+  try {
+    const data = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const pid = Number(data?.pid);
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        if (e && e.code === "EPERM") return true;
+        return false;
+      }
+    }
+    const ageMs = Date.now() - Date.parse(data?.createdAt || "");
+    return Number.isFinite(ageMs) && ageMs < 2 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
 function cmdCleanupWorktrees(args) {
   const { flags, positional } = parseFlags(args);
   const absRepo = path.resolve(positional[0] || process.cwd());
   const pruneSafe = Boolean(flags["prune-safe"]);
-  const baseRef = typeof flags.base === "string" && flags.base.trim() ? flags.base.trim() : "HEAD";
+  const baseRef = typeof flags.base === "string" && flags.base.trim() ? flags.base.trim() : detectDefaultBaseRef(absRepo);
 
   let porcelain;
   try {
@@ -910,10 +1004,12 @@ function cmdCleanupWorktrees(args) {
     }
 
     const isPrimary = idx === 0;
+    const isActiveLocked = !isPrimary && isWorktreeActiveLocked(wtPath);
     const isZeeRunDetached = isDetached && wtPath.includes(`${path.sep}zee${path.sep}runs${path.sep}`);
     let bucket = "primary";
     if (!isPrimary) {
-      if (dirtyFiles > 0) bucket = "keep_dirty";
+      if (isActiveLocked) bucket = "active_hold";
+      else if (dirtyFiles > 0) bucket = "keep_dirty";
       else if (isMerged || isZeeRunDetached) bucket = "safe_to_prune";
       else if (isDetached) bucket = "safe_to_prune_detached";
       else bucket = "review_unmerged";
@@ -923,6 +1019,9 @@ function cmdCleanupWorktrees(args) {
     if (pruneSafe && (bucket === "safe_to_prune" || bucket === "safe_to_prune_detached")) {
       try {
         execFileSync("git", ["-C", absRepo, "worktree", "remove", "--force", wtPath], { stdio: "ignore" });
+        try {
+          fs.rmSync(`${wtPath}.zee-lock.json`, { force: true });
+        } catch {}
         prunedNow = true;
         pruned.push(wtPath);
       } catch {}
@@ -937,6 +1036,7 @@ function cmdCleanupWorktrees(args) {
       scratchFiles,
       mergedIntoBase: isMerged,
       mergeMethod,
+      activeLocked: isActiveLocked,
       bucket,
       pruned: prunedNow,
       pruneHint: !prunedNow && bucket.startsWith("safe_to_prune") ? `git -C "${absRepo}" worktree remove "${wtPath}"` : null,
@@ -974,42 +1074,97 @@ function cmdCheckPlan(args) {
     else missing.push(c.label);
   }
 
-  // 检查是否包含单切片过肥信号（超过 5 文件或 >400 LOC）
+  // 仅在切片清单区块（或显式 Slice/M/U 切片条目行）检查单切片硬预算，避免误报项目背景总文件数
   const warnings = [];
-  const fileCountMatches = text.match(/(\d+)\s*(?:个?文件|files)/gi) || [];
-  for (const m of fileCountMatches) {
-    const num = Number(m.match(/\d+/)?.[0] || 0);
-    if (num > 5 && num < 50) {
-      warnings.push(`检测到 "${m}"，请核实单个垂直切片是否超出硬预算（建议 ≤5 文件 / ≤400 LOC）`);
-      break;
+  const lines = text.split(/\r?\n/);
+  let inSliceSection = false;
+  const sliceDeps = new Map();
+  for (const line of lines) {
+    if (/^#{1,4}\s+/.test(line)) {
+      inSliceSection = /(vertical\s+slice|垂直切片|roadmap|里程碑|切片清单|slices?)/i.test(line);
+      continue;
     }
-  }
-  const locMatches = text.match(/(\d+)\s*(?:行|LOC|lines)/gi) || [];
-  for (const m of locMatches) {
-    const num = Number(m.match(/\d+/)?.[0] || 0);
-    if (num > 400 && num < 50000) {
-      warnings.push(`检测到 "${m}"，请核实单个垂直切片是否超出硬预算（建议 ≤400 LOC）`);
-      break;
+    const isSliceBullet = /^\s*[-*]\s*(?:\*\*)?(?:Slice|M|U|S)\s*\d+/i.test(line) || /\bblockedBy\b/i.test(line);
+    if (!inSliceSection && !isSliceBullet) continue;
+
+    const fm = line.match(/(\d+)\s*(?:个?文件|files)/i);
+    if (fm) {
+      const num = Number(fm[1]);
+      if (num > 5 && num < 50) {
+        warnings.push(`切片条目检测到 "${fm[0]}"，请核实单个垂直切片是否超出硬预算（建议 ≤5 文件 / ≤400 LOC）`);
+      }
+    }
+    const lm = line.match(/(\d+)\s*(?:行|LOC|lines)/i);
+    if (lm) {
+      const num = Number(lm[1]);
+      if (num > 400 && num < 50000) {
+        warnings.push(`切片条目检测到 "${lm[0]}"，请核实单个垂直切片是否超出硬预算（建议 ≤400 LOC）`);
+      }
+    }
+
+    // 提取切片 ID 与 blockedBy 依赖，用于环检测
+    const idMatch = line.match(/\b((?:Slice|M|U|S)\s*\d+)\b/i);
+    const depMatch = line.match(/blockedBy\s*[:=]\s*([^)\n;]+)/i);
+    if (idMatch && depMatch) {
+      const nodeId = idMatch[1].replace(/\s+/g, "").toUpperCase();
+      const rawDeps = depMatch[1];
+      if (!/^\s*(none|无|-)\s*$/i.test(rawDeps)) {
+        const deps = (rawDeps.match(/(?:Slice|M|U|S)\s*\d+/gi) || []).map((d) => d.replace(/\s+/g, "").toUpperCase());
+        sliceDeps.set(nodeId, deps);
+      } else {
+        sliceDeps.set(nodeId, []);
+      }
     }
   }
 
+  // DFS 检测 blockedBy 依赖环
+  const visiting = new Set();
+  const visited = new Set();
+  const cycles = [];
+  const dfs = (node, trail) => {
+    if (visiting.has(node)) {
+      cycles.push([...trail, node].join(" -> "));
+      return;
+    }
+    if (visited.has(node)) return;
+    visiting.add(node);
+    for (const dep of sliceDeps.get(node) || []) {
+      if (sliceDeps.has(dep)) dfs(dep, [...trail, node]);
+    }
+    visiting.delete(node);
+    visited.add(node);
+  };
+  for (const node of sliceDeps.keys()) dfs(node, []);
+  if (cycles.length > 0) {
+    missing.push(`切片 blockedBy 存在循环依赖: ${cycles.join("; ")}`);
+  }
+
   const ok = missing.length === 0;
-  console.log(JSON.stringify({ ok, planPath, passed, missing, warnings }, null, 2));
+  console.log(JSON.stringify({ ok, planPath, passed, missing, warnings: [...new Set(warnings)] }, null, 2));
   process.exit(ok ? 0 : 1);
+}
+
+const EFFORT_LADDER = ["off", "low", "medium", "high", "xhigh"];
+
+function adjustEffortByBudget(effort, budget) {
+  const base = EFFORT_LADDER.includes(effort) ? effort : effort === "max" ? "xhigh" : "medium";
+  let idx = EFFORT_LADDER.indexOf(base);
+  if (budget === "eco") idx = Math.max(1, idx - 1);
+  else if (budget === "max") idx = Math.min(EFFORT_LADDER.length - 1, idx + 1);
+  return EFFORT_LADDER[idx];
 }
 
 function normalizeModelForAgy(modelHint, tier, effort, surface) {
   const low = String(modelHint || "").trim().toLowerCase();
   const eff = effort && effort !== "max" ? effort : "high";
   if (surface === "swarm") {
-    if (low.includes("gemini-4-neon")) return low.match(/-(low|medium|high|xhigh)$/) ? low : `${low}-${eff}`;
-    if (low.includes("gemini-4-argon")) return low.match(/-(low|medium|high)$/) ? low : `${low}-${eff === "xhigh" ? "high" : eff}`;
-    if (low.includes("gemini-4-hydrogen")) return low.match(/-(low|medium|high|xhigh)$/) ? low : `${low}-${eff}`;
-    if (low) return low;
+    if (low && /-(low|medium|high|xhigh)$/.test(low)) return low;
+    if (low.includes("argon")) return `${low}-${eff === "xhigh" ? "high" : eff}`;
+    if (low && low !== "inherit" && low !== "auto") return `${low}-${eff}`;
     return "inherit";
   }
   // invoke_subagent 仅接受 4 枚举：inherit | pro | flash | flash_lite
-  if (low === "inherit" || low === "auto" || low.includes("gemini-4-argon") || low.includes("orchestrator")) return "inherit";
+  if (low === "inherit" || low === "auto" || low.includes("argon") || low.includes("orchestrator")) return "inherit";
   if (low.includes("flash-lite") || low.includes("flash_lite") || tier === "lite") return "flash_lite";
   if (low.includes("hydrogen") || low.includes("flash") || low.includes("haiku") || low.includes("swe-") || tier === "fast") return "flash";
   if (low.includes("neon") || low.includes("pro") || low.includes("opus") || tier === "pro") return "pro";
@@ -1023,37 +1178,68 @@ function cmdResolveModel(args) {
   const role = String(flags.role || "coder.standard").toLowerCase();
   const configPath = typeof flags.config === "string" ? flags.config : DEFAULT_CONFIG;
 
+  if (!fs.existsSync(configPath)) {
+    console.log(
+      JSON.stringify(
+        { ok: false, error: `未找到配置文件：${configPath}，请先执行 /zee-setup 生成配置。`, configPath },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
+  }
+
   let cfg = null;
-  if (fs.existsSync(configPath)) {
-    try {
-      cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    } catch {}
+  try {
+    cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch (e) {
+    console.log(JSON.stringify({ ok: false, error: `配置文件 JSON 解析失败：${e.message}`, configPath }, null, 2));
+    process.exit(1);
   }
 
   const getSlot = (r) => {
     const roles = cfg?.roles || {};
     if (r === "scout") return roles.scout;
     if (r === "architect" || r === "architect.primary") return roles.architect?.primary;
+    if (r.startsWith("architect.arena.")) {
+      const idx = Number(r.split(".")[2]);
+      return Array.isArray(roles.architect?.arenaPool) ? roles.architect.arenaPool[idx] || null : null;
+    }
+    if (r === "judge") return roles.judge || (Array.isArray(roles.reviewers) ? roles.reviewers[0] : null);
     if (r === "ui" || r === "ui.standard") return roles.ui?.standard;
     if (r === "ui.heavy") return roles.ui?.heavy;
     if (r === "coder" || r === "coder.standard") return roles.coder?.standard;
     if (r === "coder.heavy") return roles.coder?.heavy;
     if (r === "verifier") return roles.verifier;
     if (r === "reviewer" || r === "reviewer.0") return Array.isArray(roles.reviewers) ? roles.reviewers[0] : null;
-    if (r === "reviewer.1") return Array.isArray(roles.reviewers) ? roles.reviewers[1] : null;
+    if (r.startsWith("reviewer.")) {
+      const idx = Number(r.split(".")[1]);
+      return Array.isArray(roles.reviewers) ? roles.reviewers[idx] || null : null;
+    }
     return null;
   };
 
   const slot = getSlot(role);
-  const spec = slot?.prefer || slot || { family: "gemini", modelHint: "inherit", tier: "standard", effort: "medium" };
+  if (!slot) {
+    console.log(JSON.stringify({ ok: false, error: `配置中未定义角色槽位 "${role}"`, configPath, role }, null, 2));
+    process.exit(1);
+  }
+
+  const spec = slot?.prefer || slot;
+  const effectiveEffort = adjustEffortByBudget(spec.effort, cfg?.budget || "balanced");
 
   let resolved;
   if (harness === "agy" || harness === "antigravity") {
+    const agyBinding = slot?.bindings?.agy || slot?.bindings?.antigravity || null;
+    const hint = agyBinding?.model || spec.modelHint;
     resolved = {
       harness: "antigravity",
       surface,
       role,
-      model: normalizeModelForAgy(spec.modelHint, spec.tier, spec.effort, surface),
+      model: normalizeModelForAgy(hint, spec.tier, effectiveEffort, surface),
+      effectiveEffort,
+      budget: cfg?.budget || "balanced",
+      binding: agyBinding,
       fallbackOn429: "inherit",
       sourceSpec: spec,
     };
@@ -1064,7 +1250,8 @@ function cmdResolveModel(args) {
       role,
       modelHint: spec.modelHint,
       family: spec.family,
-      effort: spec.effort,
+      effort: effectiveEffort,
+      budget: cfg?.budget || "balanced",
       binding: slot?.bindings?.[harness] || null,
       backup: slot?.backup || null,
     };
@@ -1188,7 +1375,7 @@ switch (cmd) {
     cmdAuditRules(rest);
     break;
   case "init-run":
-    cmdInitRun(rest[0], rest[1]);
+    cmdInitRun(rest);
     break;
   case "update-state":
     cmdUpdateState(rest);

@@ -5,7 +5,7 @@ Independently verify that a specific **Pinned SHA** builds, passes deterministic
 
 ## Setup & Snapshot Discipline
 1. Verify exact target snapshot: `git rev-parse HEAD` matches `<PINNED_SHA>` in your isolated detached workspace.
-2. Load exact gate commands from `<repo>/.agents/zee.project.json` (plus `<repo>/.agents/verify-map.md` if present) or the brief.
+2. Load exact gate commands from `<repo>/.agents/zee.project.json` or the brief. **Project Verification Skill Priority**: if a repo-local `<projectSkillsDir>/verify-*/SKILL.md` (`.agents/skills/`, `.pi/skills/`, `.claude/skills/`, or `.cursor/skills/`) exists (or legacy `.agents/verify-map.md`), follow its exact `Launch -> Doctor -> Drive -> Evidence -> Cleanup` instructions instead of improvising ad-hoc scripts, and confirm captured evidence survives cleanup.
 3. Respect `denyCommands` strictly: never execute `--live`, real-money signing, deploy, or destructive commands. If proving a claim strictly requires a denied command, mark `INCONCLUSIVE` and explain why.
 4. **Cleanup Never Destroys Evidence**: when terminating spawned test servers or removing `/tmp` scratch directories, NEVER delete or overwrite artifacts/screenshots saved in `<busDir>`.
 

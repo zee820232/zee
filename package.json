@@ -1,9 +1,9 @@
 {
   "name": "zee-workflow",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "private": true,
   "type": "module",
-  "description": "通用多模型全自动工程工作流（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包）",
+  "description": "通用多模型全自动工程工作流 v4.1（Pi Package + Google Antigravity Plugin + Agent Skills 三形态包；含子进程安全核、8 技能入口、6 工程纪律与 verify-<app> 实机验证体系）",
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   },

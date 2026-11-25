@@ -2,24 +2,26 @@
 
 Triggered by `/zee-plan <idea/request>` or `/zee plan <idea/request>` (append `L3` or `debate` to force orthogonal multi-model Arena during Step 3). **All user-facing questions, decision summaries, and final handoff notes MUST be in Simplified Chinese (简体中文). Never write or edit production code in this mode.**
 
-> **Persistent Multi-Turn Write Lock**: both Pi Extension (`zee-gate` branch entry) and AGY `agy-guard.mjs` (`$PLUGIN_DATA/sessions/<cid>.json`) keep the `plan` write lock active across ALL Grill Q&A turns until you explicitly invoke `/zee`, `/zee-night`, or unlock. Safe `mkdir`/`cp` into allowed directories (`.scratch/`, `docs/plans/`, `~/.local/state/zee/runs/`) and `zee-tool.mjs` commands are permitted automatically.
+> **Persistent Multi-Turn Write Lock**: both Pi Extension (`zee-gate` branch entry) and AGY `agy-guard.mjs` (`$PLUGIN_DATA/sessions/<cid>.json`) keep the `plan` write lock active across ALL Grill Q&A turns until you explicitly invoke `/zee`, `/zee-night`, or unlock. Allowed writes include `<busDir>`, `/tmp/zee-*`, `.scratch/`, `docs/plans/`, `docs/adr/`, and `GLOSSARY.md` (for inline domain modeling).
 
 ## Step 1 · Ground Facts First (`Scout`)
 - **Existing Repo**: spawn read-only `Scout` (`roles/scout.md`) to collect `file:line` pointers, real gate commands, touched `riskPaths` / `uiGlobs`, domain glossary terms, and non-grep readers.
 - **Empty / 0→1 Idea**: run `Scout` in External & Toolchain Research mode (local runtimes + current stable framework APIs).
-- **Iron Rule**: never ask the user any fact that `Scout` can observe from the codebase or environment.
+- **Iron Rule**: never ask the user any fact that `Scout` can observe from the codebase or environment; background fact lookups should not block unrelated frontier questions.
 
-## Step 2 · Decision-Tree Grilling (Multi-Round in Chinese)
-Orchestrator works directly with the user (never delegate user interviews):
+## Step 2 · Decision-Tree Grilling + Active Domain Modeling (Multi-Round in Chinese)
+Load `<zeeDir>/disciplines/domain-modeling.md`. Orchestrator works directly with the user (never delegate user interviews):
 1. Build an internal decision tree of every unresolved **product, scope, UX, contract, or architecture trade-off** surfaced by Step 1.
-2. Ask along the current decision frontier in crisp Chinese batches (≤5 questions per round); **every question MUST carry `➡️ 推荐：<option>（理由）`**.
-3. Continue round by round until every high-impact fork is resolved (if the user says "其余按推荐定" / "approve defaults", lock all remaining defaults and proceed immediately).
+2. Ask along the current decision frontier in crisp Chinese batches (≤5 questions per round, separated by `---`); **every question MUST carry `➡️ 推荐：<option>（理由）` phrased so replying `是` / `yes` / `按推荐` cleanly adopts defaults**.
+3. **Inline Domain Modeling**: challenge vague or overloaded domain terms immediately, update `GLOSSARY.md` (including `_Avoid_` synonyms) inline, and write a concise 1-paragraph `docs/adr/NNNN-slug.md` **only** when all 3 ADR conditions hold (hard to reverse + confusing without context + real trade-off).
+4. **Optional Dual-Mode Prototype**: when a state-machine rule or visual direction fork is better seen than debated, run `references/specialized.md#4` (single-file pure HTML logic sandbox OR host-page `?variant=` UI switcher) before locking the plan.
+5. Continue round by round until every high-impact fork is resolved.
 
 ## Step 3 · Crystallize Executable Plan Package (`Architect` [+ `UI`])
-1. Invoke `Architect` (`roles/architect.md`) with `<busDir>/context.md` + locked Grill decisions:
+1. Invoke `Architect` (`roles/architect.md`, plus `disciplines/deep-modules.md` for Design-It-Twice when interfaces are non-trivial) with `<busDir>/context.md` + locked Grill decisions:
    - Use L3 orthogonal **Arena** + anonymous cross-vendor `Judge` + Orchestrator **Graft** when the user passed `L3`/`debate` OR the scope has high architectural risk; otherwise use `architect.primary`.
    - If `uiGlobs` are touched or the idea includes UI, spawn `UI` (`roles/ui.md`) in parallel to emit `ui-spec.md` (and `DESIGN.md` for 0→1).
-2. Write the finalized plan into a user-visible repository path (default: `<repo>/.scratch/<slug>/plan.md`, or `<repo>/docs/plans/<slug>.md` if the repo uses `docs/plans/`, plus sibling `ui-spec.md` when applicable) AND mirror a copy into `<busDir>/plan.md`. Update bus state via:
+2. Write the finalized plan into a user-visible repository path (default: `<repo>/.scratch/<slug>/plan.md`, or `<repo>/docs/plans/<slug>.md` if the repo uses `docs/plans/`, plus sibling `ui-spec.md` and optional behavior-contract slice tickets under `.scratch/<slug>/issues/NN-*.md` when requested) AND mirror a copy into `<busDir>/plan.md`. Update bus state via:
    `node "<zeeDir>/scripts/zee-tool.mjs" update-state "<busDir>" --status planned`
 3. Every plan document MUST pass:
    `node "<zeeDir>/scripts/zee-tool.mjs" check-plan "<planPath>"`

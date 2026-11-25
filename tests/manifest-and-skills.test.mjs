@@ -23,8 +23,16 @@ const VALID_ONEHARNESS_TOOLS = new Set([
   "finish",
 ]);
 
-const EXPECTED_SKILLS = ["zee", "zee-init", "zee-night", "zee-plan", "zee-review", "zee-setup"];
+const EXPECTED_SKILLS = ["zee", "zee-arch", "zee-init", "zee-night", "zee-plan", "zee-retro", "zee-review", "zee-setup"];
 const ROLE_SUBAGENTS = ["zee-scout", "zee-architect", "zee-ui", "zee-coder", "zee-verifier", "zee-reviewer"];
+const EXPECTED_DISCIPLINES = [
+  "code-smells.md",
+  "deep-modules.md",
+  "diagnosing-bugs.md",
+  "domain-modeling.md",
+  "phase-boundaries.md",
+  "verification-skill.md",
+];
 
 function parseFrontmatter(content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -39,7 +47,7 @@ test("package.json 与 .antigravity-plugin/plugin.json 版本严格一致", () =
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
 });
 
-test("6 个技能目录完整、保持 disable-model-invocation: true、无 /swarm 命名冲突且含 openai.yaml", () => {
+test("8 个技能目录完整、保持 disable-model-invocation: true、无 /swarm 命名冲突且含 openai.yaml 与 6 份纪律文件", () => {
   const actualDirs = fs
     .readdirSync(path.join(REPO_ROOT, "skills"))
     .filter((d) => fs.statSync(path.join(REPO_ROOT, "skills", d)).isDirectory())
@@ -54,6 +62,13 @@ test("6 个技能目录完整、保持 disable-model-invocation: true、无 /swa
     assert.match(fm, /^disable-model-invocation:\s*true$/m, `${name} 必须设置 disable-model-invocation: true`);
     assert.equal(fs.existsSync(path.join(REPO_ROOT, "skills", name, "agents", "openai.yaml")), true);
   }
+
+  const actualDisciplines = fs
+    .readdirSync(path.join(REPO_ROOT, "skills", "zee", "disciplines"))
+    .filter((f) => f.endsWith(".md"))
+    .sort();
+  assert.deepEqual(actualDisciplines, EXPECTED_DISCIPLINES);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "pi-extension", "worker-guard.ts")), true);
 });
 
 test("插件零内置 rules/AGENTS.md（绝不劫持日常普通会话）且 hooks.json 覆盖三生命周期事件", () => {
@@ -94,8 +109,8 @@ test("7 个 AGY Agent 契约：6 专职子代理全部具备合法 OneHarness to
     if (["zee-scout", "zee-architect", "zee-verifier", "zee-reviewer"].includes(name)) {
       assert.equal(tools.includes("edit_file"), false, `${name} 必须剥离 edit_file`);
     }
-    if (name === "zee-scout") {
-      assert.equal(tools.includes("write_file"), false, "zee-scout 必须剥离 write_file");
+    if (name === "zee-scout" || name === "zee-architect") {
+      assert.equal(tools.includes("write_file"), false, `${name} 必须剥离 write_file`);
     }
   }
 });

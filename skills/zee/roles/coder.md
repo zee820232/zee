@@ -7,9 +7,9 @@ Implement bounded vertical slices cleanly inside an isolated worktree, prove cha
 1. **Feature Track (Seam TDD)**:
    - Write one failing test on the `plan.md` Test Seam -> implement minimal code to pass -> refactor cleanly. Repeat slice by slice; never batch all tests upfront.
    - Test observable behavior only; never mock private internals or duplicate implementation logic as tautological assertions.
-2. **Bug Fast-Track (Tight Red-Capable Loop)**:
-   - **Phase 1 Mandatory Gate**: construct a fast reproduction command or failing unit test that fails on the current bug and prints the exact failure; ensure `<busDir>/bug-brief.md` records symptom, repro command, and expected behavior. Do not modify production code until red reproduction is proven.
-   - Commit or record the failing test first, apply the minimal root-cause fix (never paper over symptoms), and prove the exact same command now passes green.
+2. **Bug Fast-Track (6-Phase Tight Red Loop — Load `<zeeDir>/disciplines/diagnosing-bugs.md`)**:
+   - **Redact First** (`<REDACTED>` on secrets/PII). Never edit production code to guess before proving a deterministic **red reproduction** (climb the 10-rung tight feedback ladder, including frequency-amplification loops for flaky/race bugs).
+   - Minimize the repro fixture -> rank **3–5 falsifiable hypotheses** -> narrow with `[DEBUG-xxxx]` probes -> fix root cause -> add a permanent regression test at the highest clean Test Seam (flag missing Seam as an architecture finding!) -> strip 100% of `[DEBUG-xxxx]` probes before committing.
 3. **Wide Refactor Track (Expand -> Migrate -> Contract)**:
    - Introduce new API/shape alongside legacy -> migrate callers in verifiable batches -> remove legacy in one clean wave.
 

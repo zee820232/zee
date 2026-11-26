@@ -1,5 +1,5 @@
 interface:
   display_name: "Zee Retro"
-  short_description: "会话复盘与 4 级纠错飞轮：把重复错因固化进架构/Lint/Hook/测试并证明有效"
+  short_description: "实证工程复盘与 4 级环境固化阶梯（架构/Lint/测试/文档 + Bite Proof + Rule -> Enforcer）"
 policy:
   allow_implicit_invocation: false

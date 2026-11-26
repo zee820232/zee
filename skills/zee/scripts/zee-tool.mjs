@@ -1,27 +1,26 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v5.0.6 — 精简高杠杆确定性 CLI 原语（13 核心子命令）
+ * zee-tool.mjs v5.1.0 — 精简高杠杆确定性 CLI 原语（13 核心子命令）
  *
  * 子命令：
  *   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
- *   update-state <busDir> [--status ...] [--mode ...] [--resume-next ...] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
+ *   update-state <busDir> [--status ...] [--mode ...] [--resume-next ...] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--units-file <path|->] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
  *   log-decision <busDir> --unit <id> --phase <p> --decision <d> [--why <w>] [--evidence <e>] [--result <r>]
  *   list-runs [repoRoot | --all]
  *   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
  *   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
- *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
+ *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut|probe|sim|retro|verify]
  *   sandbox-clean <sandboxDir>
  *   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
  *   recommend-models [--harness pi|t3|agy|codex|claude] [--budget large|medium|small] [--prefer-provider <id>] [--models '<json>'] [--models-file <path>]
- *   resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
- *   provider-health [--clear [modelKey]]
+ *   resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--author-family <fam>] [--config <path>] [--allow-standalone] [--ignore-cooldown]
+ *   provider-health [--clear [modelKey] | --record <modelKey> [--provider <p>] [--kind rate_limit|transient_5xx] [--reason <r>] [--ttl-ms <ms>]]
  *   doctor [--repo <path>] [--harness <h>]
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { extractModelFamily, isAllowedZeeTmpPath } from "./lib/guard-core.mjs";
@@ -31,8 +30,17 @@ import {
   getModelCooldown,
   listActiveCooldowns,
   mapRoleToSlotName,
+  recordModelCooldown,
   resolveProviderHealthPath,
 } from "./lib/provider-health.mjs";
+import {
+  ensureNodeModulesMount,
+  repoKeyCandidates,
+  resolveRepoRunDir,
+  resolveSafeWorktreeBranch,
+  sanitizeSlug,
+  stripAnsiAndControl,
+} from "./lib/repo-utils.mjs";
 
 const HOME = os.homedir();
 const DEFAULT_CONFIG = path.join(HOME, ".agents", "zee-config.json");
@@ -49,10 +57,11 @@ const PROJECT_SKILLS_SUBDIRS = [
 
 const KNOWN_VALUE_FLAGS = new Set([
   "harness", "repo", "bus", "status", "mode", "level", "predicate", "resume-next",
-  "conversation-id", "budget", "unit-upsert", "units", "decision", "fallback",
-  "branch", "base", "head", "sha", "prefix", "delegate-id", "surface", "role",
+  "conversation-id", "budget", "unit-upsert", "units", "units-file", "decision", "fallback",
+  "branch", "base", "head", "sha", "prefix", "delegate-id", "surface", "role", "author-family",
   "config", "dir", "unit", "phase", "why", "evidence", "result",
   "models", "models-file", "prefer-provider",
+  "record", "provider", "kind", "reason", "ttl-ms",
 ]);
 
 const MULTI_VALUE_FLAGS = new Set(["unit-upsert", "fallback"]);
@@ -158,38 +167,30 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v5.0.6 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v5.1.0 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
 
 可用命令：
   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
-  update-state <busDir> [--status <s>] [--mode <m>] [--resume-next <r>] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
+  update-state <busDir> [--status <s>] [--mode <m>] [--resume-next <r>] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--units-file <path|->] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
   log-decision <busDir> --unit <id> --phase <p> --decision <d> [--why <w>] [--evidence <e>] [--result <r>]
   list-runs [repoRoot | --all]
   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
-  sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
+  sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut|probe|sim|retro|verify]
   sandbox-clean <sandboxDir>
   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
   recommend-models [--harness pi|t3|agy|codex|claude] [--budget large|medium|small] [--prefer-provider <id>] [--models '<json>'] [--models-file <path>]
-  resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
-  provider-health [--clear [modelKey]]
+  resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--author-family <fam>] [--config <path>] [--allow-standalone] [--ignore-cooldown]
+  provider-health [--clear [modelKey] | --record <modelKey> [--provider <p>] [--kind rate_limit|transient_5xx] [--reason <r>] [--ttl-ms <ms>]]
   doctor [--repo <path>] [--harness <h>]`);
-}
-
-function sanitizeSlug(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "task";
-}
-
-function repoKeyFor(repoPath) {
-  const absRepo = path.resolve(repoPath);
-  const hash = crypto.createHash("sha256").update(absRepo).digest("hex").slice(0, 8);
-  return `${sanitizeSlug(path.basename(absRepo))}-${hash}`;
 }
 
 const TSV_HEADER = "ts\tunit\tphase\tdecision\twhy\tevidence\tresult\n";
 
 function cleanTsvField(val) {
-  return String(val ?? "").replace(/[\t\r\n]+/g, " ").trim();
+  const cleaned = stripAnsiAndControl(val ?? "").replace(/[\t\r\n]+/g, " ").trim();
+  if (cleaned && cleaned !== "-" && /^[=+\-@]/.test(cleaned)) return `'${cleaned}`;
+  return cleaned;
 }
 
 function appendDecisionRow(busDir, entry) {
@@ -220,7 +221,7 @@ function cmdInitRun(args) {
     process.exit(1);
   }
   const absRepo = path.resolve(repoPath);
-  const busDir = path.join(RUNS_ROOT, repoKeyFor(absRepo), sanitizeSlug(slug));
+  const busDir = path.join(resolveRepoRunDir(RUNS_ROOT, absRepo), sanitizeSlug(slug));
   fs.mkdirSync(path.join(busDir, "artifacts"), { recursive: true });
   fs.mkdirSync(path.join(busDir, "screenshots"), { recursive: true });
 
@@ -255,7 +256,7 @@ function cmdInitRun(args) {
   console.log(JSON.stringify({ ok: true, activeHarness: detectActiveHarness(), busDir, statePath, tsvPath }, null, 2));
 }
 
-function cmdUpdateState(args) {
+async function cmdUpdateState(args) {
   const { flags, positional } = parseFlags(args);
   const busDir = flags.bus || positional[0];
   if (!busDir) {
@@ -266,6 +267,18 @@ function cmdUpdateState(args) {
   if (!fs.existsSync(statePath)) {
     console.error(`更新失败：未找到 ${statePath}，请先运行 init-run`);
     process.exit(1);
+  }
+
+  let unitsFromFile = null;
+  if (typeof flags["units-file"] === "string" && flags["units-file"].trim()) {
+    const fileArg = flags["units-file"].trim();
+    const rawUnitsText = fileArg === "-" ? await readStdinText() : fs.readFileSync(path.resolve(fileArg), "utf8");
+    const parsedUnits = JSON.parse(String(rawUnitsText || "").replace(/^\uFEFF/, ""));
+    if (!Array.isArray(parsedUnits)) {
+      console.error("--units-file 内容必须是 JSON 数组");
+      process.exit(1);
+    }
+    unitsFromFile = parsedUnits;
   }
 
   const st = withFileLock(statePath, () => {
@@ -318,6 +331,10 @@ function cmdUpdateState(args) {
       if (idx >= 0) next.units[idx] = { ...next.units[idx], ...unitObj, updatedAt: new Date().toISOString() };
       else next.units.push({ ...unitObj, updatedAt: new Date().toISOString() });
     };
+
+    if (Array.isArray(unitsFromFile)) {
+      for (const item of unitsFromFile) upsertUnit(item);
+    }
 
     if (typeof flags.units === "string") {
       const arr = JSON.parse(flags.units);
@@ -380,7 +397,7 @@ function cmdListRuns(repoPath) {
   }
   const repoDirs =
     repoPath && repoPath !== "--all"
-      ? [path.join(RUNS_ROOT, repoKeyFor(repoPath))]
+      ? repoKeyCandidates(repoPath).map((k) => path.join(RUNS_ROOT, k))
       : fs.readdirSync(RUNS_ROOT).map((d) => path.join(RUNS_ROOT, d));
 
   const runs = [];
@@ -409,50 +426,6 @@ function cmdListRuns(repoPath) {
   console.log(JSON.stringify({ ok: true, count: runs.length, runs }, null, 2));
 }
 
-function resolveSafeBranchName(absRepo, rawBranch) {
-  let candidate = String(rawBranch || "").trim().replace(/^refs\/heads\//, "").replace(/^\/+|\/+$/g, "");
-  const refExists = (refName) => {
-    try { execFileSync("git", ["-C", absRepo, "show-ref", "--verify", "--quiet", refName], { stdio: "ignore" }); return true; }
-    catch { return false; }
-  };
-  for (let guard = 0; guard < 8; guard++) {
-    const parts = candidate.split("/").filter(Boolean);
-    let collidedIdx = -1;
-    for (let i = 1; i < parts.length; i++) {
-      if (refExists(`refs/heads/${parts.slice(0, i).join("/")}`)) { collidedIdx = i; break; }
-    }
-    if (collidedIdx > 0) {
-      const merged = `${parts[collidedIdx - 1]}-${parts[collidedIdx]}`;
-      candidate = [...parts.slice(0, collidedIdx - 1), merged, ...parts.slice(collidedIdx + 1)].join("/");
-      continue;
-    }
-    break;
-  }
-  return candidate;
-}
-
-function ensureNodeModulesMount(absRepo, wtPath) {
-  const src = path.join(absRepo, "node_modules");
-  const dst = path.join(wtPath, "node_modules");
-  if (!fs.existsSync(src) || fs.existsSync(dst)) return false;
-  try {
-    if (execFileSync("git", ["-C", absRepo, "ls-files", "node_modules"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()) {
-      return false;
-    }
-    const exRel = execFileSync("git", ["-C", wtPath, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    const exFile = path.resolve(wtPath, exRel);
-    fs.mkdirSync(path.dirname(exFile), { recursive: true });
-    const existing = fs.existsSync(exFile) ? fs.readFileSync(exFile, "utf8") : "";
-    if (!existing.split(/\r?\n/).some((l) => l.trim() === "/node_modules" || l.trim() === "node_modules")) {
-      fs.appendFileSync(exFile, `${existing && !existing.endsWith("\n") ? "\n" : ""}/node_modules\n`, "utf8");
-    }
-    fs.symlinkSync(src, dst, process.platform === "win32" ? "junction" : undefined);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function cmdWorktreeCreate(args) {
   const { flags, positional } = parseFlags(args);
   const [repoPath, slug, lane, baseRef] = positional;
@@ -461,7 +434,7 @@ function cmdWorktreeCreate(args) {
     process.exit(1);
   }
   const absRepo = path.resolve(repoPath);
-  const wtRoot = path.join(RUNS_ROOT, repoKeyFor(absRepo), sanitizeSlug(slug), "worktrees");
+  const wtRoot = path.join(resolveRepoRunDir(RUNS_ROOT, absRepo), sanitizeSlug(slug), "worktrees");
   const wtPath = path.join(wtRoot, sanitizeSlug(lane));
   fs.mkdirSync(wtRoot, { recursive: true });
 
@@ -476,7 +449,8 @@ function cmdWorktreeCreate(args) {
 
   const gitArgs = ["-C", absRepo, "worktree", "add"];
   const rawBranch = typeof flags.branch === "string" && flags.branch.trim() ? flags.branch.trim() : null;
-  const branch = rawBranch ? resolveSafeBranchName(absRepo, rawBranch) : null;
+  const resolvedBranch = rawBranch ? resolveSafeWorktreeBranch(absRepo, rawBranch) : null;
+  const branch = resolvedBranch ? resolvedBranch.branch : null;
   if (branch) {
     let exists = false;
     try { execFileSync("git", ["-C", absRepo, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]); exists = true; } catch {}
@@ -494,7 +468,7 @@ function cmdWorktreeCreate(args) {
     repoRoot: absRepo,
     worktreePath: wtPath,
     branch: branch || "(detached)",
-    flattened: Boolean(rawBranch && branch !== rawBranch),
+    flattened: Boolean(resolvedBranch?.flattened),
     mountedNodeModules,
     head,
   }, null, 2));
@@ -530,18 +504,28 @@ function detectDefaultBaseRef(absRepo) {
   return "HEAD";
 }
 
+const DEFAULT_WORKTREE_LOCK_TTL_MS = 12 * 60 * 60 * 1000;
+
+function getWorktreeLockMaxTtlMs() {
+  const n = Number(process.env.ZEE_WORKTREE_LOCK_TTL_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKTREE_LOCK_TTL_MS;
+}
+
 function isWorktreeActiveLocked(wtPath) {
   const lockPath = `${wtPath}.zee-lock.json`;
   if (!fs.existsSync(lockPath)) return false;
   try {
     const data = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const createdMs = Date.parse(data?.createdAt || "");
+    const ageMs = Number.isFinite(createdMs) ? Date.now() - createdMs : NaN;
+    const maxTtlMs = getWorktreeLockMaxTtlMs();
+    if (Number.isFinite(ageMs) && ageMs > maxTtlMs) return false;
     const pid = Number(data?.pid);
     if (Number.isInteger(pid) && pid > 0) {
       try { process.kill(pid, 0); return true; }
       catch (e) { return Boolean(e && e.code === "EPERM"); }
     }
-    const ageMs = Date.now() - Date.parse(data?.createdAt || "");
-    return Number.isFinite(ageMs) && ageMs < 2 * 60 * 60 * 1000;
+    return Number.isFinite(ageMs) && ageMs < Math.min(2 * 60 * 60 * 1000, maxTtlMs);
   } catch {
     return false;
   }
@@ -828,8 +812,10 @@ function cmdGateTamperDiff(args) {
 
   const scanAddedLine = (file, line) => {
     const cleanFile = file.replace(/\\/g, "/");
-    for (const pat of SUPPRESSION_PATTERNS) {
-      if (pat.re.test(line)) suppressionsAdded.push({ file: cleanFile, pattern: pat.name, line: line.trim().slice(0, 200) });
+    if (!/\.md$/i.test(cleanFile)) {
+      for (const pat of SUPPRESSION_PATTERNS) {
+        if (pat.re.test(line)) suppressionsAdded.push({ file: cleanFile, pattern: pat.name, line: line.trim().slice(0, 200) });
+      }
     }
     if (!/<REDACTED>/.test(line)) {
       for (const pat of SECRET_PATTERNS) {
@@ -1069,6 +1055,9 @@ function cmdResolveModel(args) {
   const configPath = typeof flags.config === "string" ? flags.config : process.env.ZEE_CONFIG_PATH?.trim() || DEFAULT_CONFIG;
   const allowStandalone = Boolean(flags["allow-standalone"]);
   const ignoreCooldown = Boolean(flags["ignore-cooldown"]);
+  const authorFamilyRaw = typeof flags["author-family"] === "string" ? flags["author-family"].trim() : "";
+  const authorFam = authorFamilyRaw ? extractModelFamily(authorFamilyRaw) : "";
+  const needsCrossFamily = Boolean(authorFam && (role === "reviewer" || role === "judge" || role === "adversary" || role.startsWith("reviewer.")));
 
   if (!fs.existsSync(configPath)) {
     if (allowStandalone) {
@@ -1113,23 +1102,78 @@ function cmdResolveModel(args) {
   let activeSpec = slot?.prefer || slot;
   let activeBinding = extractBindingPair(activeSpec, harness) || extractBindingPair(slot, harness)?.prefer || extractBindingPair(slot, harness);
   let cooldownFallback = null;
+  let crossFamilyFallback = null;
+
+  const hsForSingle = getHarnessSection(cfg, harness);
+  const allowSingleFamily = Boolean(hsForSingle?.section?.singleFamily || cfg?.singleFamily || harness === "antigravity");
+
+  const getCandidateFamily = (spec, bind) =>
+    source === "harnesses"
+      ? bind?.family || spec?.family || extractModelFamily(bind?.model || spec?.swarmModel || spec?.modelHint || "")
+      : bind?.family || extractModelFamily(bind?.model || "") || spec?.family || extractModelFamily(spec?.modelHint || "");
 
   const initialModelRef = activeBinding?.model || activeSpec?.modelHint || activeSpec?.model || activeSpec?.swarmModel || "";
-  if (!ignoreCooldown && !isParentAlias(initialModelRef)) {
-    const pId = activeBinding?.providerInstanceId;
-    const mId = activeBinding?.model || activeSpec?.modelHint || activeSpec?.swarmModel;
-    const cd = mId ? getModelCooldown(pId, mId) : { active: false };
-    if (cd.active && slot?.backup) {
-      const bSpec = slot.backup;
-      const bBind = extractBindingPair(bSpec, harness) || extractBindingPair(slot, harness)?.backup;
-      const bModelId = bBind?.model || bSpec?.modelHint || bSpec?.swarmModel;
-      const bCd = bModelId && !isParentAlias(bModelId) ? getModelCooldown(bBind?.providerInstanceId, bModelId) : { active: false };
-      if (!bCd.active) {
-        cooldownFallback = { skippedKey: cd.key, reason: cd.entry?.reason || "cooldown", remainingSec: cd.remainingSec };
-        activeSpec = bSpec;
-        if (bBind) activeBinding = bBind;
+  const initialFam = getCandidateFamily(activeSpec, activeBinding);
+  const initialSameFamilyConflict = Boolean(needsCrossFamily && !allowSingleFamily && initialFam && initialFam === authorFam);
+
+  const initialCd =
+    !ignoreCooldown && !isParentAlias(initialModelRef)
+      ? (() => {
+          const mId = activeBinding?.model || activeSpec?.modelHint || activeSpec?.swarmModel;
+          return mId ? getModelCooldown(activeBinding?.providerInstanceId, mId) : { active: false };
+        })()
+      : { active: false };
+
+  if (initialCd.active || initialSameFamilyConflict) {
+    const candidateSpecs = [];
+    if (slot?.backup) candidateSpecs.push({ spec: slot.backup, bind: extractBindingPair(slot.backup, harness) || extractBindingPair(slot, harness)?.backup });
+    if (needsCrossFamily) {
+      const slotMap = hsForSingle?.section?.slots || cfg?.slots;
+      if (slotMap && typeof slotMap === "object") {
+        for (const extraName of ["workhorse", "fast"]) {
+          const extraSlot = slotMap[extraName];
+          if (!extraSlot) continue;
+          if (extraSlot.prefer) candidateSpecs.push({ spec: extraSlot.prefer, bind: extractBindingPair(extraSlot.prefer, harness) });
+          if (extraSlot.backup) candidateSpecs.push({ spec: extraSlot.backup, bind: extractBindingPair(extraSlot.backup, harness) });
+        }
       }
     }
+    for (const cand of candidateSpecs) {
+      const bSpec = cand.spec;
+      const bBind = cand.bind;
+      const bModelId = bBind?.model || bSpec?.modelHint || bSpec?.swarmModel;
+      if (!bModelId) continue;
+      const bFam = getCandidateFamily(bSpec, bBind);
+      if (needsCrossFamily && !allowSingleFamily && bFam && bFam === authorFam) continue;
+      const bCd = !ignoreCooldown && !isParentAlias(bModelId) ? getModelCooldown(bBind?.providerInstanceId, bModelId) : { active: false };
+      if (bCd.active) continue;
+      if (initialCd.active) {
+        cooldownFallback = { skippedKey: initialCd.key, reason: initialCd.entry?.reason || "cooldown", remainingSec: initialCd.remainingSec };
+      } else if (initialSameFamilyConflict) {
+        crossFamilyFallback = { skippedFamily: initialFam, authorFamily: authorFam };
+      }
+      activeSpec = bSpec;
+      activeBinding = bBind;
+      break;
+    }
+  }
+
+  const finalFamCheck = getCandidateFamily(activeSpec, activeBinding);
+  if (needsCrossFamily && !allowSingleFamily && finalFamCheck && finalFamCheck === authorFam) {
+    console.log(
+      JSON.stringify(
+        {
+          ok: false,
+          error: `[resolve-model:${role}] 跨家族拦截：解析结果家族 "${finalFamCheck}" 与作者家族 "${authorFam}" 相同且无健康异构备胎`,
+          role,
+          authorFamily: authorFam,
+          resolvedFamily: finalFamCheck,
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
   }
 
   const effort = enforceEffortFloor(activeSpec?.effort || "medium");
@@ -1199,6 +1243,7 @@ function cmdResolveModel(args) {
       binding: activeBinding,
       fallbackOn429: "inherit",
       ...(cooldownFallback ? { cooldownFallback } : {}),
+      ...(crossFamilyFallback ? { crossFamilyFallback } : {}),
     };
   } else if (harness === "t3") {
     const delegateTarget = {
@@ -1218,6 +1263,7 @@ function cmdResolveModel(args) {
       delegateTarget,
       backup: slot?.backup || null,
       ...(cooldownFallback ? { cooldownFallback } : {}),
+      ...(crossFamilyFallback ? { crossFamilyFallback } : {}),
     };
   } else {
     resolved = {
@@ -1236,6 +1282,7 @@ function cmdResolveModel(args) {
       },
       backup: slot?.backup || null,
       ...(cooldownFallback ? { cooldownFallback } : {}),
+      ...(crossFamilyFallback ? { crossFamilyFallback } : {}),
     };
   }
 
@@ -1244,6 +1291,32 @@ function cmdResolveModel(args) {
 
 function cmdProviderHealth(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.record !== undefined && flags.record !== false) {
+    const rawTarget = typeof flags.record === "string" && flags.record.trim() ? flags.record.trim() : String(positional[0] || "").trim();
+    if (!rawTarget) {
+      console.error("用法：provider-health --record <provider/model> [--provider <p>] [--kind rate_limit|transient_5xx] [--reason <r>] [--ttl-ms <ms>]");
+      process.exit(1);
+    }
+    let provider = typeof flags.provider === "string" && flags.provider.trim() ? flags.provider.trim() : undefined;
+    let model = rawTarget;
+    if (!provider && rawTarget.includes("/") && !rawTarget.startsWith("auto/")) {
+      const idx = rawTarget.indexOf("/");
+      provider = rawTarget.slice(0, idx);
+      model = rawTarget.slice(idx + 1);
+    } else if (provider && model.toLowerCase().startsWith(`${provider.toLowerCase()}/`)) {
+      model = model.slice(provider.length + 1);
+    }
+    const rawKind = String(flags.kind || "rate_limit").trim().toLowerCase();
+    const kind = rawKind === "transient_5xx" || rawKind === "5xx" ? "transient_5xx" : "rate_limit";
+    const ttlMs = Number(flags["ttl-ms"]);
+    const rec = recordModelCooldown(provider, model, {
+      kind,
+      ...(typeof flags.reason === "string" && flags.reason.trim() ? { reason: flags.reason.trim() } : {}),
+      ...(Number.isFinite(ttlMs) && ttlMs > 0 ? { ttlMs } : {}),
+    });
+    console.log(JSON.stringify({ ok: Boolean(rec), recorded: rec }, null, 2));
+    return;
+  }
   if (flags.clear !== undefined && flags.clear !== false) {
     const targetKey = typeof flags.clear === "string" ? flags.clear : positional[0];
     console.log(JSON.stringify({ ok: true, ...clearModelCooldown(targetKey) }, null, 2));
@@ -1776,7 +1849,7 @@ function cmdDoctor(args) {
 const [, , cmd, ...rest] = process.argv;
 switch (cmd) {
   case "init-run": cmdInitRun(rest); break;
-  case "update-state": cmdUpdateState(rest); break;
+  case "update-state": await cmdUpdateState(rest); break;
   case "log-decision": cmdLogDecision(rest); break;
   case "list-runs": cmdListRuns(rest[0]); break;
   case "worktree-create": cmdWorktreeCreate(rest); break;

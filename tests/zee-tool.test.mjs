@@ -618,3 +618,142 @@ test("update-state 支持多 --unit-upsert/--units/6 并发子进程无锁冲突
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("v5.1.0：--units-file/stdin、provider-health --record、TSV 防公式注入(保留'-')、hasChildRefs 与过期锁 TTL", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v510-tool-"));
+  const repo = path.join(tmpDir, "repo");
+  const healthPath = path.join(tmpDir, "provider-health.json");
+  const cfgPath = path.join(tmpDir, "zee-config.json");
+  let busDir = "";
+  try {
+    fs.mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "z@e.c"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "z"], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "index.js"), "export const x = 1;\n", "utf8");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: repo });
+
+    const init = JSON.parse(runTool(["init-run", repo, "v510-cli"]).stdout);
+    busDir = init.busDir;
+
+    // 1. update-state --units-file <path> 与 --units-file - (stdin)
+    const unitsFile = path.join(tmpDir, "units.json");
+    fs.writeFileSync(unitsFile, JSON.stringify([{ id: "U1", status: "pending" }, { id: "U2", status: "done" }]), "utf8");
+    runTool(["update-state", busDir, "--units-file", unitsFile]);
+    const stdinRes = spawnSync(process.execPath, [ZEE_TOOL, "update-state", busDir, "--units-file", "-"], {
+      input: JSON.stringify([{ id: "U3", status: "pending" }]),
+      encoding: "utf8",
+    });
+    assert.equal(stdinRes.status, 0, stdinRes.stderr);
+    const st = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
+    assert.deepEqual(st.units.map((u) => u.id).sort(), ["U1", "U2", "U3"]);
+
+    // 2. log-decision 防公式注入与 ANSI 剥离，且保留默认占位符 "-" 不被转成 "'-"
+    runTool([
+      "log-decision",
+      busDir,
+      "--unit",
+      "U1",
+      "--phase",
+      "start",
+      "--decision",
+      "=SUM(A1:A2)\x1b[31mred\x1b[0m",
+      "--why",
+      "+cmd",
+      "--result",
+      "@ok",
+    ]);
+    const tsvRows = fs.readFileSync(path.join(busDir, "decisions.tsv"), "utf8").trim().split(/\r?\n/);
+    const cols = tsvRows.at(-1).split("\t");
+    assert.equal(cols[3], "'=SUM(A1:A2)red");
+    assert.equal(cols[4], "'+cmd");
+    assert.equal(cols[5], "-", "空字段默认占位符 '-' 不应被误转义为 \"'-\"");
+    assert.equal(cols[6], "'@ok");
+
+    // 3. worktree-create 支持 hasChildRefs：已有 feat/u1 时建 --branch feat 自动扁平为 feat-wt
+    execFileSync("git", ["branch", "feat/u1"], { cwd: repo });
+    const wtCreated = JSON.parse(runTool(["worktree-create", repo, "v510-cli", "lane1", "HEAD", "--branch", "feat"]).stdout);
+    assert.equal(wtCreated.branch, "feat-wt");
+    assert.equal(wtCreated.flattened, true);
+
+    // 4. cleanup-worktrees 识别超过 TTL 的陈旧 .zee-lock.json（即使 PID 仍存活）
+    fs.writeFileSync(
+      `${wtCreated.worktreePath}.zee-lock.json`,
+      JSON.stringify({ pid: process.pid, role: "coder", createdAt: new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString() }),
+      "utf8",
+    );
+    const cleaned = JSON.parse(
+      execFileSync(process.execPath, [ZEE_TOOL, "cleanup-worktrees", repo, "--prune-safe"], {
+        encoding: "utf8",
+        env: { ...process.env, ZEE_WORKTREE_LOCK_TTL_MS: String(60 * 60 * 1000) },
+      }),
+    );
+    assert.equal(cleaned.prunedCount, 1, "超过 TTL 的过期锁不应阻止 worktree 清理");
+
+    // 5. provider-health --record（含双传 --provider 去重）打通非 Pi 宿主写入 429 冷却 + resolve-model 跨家族校验
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        version: 3,
+        harnesses: {
+          t3: {
+            slots: {
+              fast: { prefer: { providerInstanceId: "antigravity", model: "gemini-4-hydrogen", family: "gemini", effort: "medium" } },
+              workhorse: {
+                prefer: { providerInstanceId: "codex", model: "gpt-6.2-astra", family: "openai", effort: "high" },
+                backup: { providerInstanceId: "antigravity", model: "gemini-4-neon", family: "gemini", effort: "high" },
+              },
+              adversary: {
+                prefer: { providerInstanceId: "claudeAgent", model: "claude-opus-5-5", family: "claude", effort: "high" },
+                backup: { providerInstanceId: "codex", model: "gpt-6.2-astra", family: "openai", effort: "high" },
+              },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    const recOut = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [ZEE_TOOL, "provider-health", "--record", "codex/gpt-6.2-astra", "--provider", "codex", "--kind", "rate_limit", "--reason", "429 quota"],
+        { encoding: "utf8", env: { ...process.env, ZEE_PROVIDER_HEALTH_PATH: healthPath } },
+      ),
+    );
+    assert.equal(recOut.ok, true);
+    assert.equal(recOut.recorded.key, "codex/gpt-6.2-astra", "同时传 --record codex/... 与 --provider codex 不应拼成双前缀");
+
+    const resolved = JSON.parse(
+      execFileSync(process.execPath, [ZEE_TOOL, "resolve-model", "--harness", "t3", "--role", "coder", "--config", cfgPath], {
+        encoding: "utf8",
+        env: { ...process.env, ZEE_PROVIDER_HEALTH_PATH: healthPath },
+      }),
+    );
+    assert.equal(resolved.resolved.delegateTarget.model, "gemini-4-neon");
+    assert.equal(resolved.resolved.cooldownFallback.skippedKey, "codex/gpt-6.2-astra");
+
+    // adversary.prefer (claude) 冷却且 authorFamily=openai 时，judge 必须跳过同家族 openai backup，切到异构 gemini
+    execFileSync(
+      process.execPath,
+      [ZEE_TOOL, "provider-health", "--record", "claudeAgent/claude-opus-5-5", "--kind", "rate_limit"],
+      { encoding: "utf8", env: { ...process.env, ZEE_PROVIDER_HEALTH_PATH: healthPath } },
+    );
+    const resolvedJudge = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [ZEE_TOOL, "resolve-model", "--harness", "t3", "--role", "judge", "--author-family", "openai", "--config", cfgPath],
+        { encoding: "utf8", env: { ...process.env, ZEE_PROVIDER_HEALTH_PATH: healthPath } },
+      ),
+    );
+    assert.equal(resolvedJudge.resolved.family, "gemini", "resolve-model --role judge --author-family openai 必须跳过同家族备胎");
+
+    // 6. gate-tamper-diff 对 .md 文档中禁止示例词不误报 suppressionsAdded
+    fs.writeFileSync(path.join(repo, "DOC.md"), "严禁使用 `@ts-ignore` 与 `as any`。\n", "utf8");
+    const tamperOut = JSON.parse(runTool(["gate-tamper-diff", "--repo", repo, "--working-tree"]).stdout);
+    assert.deepEqual(tamperOut.suppressionsAdded, [], ".md 文档不应误报抑制注解");
+  } finally {
+    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

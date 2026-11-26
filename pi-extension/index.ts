@@ -1,11 +1,11 @@
 /**
- * zee Pi Extension v5.0.0 — 极简个人主厨编排器 + zee_subagent 并行引擎
+ * zee Pi Extension v5.1.0 — 极简个人主厨编排器 + zee_subagent 并行引擎
  *
  * 保留硬核能力：
- * 1. 7 个干净命令（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-mode），无 /skill:zee* 重影
+ * 1. 8 个干净命令（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup、/zee-mode），无 /skill:zee* 重影
  * 2. 1 行状态栏徽章（setStatus("zee-mode")，绝不调用 setFooter()，静默支持 Print/JSON/ZEE_WORKER=1）
- * 3. 工具级安全守卫：项目 denyCommands + 破坏性命令 + plan/review 写路径锁（不拦截 Bash 只读操作）
- * 4. zee_subagent：-ne -e worker-guard.ts、429/5xx 跨会话熔断 0ms 切备免扣预算、10s 心跳、
+ * 3. 工具级安全守卫：项目 denyCommands + 破坏性命令 + plan/review 写路径锁与增量脏树告警（不误拦 Bash 只读操作）
+ * 4. zee_subagent：-ne -e worker-guard.ts、429/5xx 跨会话熔断 0ms 切备免扣预算、10s 心跳、Windows 进程树强杀、
  *    声明式原子 worktree + junction node_modules + 嵌套分支扁平化、>2KB 抢救落盘、70% 截断、只读事后脏区回滚
  */
 
@@ -33,7 +33,6 @@ import {
 	evaluateDestructiveCommand,
 	extractModelFamily,
 	isWriteAllowedUnderGate as sharedIsWriteAllowedUnderGate,
-	normalizeToolPath,
 } from "../skills/zee/scripts/lib/guard-core.mjs";
 import {
 	classifyTransientProviderFailure,
@@ -44,9 +43,19 @@ import {
 	recordModelCooldown,
 } from "../skills/zee/scripts/lib/provider-health.mjs";
 import { atomicWriteJson, withFileLock } from "../skills/zee/scripts/lib/fs-atomic.mjs";
+import {
+	ensureNodeModulesMount,
+	killProcessTree,
+	repoKeyCandidates,
+	resolveRepoRunDir,
+	resolveSafeWorktreeBranch,
+	sanitizeSlug,
+	stripAnsiAndControl,
+} from "../skills/zee/scripts/lib/repo-utils.mjs";
 
+export { resolveSafeWorktreeBranch };
 export type ZeeMode = "off" | "auto" | "strict";
-export type GateMode = "none" | "plan" | "review" | "init-design";
+export type GateMode = "none" | "plan" | "review";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS_ROOT = path.resolve(EXTENSION_DIR, "..", "skills");
@@ -72,7 +81,8 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_MAX_REPEAT_ERRORS = 4;
 const READ_ONLY_AUDIT_ROLES = new Set(["scout", "architect", "judge", "verifier", "reviewer"]);
 const MIN_ROLE_TIMEOUT_FLOOR_MS = 120_000;
-const SAFE_TIMEOUT_ROLES = new Set(["scout", "verifier", "reviewer", "coder", "ui", "architect"]);
+const SAFE_TIMEOUT_ROLES = new Set(["scout", "judge", "verifier", "reviewer", "coder", "ui", "architect"]);
+const DEFAULT_NIGHT_STALE_MS = 24 * 60 * 60 * 1000;
 
 export function resolveEffectiveSubagentTimeout(role: string, requestedMs?: number): number {
 	const r = String(role || "").trim().toLowerCase();
@@ -121,74 +131,8 @@ function isSubagentContext(event: BeforeAgentStartEvent, ctx: ExtensionContext):
 	return false;
 }
 
-function sameResolvedPath(a: string, b: string): boolean {
-	const ra = path.resolve(a);
-	const rb = path.resolve(b);
-	return process.platform === "win32" ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
-}
-
 export function isWriteAllowedUnderGate(rawPath: string, cwd: string, gateMode: Exclude<GateMode, "none">): boolean {
 	return sharedIsWriteAllowedUnderGate(rawPath, cwd, gateMode);
-}
-
-function sanitizeSlug(s: string): string {
-	return String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "task";
-}
-
-function repoKeyFor(repoPath: string): string {
-	const absRepo = path.resolve(repoPath);
-	const hash = crypto.createHash("sha256").update(absRepo).digest("hex").slice(0, 8);
-	return `${sanitizeSlug(path.basename(absRepo))}-${hash}`;
-}
-
-export function resolveSafeWorktreeBranch(absRepo: string, rawBranch: string): { branch: string; flattened: boolean } {
-	let candidate = rawBranch.trim().replace(/^refs\/heads\//, "").replace(/^\/+|\/+$/g, "");
-	let flattened = false;
-	const refExists = (refName: string): boolean => {
-		try { execFileSync("git", ["-C", absRepo, "show-ref", "--verify", "--quiet", refName], { stdio: "ignore" }); return true; }
-		catch { return false; }
-	};
-	const hasChildRefs = (prefix: string): boolean => {
-		try {
-			return execFileSync("git", ["-C", absRepo, "for-each-ref", "--format=%(refname)", `refs/heads/${prefix}/`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().length > 0;
-		} catch { return false; }
-	};
-	for (let guard = 0; guard < 8; guard++) {
-		const parts = candidate.split("/").filter(Boolean);
-		let collidedIdx = -1;
-		for (let i = 1; i < parts.length; i++) {
-			if (refExists(`refs/heads/${parts.slice(0, i).join("/")}`)) { collidedIdx = i; break; }
-		}
-		if (collidedIdx > 0) {
-			const merged = `${parts[collidedIdx - 1]}-${parts[collidedIdx]}`;
-			candidate = [...parts.slice(0, collidedIdx - 1), merged, ...parts.slice(collidedIdx + 1)].join("/");
-			flattened = true;
-			continue;
-		}
-		if (hasChildRefs(candidate)) { candidate = `${candidate}-wt`; flattened = true; continue; }
-		break;
-	}
-	return { branch: candidate, flattened };
-}
-
-function ensureWorktreeExcludesNodeModules(absRepo: string, wtPath: string): boolean {
-	const srcModules = path.join(absRepo, "node_modules");
-	const dstModules = path.join(wtPath, "node_modules");
-	if (!fs.existsSync(srcModules) || fs.existsSync(dstModules)) return false;
-	try {
-		if (execFileSync("git", ["-C", absRepo, "ls-files", "node_modules"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()) return false;
-		const excludePath = execFileSync("git", ["-C", wtPath, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-		const resolvedExclude = path.resolve(wtPath, excludePath);
-		fs.mkdirSync(path.dirname(resolvedExclude), { recursive: true });
-		const existing = fs.existsSync(resolvedExclude) ? fs.readFileSync(resolvedExclude, "utf8") : "";
-		if (!existing.split(/\r?\n/).some((l) => l.trim() === "/node_modules" || l.trim() === "node_modules")) {
-			fs.appendFileSync(resolvedExclude, `${existing && !existing.endsWith("\n") ? "\n" : ""}/node_modules\n`, "utf8");
-		}
-		fs.symlinkSync(srcModules, dstModules, process.platform === "win32" ? "junction" : undefined);
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 function collectPiBindingsFromConfig(
@@ -347,7 +291,7 @@ function persistPartialSalvage(busDir: string, role: string, rescuedText: string
 function prepareAtomicWorktree(spec: { repoRoot: string; slug: string; lane: string; baseRef: string; branch?: string }) {
 	const absRepo = path.resolve(spec.repoRoot);
 	if (!fs.existsSync(absRepo)) throw new Error(`主仓库不存在：${absRepo}`);
-	const wtRoot = path.join(RUNS_ROOT, repoKeyFor(absRepo), sanitizeSlug(spec.slug), "worktrees");
+	const wtRoot = path.join(resolveRepoRunDir(RUNS_ROOT, absRepo), sanitizeSlug(spec.slug), "worktrees");
 	const wtPath = path.join(wtRoot, sanitizeSlug(spec.lane));
 	fs.mkdirSync(wtRoot, { recursive: true });
 
@@ -371,7 +315,7 @@ function prepareAtomicWorktree(spec: { repoRoot: string; slug: string; lane: str
 		gitArgs.push("--detach", wtPath, spec.baseRef);
 	}
 	execFileSync("git", gitArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-	const mountedNodeModules = ensureWorktreeExcludesNodeModules(absRepo, wtPath);
+	const mountedNodeModules = ensureNodeModulesMount(absRepo, wtPath);
 	return { wtPath, branch, mountedNodeModules };
 }
 
@@ -389,10 +333,30 @@ function removeWorktreeActiveLock(lockPath: string | undefined): void {
 function readGitSnapshot(cwd: string): { isGit: boolean; head: string; statusLines: string[] } {
 	try {
 		const head = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-		const statusRaw = execFileSync("git", ["-C", cwd, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		const statusRaw = execFileSync("git", ["-C", cwd, "-c", "core.quotepath=false", "status", "--porcelain"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
 		return { isGit: true, head, statusLines: statusRaw.split(/\r?\n/).filter((l) => l.trim().length > 0) };
 	} catch {
 		return { isGit: false, head: "", statusLines: [] };
+	}
+}
+
+function expandUntrackedDirPaths(cwd: string, relDir: string): string[] {
+	try {
+		const raw = execFileSync("git", ["-C", cwd, "-c", "core.quotepath=false", "status", "--porcelain", "-uall", "--", relDir], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const out: string[] = [];
+		for (const line of raw.split(/\r?\n/)) {
+			if (!line.trim()) continue;
+			out.push(...parsePorcelainPaths(line));
+		}
+		return out.length > 0 ? out : [relDir];
+	} catch {
+		return [relDir];
 	}
 }
 
@@ -405,9 +369,8 @@ function parsePorcelainPaths(line: string): string[] {
 
 function inferGateFromZeeArgs(args: string): GateMode {
 	const t = args.trim();
-	if (/^plan\b/i.test(t)) return "plan";
+	if (/^(?:plan|init)\b/i.test(t)) return "plan";
 	if (/^(?:review|verify\s+run)\b/i.test(t)) return "review";
-	if (/^init\b/i.test(t)) return "init-design";
 	return "none";
 }
 
@@ -427,7 +390,6 @@ function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string 
 		"- **Subagents**: 并发/隔离工作树派发统一调用 `zee_subagent`（传递 `role`, `provider`, `model`, `thinkingLevel`, `worktree`, `authorFamily`）。",
 	];
 	if (gate === "plan") lines.push("- **ACTIVE WRITE LOCK (`plan`)**: 禁止写业务源码，仅允许写计划文档/总线/沙盒。");
-	else if (gate === "init-design") lines.push("- **ACTIVE WRITE LOCK (`init-design`)**: 0→1 设计期禁止写业务源码，直到写入 `.agents/zee.project.json` 解锁。");
 	else if (gate === "review") lines.push("- **ACTIVE WRITE LOCK (`review`)**: 只读审查/验收期禁止修改仓库文件。");
 	return lines.join("\n");
 }
@@ -460,7 +422,7 @@ const ZeeSubagentParams = Type.Object({
 	role: Type.Optional(Type.String({ description: "角色标识（scout / architect / ui / coder / verifier / reviewer / judge）" })),
 	provider: Type.Optional(Type.String({ description: "模型提供方 ID（必须与 model 同传，切勿传路径前缀如 vm/devin/codex）" })),
 	model: Type.Optional(Type.String({ description: "目标模型 ID 或 provider/model" })),
-	authorFamily: Type.Optional(Type.String({ description: "当 role='reviewer' 时传入作者家族（claude/openai/gemini/deepseek 等），拦截同家族自审" })),
+	authorFamily: Type.Optional(Type.String({ description: "当 role='reviewer' 或 'judge' 时传入作者家族（claude/openai/gemini/deepseek 等），拦截同家族自审" })),
 	thinkingLevel: Type.Optional(
 		Type.Union(
 			[Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")],
@@ -522,6 +484,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		return raw === "auto" || raw === "strict" || raw === "off" ? raw : "off";
 	})();
 	let writeGate: GateMode = "none";
+	let gatePreSnapshot: Set<string> | null = null;
 
 	const isSilentSession = (ctx: ExtensionContext): boolean => {
 		if (process.env.ZEE_WORKER === "1" || !ctx.hasUI) return true;
@@ -532,7 +495,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	const updateStatusBar = (ctx: ExtensionContext) => {
 		if (isSilentSession(ctx)) return;
 		if (writeGate !== "none") {
-			const lockTag = writeGate === "plan" ? "plan🔒" : writeGate === "init-design" ? "init🔒" : "rev🔒";
+			const lockTag = writeGate === "plan" ? "plan🔒" : "rev🔒";
 			ctx.ui.setStatus("zee-mode", `zee:${lockTag}`);
 			return;
 		}
@@ -545,8 +508,16 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		updateStatusBar(ctx);
 	};
 
+	const captureGateSnapshot = (cwd: string): Set<string> | null => {
+		const snap = readGitSnapshot(cwd);
+		return snap.isGit ? new Set(snap.statusLines) : null;
+	};
+
 	const setGate = (next: GateMode, ctx: ExtensionContext, persist = true) => {
+		const changed = writeGate !== next;
 		writeGate = next;
+		if (next === "none") gatePreSnapshot = null;
+		else if (changed || gatePreSnapshot === null) gatePreSnapshot = captureGateSnapshot(ctx.cwd);
 		if (persist) pi.appendEntry("zee-gate", { gate: next });
 		updateStatusBar(ctx);
 	};
@@ -567,12 +538,14 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			}
 			if (!foundGate && entry.customType === "zee-gate") {
 				const g = String(entry.data.gate ?? "").toLowerCase();
-				if (g === "none" || g === "plan" || g === "review" || g === "init-design") { nextGate = g; foundGate = true; }
+				if (g === "none" || g === "plan" || g === "review") { nextGate = g; foundGate = true; }
+				else if (g === "init-design") { nextGate = "plan"; foundGate = true; }
 			}
 			if (foundMode && foundGate) break;
 		}
 		routingMode = nextMode;
 		writeGate = nextGate;
+		gatePreSnapshot = nextGate !== "none" ? captureGateSnapshot(ctx.cwd) : null;
 		updateStatusBar(ctx);
 	};
 
@@ -581,30 +554,41 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	pi.on("session_tree", (_e, ctx) => restoreState(ctx));
 	pi.on("session_shutdown", (_e, ctx) => { if (!isSilentSession(ctx)) ctx.ui.setStatus("zee-mode", undefined); });
 
+function getNightStaleMs(): number {
+	const n = Number(process.env.ZEE_NIGHT_STALE_MS);
+	return Number.isFinite(n) && n > 0 ? n : DEFAULT_NIGHT_STALE_MS;
+}
+
 function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string | null } | null {
-	if (!cwd) return null;
-	const repoRunDir = path.join(RUNS_ROOT, repoKeyFor(cwd));
-	if (!fs.existsSync(repoRunDir)) return null;
+	if (!cwd || !fs.existsSync(RUNS_ROOT)) return null;
+	const maxAgeMs = getNightStaleMs();
+	const now = Date.now();
 	let latest: { slug: string; resumeNext: string | null; updatedAt: string; hasReport: boolean } | null = null;
 	try {
-		for (const ent of fs.readdirSync(repoRunDir, { withFileTypes: true })) {
-			if (!ent.isDirectory()) continue;
-			const runDir = path.join(repoRunDir, ent.name);
-			const sp = path.join(runDir, "state.json");
-			if (!fs.existsSync(sp)) continue;
-			try {
-				const st = JSON.parse(fs.readFileSync(sp, "utf8")) as { mode?: string; status?: string; slug?: string; resumeNext?: string | null; updatedAt?: string };
-				if (st.mode !== "night" || st.status !== "running") continue;
-				const updatedAt = String(st.updatedAt || "");
-				if (!latest || updatedAt.localeCompare(latest.updatedAt) > 0) {
-					latest = {
-						slug: String(st.slug || ent.name),
-						resumeNext: st.resumeNext ?? null,
-						updatedAt,
-						hasReport: fs.existsSync(path.join(runDir, "morning-report.md")),
-					};
-				}
-			} catch {}
+		for (const key of repoKeyCandidates(cwd)) {
+			const repoRunDir = path.join(RUNS_ROOT, key);
+			if (!fs.existsSync(repoRunDir)) continue;
+			for (const ent of fs.readdirSync(repoRunDir, { withFileTypes: true })) {
+				if (!ent.isDirectory()) continue;
+				const runDir = path.join(repoRunDir, ent.name);
+				const sp = path.join(runDir, "state.json");
+				if (!fs.existsSync(sp)) continue;
+				try {
+					const st = JSON.parse(fs.readFileSync(sp, "utf8")) as { mode?: string; status?: string; slug?: string; resumeNext?: string | null; updatedAt?: string; createdAt?: string };
+					if (st.mode !== "night" || st.status !== "running") continue;
+					const tsMs = Date.parse(st.updatedAt || st.createdAt || "") || fs.statSync(sp).mtimeMs;
+					if (Number.isFinite(tsMs) && now - tsMs > maxAgeMs) continue;
+					const updatedAt = String(st.updatedAt || "");
+					if (!latest || updatedAt.localeCompare(latest.updatedAt) > 0) {
+						latest = {
+							slug: String(st.slug || ent.name),
+							resumeNext: st.resumeNext ?? null,
+							updatedAt,
+							hasReport: fs.existsSync(path.join(runDir, "morning-report.md")),
+						};
+					}
+				} catch {}
+			}
 		}
 	} catch {
 		return null;
@@ -613,8 +597,37 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 }
 
 	pi.on("agent_settled", (_e, ctx) => {
+		if (writeGate !== "none" && gatePreSnapshot) {
+			const postSnap = readGitSnapshot(ctx.cwd);
+			if (postSnap.isGit) {
+				const newlyDirtyLines = postSnap.statusLines.filter((line) => !gatePreSnapshot!.has(line));
+				const unexpectedPaths: string[] = [];
+				for (const line of newlyDirtyLines) {
+					const trimmed = line.trim();
+					if (trimmed === "?? node_modules" || trimmed === "?? node_modules/") continue;
+					for (const rel of parsePorcelainPaths(line)) {
+						const targets =
+							writeGate === "plan" && line.startsWith("?? ") && rel.endsWith("/") && rel !== "node_modules/"
+								? expandUntrackedDirPaths(ctx.cwd, rel.replace(/\/+$/, ""))
+								: [rel];
+						for (const t of targets) {
+							if (!sharedIsWriteAllowedUnderGate(t, ctx.cwd, writeGate)) unexpectedPaths.push(t);
+						}
+					}
+				}
+				if (unexpectedPaths.length > 0 && !isSilentSession(ctx)) {
+					const unique = [...new Set(unexpectedPaths)];
+					const preview = unique.slice(0, 5).join(", ") + (unique.length > 5 ? ` (+${unique.length - 5})` : "");
+					ctx.ui.notify(
+						`[zee-${writeGate}🔒] 检测到保护锁期间新增非白名单仓库改动（可能由终端命令写入）：${preview}。请确认是否需要回滚。`,
+						"warning",
+					);
+				}
+				gatePreSnapshot = new Set(postSnap.statusLines);
+			}
+		}
+
 		if (writeGate === "review") setGate("none", ctx);
-		else if (writeGate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) setGate("none", ctx);
 
 		const unfinishedNight = findUnfinishedNightRun(ctx.cwd);
 		if (unfinishedNight && writeGate === "none" && !isSilentSession(ctx)) {
@@ -639,7 +652,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				else if (sName === "zee-verify") nextGate = /^run\b/i.test(skillArgs) ? "review" : "none";
 				else if (sName === "zee") nextGate = inferGateFromZeeArgs(skillArgs);
 				if (writeGate !== nextGate) setGate(nextGate, ctx);
-			} else if (/^\/(?:skill:)?zee-plan\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee\s+plan\b/i.test(promptTrimmed)) {
+			} else if (/^\/(?:skill:)?zee-plan\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee\s+(?:plan|init)\b/i.test(promptTrimmed)) {
 				setGate("plan", ctx);
 			} else if (/^\/(?:skill:)?zee-review\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee\s+review\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee-verify\s+run\b/i.test(promptTrimmed)) {
 				setGate("review", ctx);
@@ -650,8 +663,6 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				const subMatch = promptTrimmed.match(/^\/(?:skill:)?zee\s+(.+)$/i);
 				const nextGate = subMatch ? inferGateFromZeeArgs(subMatch[1]) : "none";
 				if (writeGate !== nextGate) setGate(nextGate, ctx);
-			} else if (writeGate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
-				setGate("none", ctx);
 			}
 		}
 
@@ -667,9 +678,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			event.systemPromptOptions.sections.zee =
 				writeGate === "plan"
 					? "## zee Write Lock (`plan`)\n禁止修改业务源码，仅允许写入计划文档、GLOSSARY/ADR、总线或 /tmp/zee-*。"
-					: writeGate === "init-design"
-						? "## zee Write Lock (`init-design`)\n0→1 设计期禁止写入业务源码，直到 M0 写出 .agents/zee.project.json 解锁。"
-						: "## zee Write Lock (`review`)\n只读验收/审查期禁止修改仓库文件，仅允许写运行总线或 /tmp/zee-*。";
+					: "## zee Write Lock (`review`)\n只读验收/审查期禁止修改仓库文件，仅允许写运行总线或 /tmp/zee-*。";
 			return undefined;
 		}
 		event.systemPromptOptions.sections.zee = buildZeeSection(routingMode, writeGate);
@@ -677,9 +686,6 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		if (writeGate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
-			setGate("none", ctx);
-		}
 		if (isToolCallEventType("bash", event) || isToolCallEventType("powershell", event)) {
 			const command = event.input.command;
 			const denyReason = checkProjectDenyCommands(command, ctx.cwd);
@@ -701,9 +707,6 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				const reason = `当前处于 zee-${writeGate} 保护锁，禁止修改 "${rawPath}"。如需写代码请调用 /zee 执行计划。`;
 				if (!isSilentSession(ctx)) ctx.ui.notify(reason, "warning");
 				return { block: true, reason };
-			}
-			if (writeGate === "init-design" && sameResolvedPath(normalizeToolPath(rawPath, ctx.cwd), path.join(ctx.cwd, ".agents", "zee.project.json"))) {
-				setGate("none", ctx);
 			}
 		}
 		return undefined;
@@ -734,7 +737,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 		},
 	});
 
-	// 2. 6 个极简核心技能命令
+	// 2. 7 个极简核心技能命令
 	const registerSkillCmd = (
 		name: string,
 		description: string,
@@ -757,16 +760,20 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 		});
 	};
 
-	registerSkillCmd("zee", "个人主厨研发主入口（直做 / 标准 / 高危 + 专项 Playbook）", (args) => inferGateFromZeeArgs(args));
-	registerSkillCmd("zee-plan", "先查代码再极简提问，产出可执行计划或 0→1 方案（带 plan 锁）", "plan");
-	registerSkillCmd("zee-verify", "项目实机验证技能全生命周期：init / maintain / run", (args) => (/^run\b/i.test(args.trim()) ? "review" : "none"));
-	registerSkillCmd("zee-review", "只读跨家族三轴实证审查（含防作弊与防泄密扫描）", "review", [
-		{ value: "--strict", label: "--strict — 跨家族三轴对抗审查（默认）" },
-		{ value: "--quick", label: "--quick — 轻量单轮快审" },
+	registerSkillCmd("zee", "个人主厨研发主入口（直做 / 标准 / 高危 + 8 份按需剧本）", (args) => inferGateFromZeeArgs(args));
+	registerSkillCmd("zee-plan", "先查代码与原型探针再极简提问，产出可执行计划与原子 units（带 plan 锁）", "plan");
+	registerSkillCmd("zee-verify", "项目实机验证全生命周期：init / maintain / run", (args) => (/^run\b/i.test(args.trim()) ? "review" : "none"), [
+		{ value: "run", label: "run — 执行实机验证 + gate-tamper-diff（默认）" },
+		{ value: "init", label: "init — 读仓生成并自跑验真 .agents/verify-ctl.mjs" },
+		{ value: "maintain", label: "maintain — 核对入口漂移并串行复跑保鲜" },
+	]);
+	registerSkillCmd("zee-review", "只读跨家族实证对抗审查与爆炸半径校验", "review", [
+		{ value: "--strict", label: "--strict — 隔离沙盒 + 跨家族实证对抗审查（默认）" },
+		{ value: "--quick", label: "--quick — 聚焦 diff 轻量单轮快审" },
 	]);
 	registerSkillCmd("zee-night", "个人主厨无人值守过夜模式（本地隔离分支 + 3 分钟中文晨报）", "none");
-	registerSkillCmd("zee-retro", "复盘并固化进环境（架构/Lint/测试/删死规则 + Bite Proof）", "none");
-	registerSkillCmd("zee-setup", "探活可用模型并配置 fast / workhorse / adversary 三槽位（Schema v3）", "none");
+	registerSkillCmd("zee-retro", "实证复盘 + 4 级环境固化阶梯（架构/Lint/测试/文档 + Bite Proof）", "none");
+	registerSkillCmd("zee-setup", "按能力梯队为当前宿主配置 fast / workhorse / adversary 三槽位（单宿主隔离）", "none");
 
 	// 3. zee_subagent 工具
 	pi.registerTool({
@@ -803,11 +810,11 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				}
 			}
 
-			if (role === "reviewer" && params.authorFamily && effectiveModel) {
+			if ((role === "reviewer" || role === "judge") && params.authorFamily && effectiveModel) {
 				const authorFam = extractModelFamily(params.authorFamily);
 				const reviewerFam = extractModelFamily(effectiveModel);
 				if (authorFam && reviewerFam && authorFam === reviewerFam) {
-					throw new Error(`[zee_subagent:reviewer] 跨家族拦截：审查员 "${effectiveModel}" (${reviewerFam}) 与作者家族 "${authorFam}" 相同！`);
+					throw new Error(`[zee_subagent:${role}] 跨家族拦截：审查/裁决模型 "${effectiveModel}" (${reviewerFam}) 与作者家族 "${authorFam}" 相同！`);
 				}
 			}
 			if (signal?.aborted) throw new Error(`[zee_subagent:${role}] 启动前已被取消。`);
@@ -819,7 +826,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			let effectiveCwd = path.resolve(ctx.cwd, params.cwd ?? ".");
 			const effectiveBusDir =
 				params.busDir?.trim() ||
-				(params.worktree ? path.join(RUNS_ROOT, repoKeyFor(params.worktree.repoRoot), sanitizeSlug(params.worktree.slug)) : "");
+				(params.worktree ? path.join(resolveRepoRunDir(RUNS_ROOT, params.worktree.repoRoot), sanitizeSlug(params.worktree.slug)) : "");
 
 			if (params.worktree) {
 				const wtInfo = prepareAtomicWorktree(params.worktree);
@@ -954,8 +961,8 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 
 					const terminateChild = () => {
 						if (closed || exited || proc.exitCode !== null || proc.signalCode !== null) return;
-						try { proc.kill("SIGTERM"); } catch { return; }
-						killTimer = setTimeout(() => { if (!closed && !exited) { try { proc.kill("SIGKILL"); } catch {} } }, 5000);
+						killProcessTree(proc, { force: false });
+						killTimer = setTimeout(() => { if (!closed && !exited) killProcessTree(proc, { force: true }); }, 5000);
 					};
 
 					const processLine = (line: string) => {
@@ -1249,11 +1256,12 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				else if (timedOut) { details.status = "timeout"; details.stopReason = "timeout"; tag = "TIMEOUT_PARTIAL"; reasonLine = `墙钟超时（>${Math.round(timeoutMs / 1000)}s）`; }
 				else { details.status = "aborted"; details.stopReason = "aborted"; }
 
-				const streamTrimmed = streamingAssistantText.trim();
-				const rescuedText = streamTrimmed || latestAssistantText.trim();
+				const streamTrimmed = stripAnsiAndControl(streamingAssistantText).trim();
+				const rescuedText = streamTrimmed || stripAnsiAndControl(latestAssistantText).trim();
 				const partialArtifactPath = persistPartialSalvage(effectiveBusDir, role, rescuedText);
 				if (partialArtifactPath) details.partialArtifactPath = partialArtifactPath;
 
+				const cleanStderr = stripAnsiAndControl(stderrText).trim();
 				const partialParts = [
 					cooldownNoticeBanner.trim(), normNoticeBanner.trim(), branchNote.trim(),
 					`[STATUS: ${tag}] ${reasonLine}`,
@@ -1261,13 +1269,13 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 					partialArtifactPath ? `[已落盘完整抢救稿] ${partialArtifactPath}` : "",
 					violationBanner.trim(), budgetCutoffBanner.trim(),
 					rescuedText ? `${streamTrimmed ? "[已抢救的部分输出（流式未结正文）]" : "[已抢救的部分输出]"}\n${truncateSubagentOutput(rescuedText)}` : "[已抢救的部分输出] （无正文）",
-					stderrText.trim() ? `[stderr 摘要]\n${stderrText.trim().slice(0, 400)}` : "",
+					cleanStderr ? `[stderr 摘要]\n${cleanStderr.slice(0, 400)}` : "",
 				].filter(Boolean);
 				return { content: [{ type: "text", text: `${partialParts.join("\n\n")}${metaLine.replace("status=running", `status=${details.status}`)}` }], details };
 			}
 
 			details.status = "completed";
-			const body = truncateSubagentOutput((latestAssistantText.trim() || streamingAssistantText.trim()) || "(子代理未返回文本输出)");
+			const body = truncateSubagentOutput(stripAnsiAndControl(latestAssistantText.trim() || streamingAssistantText.trim()) || "(子代理未返回文本输出)");
 			return {
 				content: [{ type: "text", text: `${cooldownNoticeBanner}${normNoticeBanner}${branchNote}${violationBanner}${budgetCutoffBanner}${body}${metaLine.replace("status=running", "status=completed")}` }],
 				details,

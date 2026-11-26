@@ -121,6 +121,23 @@ test("Stop Hook 在 night running 且完全空闲时阻止静默断尾，非同�
       }),
       {},
     );
+
+    // 超过 24h 的陈旧 running night 总线应放行，不再永久卡死 Stop
+    const sp = path.join(busDir, "state.json");
+    const st = JSON.parse(fs.readFileSync(sp, "utf8"));
+    st.status = "running";
+    st.updatedAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(sp, JSON.stringify(st, null, 2), "utf8");
+    assert.deepEqual(
+      runHook({
+        hookEventName: "Stop",
+        cwd: repo,
+        conversationId: cid,
+        fullyIdle: true,
+        continuationActive: false,
+      }),
+      {},
+    );
   } finally {
     if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
     fs.rmSync(repo, { recursive: true, force: true });

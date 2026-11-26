@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { extractModelFamily } from "./guard-core.mjs";
 import { atomicWriteJson, withFileLock } from "./fs-atomic.mjs";
+import { stripAnsiAndControl } from "./repo-utils.mjs";
 
 export const DEFAULT_PROVIDER_HEALTH_PATH = path.join(os.homedir(), ".local", "state", "zee", "provider-health.json");
 export const DEFAULT_429_COOLDOWN_MS = Number(process.env.ZEE_COOLDOWN_429_MS) || 30 * 60 * 1000;
@@ -149,8 +150,8 @@ export function recordModelCooldown(provider, model, meta = {}, filePath, now = 
       provider: typeof provider === "string" && provider.trim() ? provider.trim() : undefined,
       model: typeof model === "string" && model.trim() ? model.trim() : undefined,
       kind,
-      reason: String(meta.reason || (kind === "rate_limit" ? "HTTP 429 / 配额耗尽" : "上游 5xx / 网络建连失败")),
-      errorSnippet: String(meta.errorSnippet || "").replace(/\s+/g, " ").trim().slice(0, 300),
+      reason: stripAnsiAndControl(String(meta.reason || (kind === "rate_limit" ? "HTTP 429 / 配额耗尽" : "上游 5xx / 网络建连失败"))),
+      errorSnippet: stripAnsiAndControl(String(meta.errorSnippet || "")).replace(/\s+/g, " ").trim().slice(0, 300),
       failures: (Number(prev?.failures) || 0) + 1,
       failedAt: new Date(now).toISOString(),
       cooldownUntil: now + ttlMs,
@@ -318,7 +319,7 @@ export function findHealthyPiFallback({
     if (!failedProvider && failedModelKey && cand.model.trim().toLowerCase() === failedModelKey) continue;
 
     const fam = extractModelFamily(cand.model);
-    if (r === "reviewer" && authFam && fam && fam === authFam) continue;
+    if ((r === "reviewer" || r === "judge") && authFam && fam && fam === authFam) continue;
 
     if (getModelCooldown(cand.provider, cand.model, now, healthPath).active) continue;
     return { provider: cand.provider, model: cand.model, family: fam, slotLabel: cand.slotLabel };

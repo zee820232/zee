@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee 多宿主安装器 (v5.0.0)
+ * zee 多宿主安装器 (v5.1.0)
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -14,13 +14,13 @@ const HOME = os.homedir();
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GITHUB_HTTPS = "https://github.com/zee820232/zee";
 const PI_GIT_SOURCE = "git:github.com/zee820232/zee";
-const SKILL_NAMES = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro", "zee-setup"];
+export const SKILL_NAMES = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro", "zee-setup"];
 
-function isEphemeralSource(forceRemote) {
+export function isEphemeralSource(forceRemote, repoRoot = REPO_ROOT) {
   if (forceRemote) return true;
-  if (REPO_ROOT.includes(`${path.sep}_npx${path.sep}`)) return true;
-  if (REPO_ROOT.includes(`${path.sep}node_modules${path.sep}`)) return true;
-  return !fs.existsSync(path.join(REPO_ROOT, ".git"));
+  if (repoRoot.includes(`${path.sep}_npx${path.sep}`)) return true;
+  if (repoRoot.includes(`${path.sep}node_modules${path.sep}`)) return true;
+  return !fs.existsSync(path.join(repoRoot, ".git"));
 }
 
 function hasBinary(bin) {
@@ -29,13 +29,13 @@ function hasBinary(bin) {
   return res.status === 0 && Boolean(res.stdout && res.stdout.trim());
 }
 
-function findDuplicateSkillDirs(rootDir) {
+export function findDuplicateSkillDirs(rootDir, repoRoot = REPO_ROOT) {
   const dups = [];
   for (const name of SKILL_NAMES) {
     const candidate = path.join(rootDir, name);
     if (fs.existsSync(candidate)) {
       try {
-        if (fs.realpathSync(candidate) !== fs.realpathSync(path.join(REPO_ROOT, "skills", name))) dups.push(candidate);
+        if (fs.realpathSync(candidate) !== fs.realpathSync(path.join(repoRoot, "skills", name))) dups.push(candidate);
       } catch { dups.push(candidate); }
     }
   }
@@ -49,12 +49,13 @@ function runCmd(cmd, args, dryRun) {
   execFileSync(cmd, args, { stdio: "inherit", shell: process.platform === "win32" && !path.isAbsolute(cmd) });
 }
 
-function cleanDups(roots, dryRun) {
-  const dups = roots.flatMap((r) => findDuplicateSkillDirs(r));
+export function cleanDups(roots, dryRun, repoRoot = REPO_ROOT) {
+  const dups = roots.flatMap((r) => findDuplicateSkillDirs(r, repoRoot));
   for (const d of dups) {
     if (dryRun) console.log(`[dry-run] 将删除旧副本: ${d}`);
     else fs.rmSync(d, { recursive: true, force: true });
   }
+  return dups;
 }
 
 function installPi(dryRun, useRemote) {
@@ -88,7 +89,7 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee v5.0.6 个人主厨工作流安装器
+  console.log(`zee v5.1.0 个人主厨工作流安装器
 
 用法：
   npx github:zee820232/zee --target <pi|agy|skills|both> [--dry-run] [--remote] [--doctor]`);
@@ -126,4 +127,19 @@ async function main() {
   }
 }
 
-main().catch((err) => { console.error("安装失败：", err.message || err); process.exit(1); });
+function canonicalizeEntryPath(p) {
+  try {
+    const real = (fs.realpathSync.native || fs.realpathSync)(p);
+    return process.platform === "win32" ? real.toLowerCase() : real;
+  } catch {
+    const abs = path.resolve(p);
+    return process.platform === "win32" ? abs.toLowerCase() : abs;
+  }
+}
+
+const isEntryPoint =
+  Boolean(process.argv[1]) &&
+  canonicalizeEntryPath(process.argv[1]) === canonicalizeEntryPath(fileURLToPath(import.meta.url));
+if (isEntryPoint) {
+  main().catch((err) => { console.error("安装失败：", err.message || err); process.exit(1); });
+}

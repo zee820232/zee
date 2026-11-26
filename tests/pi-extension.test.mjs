@@ -240,7 +240,7 @@ test("writeGate 保护锁守卫 write/edit 与 denyCommands，且不误拦只读
       assert.equal(blk?.block, true);
     }
 
-    // init-design 在尚无 .agents/zee.project.json 的新仓应锁定业务源码直到写出该文件
+    // /zee init 统一归入 plan 锁（消除 v4 init-design 死锁），并向下兼容旧分支 init-design 恢复
     const cleanRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-pi-init-"));
     try {
       const mInit = createMockPi({ cwd: cleanRepo });
@@ -251,12 +251,16 @@ test("writeGate 保护锁守卫 write/edit 与 denyCommands，且不误拦只读
         prompt: mInit.messages.at(-1).msg,
         systemPromptOptions: { sections: {} },
       });
-      assert.equal(mInit.statuses.at(-1)?.value, "zee:init🔒");
+      assert.equal(mInit.statuses.at(-1)?.value, "zee:plan🔒");
       const blkInit = await mInit.emit("tool_call", { toolName: "edit", input: { path: "src/a.js" } });
       assert.equal(blkInit?.block, true);
-      const allowProj = await mInit.emit("tool_call", { toolName: "write", input: { path: ".agents/zee.project.json" } });
-      assert.equal(allowProj, undefined);
-      assert.equal(mInit.statuses.at(-1)?.value, undefined);
+      const allowPlanDoc = await mInit.emit("tool_call", { toolName: "write", input: { path: "plan.md" } });
+      assert.equal(allowPlanDoc, undefined);
+
+      // 兼容旧分支条目 zee-gate: "init-design" -> 恢复为 plan🔒
+      mInit.entries.push({ type: "custom", customType: "zee-gate", data: { gate: "init-design" } });
+      await mInit.emit("session_start", {});
+      assert.equal(mInit.statuses.at(-1)?.value, "zee:plan🔒");
     } finally {
       fs.rmSync(cleanRepo, { recursive: true, force: true });
     }
@@ -512,9 +516,140 @@ test("resolveEffectiveSubagentTimeout 防止误传短超时掐死核心子代理
     assert.equal(resolveEffectiveSubagentTimeout("reviewer", undefined), 480_000);
     assert.equal(resolveEffectiveSubagentTimeout("verifier", undefined), 300_000);
     assert.equal(resolveEffectiveSubagentTimeout("coder", undefined), 600_000);
-    assert.equal(resolveEffectiveSubagentTimeout("judge", 45_000), 45_000);
+    assert.equal(resolveEffectiveSubagentTimeout("judge", 45_000), 120_000);
+    assert.equal(resolveEffectiveSubagentTimeout("judge", undefined), 240_000);
   } finally {
     if (prev === undefined) delete process.env.ZEE_ALLOW_SHORT_TIMEOUT;
     else process.env.ZEE_ALLOW_SHORT_TIMEOUT = prev;
+  }
+});
+
+test("v5.1.0：judge 双重跨家族拦截、plan/review 锁增量脏树告警与过夜 24h 陈旧总线过滤", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v510-pi-"));
+  const cfgPath = path.join(tmpDir, "zee-config.json");
+  const healthPath = path.join(tmpDir, "provider-health.json");
+  const repo = path.join(tmpDir, "repo");
+  const prevCfg = process.env.ZEE_CONFIG_PATH;
+  const prevHealth = process.env.ZEE_PROVIDER_HEALTH_PATH;
+  const prevStale = process.env.ZEE_NIGHT_STALE_MS;
+  let staleBusDir = "";
+  try {
+    fs.mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "z@e.c"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "z"], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const a = 1;\n", "utf8");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: repo });
+
+    // 1. judge 在 zee_subagent 与 provider-health 切备两处均强制拦截同家族
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        version: 3,
+        harnesses: {
+          pi: {
+            slots: {
+              fast: { prefer: { providerInstanceId: "magpie", model: "auto/gemini-4-hydrogen" } },
+              workhorse: { prefer: { providerInstanceId: "magpie", model: "auto/gpt-6.2-astra" } },
+              adversary: { prefer: { providerInstanceId: "magpie", model: "magpie-2/vm/claude-sonnet-5-5" } },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    process.env.ZEE_CONFIG_PATH = cfgPath;
+    process.env.ZEE_PROVIDER_HEALTH_PATH = healthPath;
+
+    const m = createMockPi({ cwd: repo });
+    zeeExtension(m.pi);
+    const subTool = m.tools.get("zee_subagent");
+    await assert.rejects(
+      () =>
+        subTool.execute("tc-judge-same", {
+          task: "judge diff",
+          role: "judge",
+          provider: "magpie",
+          model: "auto/gpt-6.2-astra",
+          authorFamily: "openai",
+        }, undefined, undefined, m.ctx),
+      /跨家族拦截/,
+    );
+
+    // 当 adversary 冷却时，judge 切备绝不能回退到同家族 workhorse (openai)，应跳过 openai 选 gemini (fast)
+    recordModelCooldown("magpie", "magpie-2/vm/claude-sonnet-5-5", { kind: "rate_limit" }, healthPath);
+    const alt = findHealthyPiFallback({
+      role: "judge",
+      failedProvider: "magpie",
+      failedModel: "magpie-2/vm/claude-sonnet-5-5",
+      authorFamily: "openai",
+      configPath: cfgPath,
+      healthPath,
+    });
+    assert.ok(alt, "应切到不同家族的健康备胎");
+    assert.notEqual(alt.family, "openai", "judge 切备绝不能回退到与作者同家族的 workhorse");
+    assert.equal(alt.family, "gemini");
+    clearModelCooldown("", healthPath);
+
+    // 2. review/plan 锁增量脏树告警：进锁前已有脏文件与合法 docs/plans/* 不误报；锁期间新增非白名单文件触发警告
+    fs.writeFileSync(path.join(repo, "pre-existing.ts"), "export const old = 1;\n", "utf8");
+    await m.commands.get("zee-review").handler("--quick", m.ctx);
+    const notifCountBefore = m.notifications.length;
+    await m.emit("agent_settled", {});
+    assert.equal(
+      m.notifications.slice(notifCountBefore).some((n) => /保护锁期间新增非白名单/.test(n.msg)),
+      false,
+      "进锁前已存在的未提交改动不应触发误报",
+    );
+
+    await m.commands.get("zee-plan").handler("架构规划", m.ctx);
+    fs.mkdirSync(path.join(repo, "docs", "plans"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "docs", "plans", "arch.md"), "# Plan\n", "utf8");
+    const notifBeforePlan = m.notifications.length;
+    await m.emit("agent_settled", {});
+    assert.equal(
+      m.notifications.slice(notifBeforePlan).some((n) => /保护锁期间新增非白名单/.test(n.msg)),
+      false,
+      "/zee-plan 合法写入新建 docs/plans/*.md 不应因折叠目录 ?? docs/ 误报",
+    );
+    await m.commands.get("zee").handler("执行计划", m.ctx);
+
+    await m.commands.get("zee-review").handler("--strict", m.ctx);
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const a = 2;\n", "utf8");
+    fs.writeFileSync(path.join(repo, "越权中文文件.md"), "oops\n", "utf8");
+    const notifCountBeforeDirty = m.notifications.length;
+    await m.emit("agent_settled", {});
+    assert.equal(
+      m.notifications.slice(notifCountBeforeDirty).some((n) => n.level === "warning" && /保护锁期间新增非白名单[\s\S]*app\.ts/.test(n.msg)),
+      true,
+      "锁期间新增非白名单改动应发出告警",
+    );
+    assert.equal(
+      m.notifications.slice(notifCountBeforeDirty).some((n) => n.level === "warning" && /越权中文文件\.md/.test(n.msg)),
+      true,
+      "core.quotepath=false 应正确识别中文文件名不输出八进制转义",
+    );
+
+    // 3. 超过 24h 的陈旧 night running 总线不再误报 zee:night⚠
+    const zeeTool = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
+    const init = JSON.parse(execFileSync(process.execPath, [zeeTool, "init-run", repo, "stale-night", "--mode", "night"], { encoding: "utf8" }));
+    staleBusDir = init.busDir;
+    const sp = path.join(staleBusDir, "state.json");
+    const st = JSON.parse(fs.readFileSync(sp, "utf8"));
+    st.status = "running";
+    st.updatedAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(sp, JSON.stringify(st, null, 2), "utf8");
+
+    const mFresh = createMockPi({ cwd: repo });
+    zeeExtension(mFresh.pi);
+    await mFresh.emit("agent_settled", {});
+    assert.notEqual(mFresh.statuses.at(-1)?.value, "zee:night⚠", "超过 24h 的陈旧过夜总线不应继续弹警告");
+  } finally {
+    if (prevCfg === undefined) delete process.env.ZEE_CONFIG_PATH; else process.env.ZEE_CONFIG_PATH = prevCfg;
+    if (prevHealth === undefined) delete process.env.ZEE_PROVIDER_HEALTH_PATH; else process.env.ZEE_PROVIDER_HEALTH_PATH = prevHealth;
+    if (prevStale === undefined) delete process.env.ZEE_NIGHT_STALE_MS; else process.env.ZEE_NIGHT_STALE_MS = prevStale;
+    if (staleBusDir) fs.rmSync(path.dirname(staleBusDir), { recursive: true, force: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

@@ -1,5 +1,10 @@
 # Changelog
 
+## [5.0.2] - 2026-11-26
+
+### Added
+- **新增 `skills/zee/playbooks/understand.md`**：吸收 `pstack` 的 `how`/`why` 动态只读摸底与 `matt-pocock-skills` 懒沉淀理念，面向接手陌生老项目提供现状运行流追踪、`git log` 历史溯源与极薄 `AGENTS.md` / `GLOSSARY.md` 按需沉淀规范（不生成易过时静态目录地图，也不增加额外斜杠命令）。
+
 ## [5.0.1] - 2026-11-26
 
 > 基于 `D:\proj\poke-zee` 真实 Pi RPC 全链路实战与 `gemini-4-neon` 独立监督审查（`6.4 / 10`）暴露的 P0/P1 缺陷实施专项修复。

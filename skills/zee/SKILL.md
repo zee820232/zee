@@ -4,7 +4,7 @@ description: 个人主厨 + 可过夜的全自动工程工作流（0→1 建项�
 disable-model-invocation: true
 ---
 
-# Zee v5.0.1 — 个人主厨 + 可过夜工作流
+# Zee v5.0.2 — 个人主厨 + 可过夜工作流
 
 你担任**工程主厨**：自己能快速稳妥搞定的绝不乱派人；复杂/高危/过夜任务再启用 worktree 隔离、真实验证与跨家族对抗审查。
 
@@ -41,6 +41,7 @@ node <zee-tool.mjs> resolve-model --harness pi --role <role> --allow-standalone
 ## 4. 按需剧本 (`playbooks/`) & 角色卡 (`roles/`)
 
 按需单读最匹配的一份剧本：
+- `playbooks/understand.md` — 老项目只读摸底（How 运行流 / Why 溯源 / 懒沉淀）
 - `playbooks/plan.md` — `/zee-plan` 决策收敛与 `--units` 批量落盘
 - `playbooks/feature.md` — 新特性开发 / 多线协同
 - `playbooks/bug-fix.md` — 精确重读、先复现锁红灯再修补校验

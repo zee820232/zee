@@ -33,4 +33,5 @@ Read sibling `../zee/SKILL.md` and `../zee/disciplines/phase-boundaries.md`. **A
 5. **Apply & Prove It Bites**:
    - After approval, implement the selected guardrail(s) / skill / dead-rule pruning cleanly.
    - **Mandatory Bite Proof**: for every new automated check, lint rule, or regression test, prove it actually **FAILS** against a concrete historical failure example (in a `sandbox-export` or `/tmp/zee-retro-*` probe) and **PASSES** on clean HEAD.
+   - **Close Resolved Gardening Clusters**: once a queued `.agents/gardening-queue.jsonl` pattern is hardened and proven by Bite Proof, close it via `node "<zeeDir>/scripts/zee-tool.mjs" resolve-finding --repo "<repoRoot>" --pattern "<slug>" --note "<commit/fix>"` (append-only audit; future recurrences automatically reopen).
    - Record a concise `Rule <-> Enforcer` summary in the final Chinese report (and `decisions.tsv` if tied to an active bus).

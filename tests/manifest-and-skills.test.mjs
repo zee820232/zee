@@ -44,11 +44,11 @@ function readRepoFile(relPath) {
   return fs.readFileSync(path.join(REPO_ROOT, relPath), "utf8");
 }
 
-test("package.json 与 .antigravity-plugin/plugin.json 版本严格一致且为 4.2.1（Pi 防重影去除 pi.skills，含可选 pi-tui）", () => {
+test("package.json 与 .antigravity-plugin/plugin.json 版本严格一致且为 4.2.2（Pi 防重影去除 pi.skills，含可选 pi-tui）", () => {
   const pkg = JSON.parse(readRepoFile("package.json"));
   const plugin = JSON.parse(readRepoFile(".antigravity-plugin/plugin.json"));
-  assert.equal(pkg.version, "4.2.1");
-  assert.equal(plugin.version, "4.2.1");
+  assert.equal(pkg.version, "4.2.2");
+  assert.equal(plugin.version, "4.2.2");
   assert.equal(pkg.version, plugin.version);
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
   assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills（避免与扩展命令产生 /skill:zee* 重影）");

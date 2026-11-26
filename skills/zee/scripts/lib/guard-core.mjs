@@ -1100,10 +1100,33 @@ function isSafeZeeToolInvocation(tokens) {
     "mine-transcripts",
     "queue-finding",
     "list-findings",
+    "resolve-finding",
     "readiness",
     "match-skills",
     "provider-health",
   ]).has(sub);
+}
+
+/**
+ * 剥离分词后残留在命令片段内的 Shell 重定向 token（如 2>&1、>&2、>/dev/null、2>/dev/null、< file、> file），
+ * 防止 cp/rm/mkdir/mv/sed 把 `2>&1` 误当成最后一个目标路径（输出重定向目标已由 extractOutputRedirects 先行校验）。
+ */
+function stripShellRedirectionTokens(tokens) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    // 独立重定向符（如 >, >>, <, 2>, 2>>, 1>, &>, &>>）：跳过重定向符及其紧随目标
+    if (/^(?:\d*|&)(?:>>?|<)$/.test(tok)) {
+      i += 1;
+      continue;
+    }
+    // 合并型重定向 token（如 2>&1, >&2, 1>&2, 2>/dev/null, >/tmp/x, </tmp/x, &>/dev/null）
+    if (/^(?:\d*|&)(?:>>?&?\d*|>>?.*|<.*)$/.test(tok) && /[<>]/.test(tok)) {
+      continue;
+    }
+    out.push(tok);
+  }
+  return out;
 }
 
 const SAFE_IGNORED_ARTIFACT_DIRS = new Set([
@@ -1166,6 +1189,7 @@ function isSafeIgnoredBuildArtifact(rawTarget, repoCwd, virtualCwd) {
 }
 
 function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, extraAllowedDirs) {
+  const cleanTokens = stripShellRedirectionTokens(tokens);
   const isAllowed = (rawTarget) => {
     if (isProtectedTarget(rawTarget, virtualCwd)) return false;
     const resolved = normalizeToolPath(rawTarget, virtualCwd);
@@ -1176,15 +1200,15 @@ function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, ext
     let explicitTargetDir = null;
     const cpArgs = [];
     let cpEnd = false;
-    for (let i = 1; i < tokens.length; i++) {
-      const tok = tokens[i];
+    for (let i = 1; i < cleanTokens.length; i++) {
+      const tok = cleanTokens[i];
       if (tok === "--") {
         cpEnd = true;
         continue;
       }
       if (!cpEnd && (tok === "-t" || tok === "--target-directory")) {
-        if (i + 1 < tokens.length) {
-          explicitTargetDir = tokens[i + 1];
+        if (i + 1 < cleanTokens.length) {
+          explicitTargetDir = cleanTokens[i + 1];
           i += 1;
         }
         continue;
@@ -1210,8 +1234,8 @@ function checkAllowlistedFileOp(verb, tokens, repoCwd, virtualCwd, gateMode, ext
 
   const args = [];
   let endOfOpts = false;
-  for (let i = 1; i < tokens.length; i++) {
-    const tok = tokens[i];
+  for (let i = 1; i < cleanTokens.length; i++) {
+    const tok = cleanTokens[i];
     if (tok === "--") {
       endOfOpts = true;
       continue;
@@ -1408,14 +1432,71 @@ const SANDBOX_SAFE_GIT_SUBCMDS = new Set([
   "tag",
 ]);
 
+function isPatchConfinedToSandbox(tokens, repoCwd, virtualCwd) {
+  const cleanTokens = stripShellRedirectionTokens(tokens);
+  let patchDir = virtualCwd;
+  const outputPaths = [];
+  const positionals = [];
+  let endOfOpts = false;
+
+  for (let i = 1; i < cleanTokens.length; i++) {
+    const tok = cleanTokens[i];
+    if (endOfOpts) {
+      positionals.push(tok);
+      continue;
+    }
+    if (tok === "--") {
+      endOfOpts = true;
+      continue;
+    }
+    if ((tok === "-d" || tok === "--directory") && i + 1 < cleanTokens.length) {
+      patchDir = normalizeToolPath(cleanTokens[i + 1], patchDir);
+      i += 1;
+      continue;
+    }
+    if (tok.startsWith("--directory=")) {
+      patchDir = normalizeToolPath(tok.slice("--directory=".length), patchDir);
+      continue;
+    }
+    if ((tok === "-o" || tok === "--output" || tok === "-r" || tok === "--reject-file") && i + 1 < cleanTokens.length) {
+      outputPaths.push(cleanTokens[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (tok.startsWith("--output=") || tok.startsWith("--reject-file=")) {
+      outputPaths.push(tok.slice(tok.indexOf("=") + 1));
+      continue;
+    }
+    if ((tok === "-i" || tok === "--input" || tok === "-p" || tok === "--strip" || tok === "-F" || tok === "--fuzz" || tok === "-b" || tok === "--suffix" || tok === "-B" || tok === "--prefix") && i + 1 < cleanTokens.length) {
+      if (tok === "-p" || tok === "--strip" || tok === "-i" || tok === "--input" || tok === "-F" || tok === "--fuzz" || tok === "-b" || tok === "--suffix" || tok === "-B" || tok === "--prefix") {
+        i += 1;
+      }
+      continue;
+    }
+    if (tok.startsWith("-")) continue;
+    positionals.push(tok);
+  }
+
+  if (!isAllowedZeeTmpPath(patchDir, repoCwd)) return false;
+  for (const outP of outputPaths) {
+    if (!isAllowedZeeTmpPath(normalizeToolPath(outP, patchDir), repoCwd)) return false;
+  }
+  // patch [origfile [patchfile]]：首个位置参数若存在则代表被修改的 origfile，必须留在沙盒内
+  if (positionals.length >= 1) {
+    if (!isAllowedZeeTmpPath(normalizeToolPath(positionals[0], patchDir), repoCwd)) return false;
+  }
+  return true;
+}
+
 function extractInPlaceFileTargets(verb, tokens) {
+  const cleanTokens = stripShellRedirectionTokens(tokens);
   if (verb === "sed") {
     let hasExprFlag = false;
     let sawStandaloneInPlace = false;
     let endOfOpts = false;
     const positionals = [];
-    for (let i = 1; i < tokens.length; i++) {
-      const tok = tokens[i];
+    for (let i = 1; i < cleanTokens.length; i++) {
+      const tok = cleanTokens[i];
       if (endOfOpts) {
         positionals.push(tok);
         continue;
@@ -1426,7 +1507,7 @@ function extractInPlaceFileTargets(verb, tokens) {
       }
       if (tok === "-e" || tok === "--expression" || tok === "-f" || tok === "--file") {
         hasExprFlag = true;
-        if (i + 1 < tokens.length) i += 1;
+        if (i + 1 < cleanTokens.length) i += 1;
         continue;
       }
       if (tok.startsWith("--expression=") || tok.startsWith("--file=")) {
@@ -1441,7 +1522,7 @@ function extractInPlaceFileTargets(verb, tokens) {
       if (tok.startsWith("-")) {
         if (/^-[a-zA-Z]*[ef]$/.test(tok) && !tok.startsWith("--")) {
           hasExprFlag = true;
-          if (i + 1 < tokens.length) i += 1;
+          if (i + 1 < cleanTokens.length) i += 1;
         }
         continue;
       }
@@ -1463,8 +1544,8 @@ function extractInPlaceFileTargets(verb, tokens) {
     let hasInlineCode = false;
     let endOfOpts = false;
     const positionals = [];
-    for (let i = 1; i < tokens.length; i++) {
-      const tok = tokens[i];
+    for (let i = 1; i < cleanTokens.length; i++) {
+      const tok = cleanTokens[i];
       if (endOfOpts) {
         positionals.push(tok);
         continue;
@@ -1475,17 +1556,17 @@ function extractInPlaceFileTargets(verb, tokens) {
       }
       if (tok === "-e" || tok === "-E") {
         hasInlineCode = true;
-        if (i + 1 < tokens.length) i += 1;
+        if (i + 1 < cleanTokens.length) i += 1;
         continue;
       }
       if (tok === "-I") {
-        if (i + 1 < tokens.length) i += 1;
+        if (i + 1 < cleanTokens.length) i += 1;
         continue;
       }
       if (tok.startsWith("-")) {
         if (!tok.startsWith("--") && /[eE]$/.test(tok)) {
           hasInlineCode = true;
-          if (i + 1 < tokens.length) i += 1;
+          if (i + 1 < cleanTokens.length) i += 1;
         }
         continue;
       }
@@ -1739,6 +1820,9 @@ export function checkBashUnderGate(command, cwd, gateMode, extraAllowedDirs = []
       }
 
       if (MUTATING_FILE_VERBS.has(verb)) {
+        if (verb === "patch" && isPatchConfinedToSandbox(stripped, effectiveCwd, virtualCwd)) {
+          continue;
+        }
         return `当前处于 zee ${modeLabel}模式，已拦截文件增删改命令 (${verb})。`;
       }
 

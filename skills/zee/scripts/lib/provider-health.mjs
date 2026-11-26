@@ -46,9 +46,18 @@ export function makeModelHealthKey(provider, model) {
   return m || p;
 }
 
-export function classifyTransientProviderFailure({ errorMessage = "", stderrText = "", exitCode = null, turns = 0, hasOutput = false } = {}) {
+export function classifyTransientProviderFailure({
+  errorMessage = "",
+  stderrText = "",
+  exitCode = null,
+  turns = 0,
+  hasOutput = false,
+  hasToolCalls = false,
+  outputTokens = 0,
+} = {}) {
   const turnCount = Number(turns) || 0;
-  if (hasOutput || turnCount > 1) {
+  const outTokens = Number(outputTokens) || 0;
+  if (hasOutput || hasToolCalls || outTokens > 0 || turnCount > 1) {
     return { transient: false, kind: null, ttlMs: 0, reason: "" };
   }
   const combined = `${errorMessage || ""}\n${stderrText || ""}`.trim();

@@ -424,3 +424,55 @@ test("v4.2.1 只读锁自伤解除：sandbox git apply、cp -t /tmp/zee-*、<bus
     fs.rmSync(path.dirname(tmpBus), { recursive: true, force: true });
   }
 });
+
+test("v4.2.2 回归 [P1/P2]：剥离 2>&1 重定向放行沙盒 cp/rm、放行沙盒内 patch（仍拦仓库 patch）、放行 resolve-finding", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-guard-"));
+  try {
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "t@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.mkdirSync(path.join(tmpRepo, "test-results"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, ".gitignore"), "test-results/\n");
+    execFileSync("git", ["-C", tmpRepo, "add", ".gitignore"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+
+    // 1. cp -R node_modules $S/node_modules 2>&1 不得把 2>&1 误当目标路径
+    assert.equal(
+      checkBashUnderGate(
+        "S=/tmp/zee-mut-abc123; cp -R node_modules $S/node_modules 2>&1 | tail -1",
+        tmpRepo,
+        "review",
+      ),
+      null,
+    );
+    assert.equal(checkBashUnderGate("rm -rf test-results 2>/dev/null", tmpRepo, "review"), null);
+    // 仍严格拦截向仓库内目录的 cp 2>&1
+    assert.ok(checkBashUnderGate("cp src/a.ts src/b.ts 2>&1", tmpRepo, "review"));
+
+    // 2. 严格位于 /tmp/zee-* 沙盒内的 patch 放行；主仓 patch 或 -o 逃逸出沙盒必须硬拦
+    assert.equal(
+      checkBashUnderGate("(cd /tmp/zee-mut-abc123 && patch -p1 < /tmp/zee-rev-1/fix.patch)", tmpRepo, "review"),
+      null,
+    );
+    assert.equal(
+      checkBashUnderGate("patch -d /tmp/zee-mut-abc123 -p1 < /tmp/zee-rev-1/fix.patch", tmpRepo, "review"),
+      null,
+    );
+    assert.ok(checkBashUnderGate("patch -p1 < /tmp/zee-rev-1/fix.patch", tmpRepo, "review"));
+    assert.ok(
+      checkBashUnderGate(
+        `patch -d /tmp/zee-mut-abc123 -p1 -o "${path.join(tmpRepo, "src", "evil.ts")}" < /tmp/zee-rev-1/fix.patch`,
+        tmpRepo,
+        "review",
+      ),
+    );
+
+    // 3. zee-tool.mjs resolve-finding 在只读锁下放行
+    assert.equal(
+      checkBashUnderGate(`node skills/zee/scripts/zee-tool.mjs resolve-finding --repo "${tmpRepo}" --pattern foo`, tmpRepo, "review"),
+      null,
+    );
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});

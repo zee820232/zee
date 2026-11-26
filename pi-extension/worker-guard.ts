@@ -1,8 +1,8 @@
 /**
- * zee Worker Guard Extension (v5.0.0)
+ * zee Worker Guard Extension (v5.2.0)
  *
  * 供 zee_subagent 启动的 Pi 子进程通过 `-ne -e worker-guard.ts` 挂载：
- * 1. 对所有角色执行项目 denyCommands（token 边界匹配）与通用破坏性命令拦截
+ * 1. 对所有角色执行项目 denyCommands（token 边界匹配）与跨平台破坏性命令拦截
  * 2. 对只读/门禁角色（scout / architect / judge / verifier / reviewer）拦截 write/edit 写入仓库源码
  */
 
@@ -30,7 +30,7 @@ export default function zeeWorkerGuard(pi: ExtensionAPI) {
 		const extraAllowedDirs = resolveExtraBusDir(ctx.cwd);
 
 		if (isToolCallEventType("bash", event) || isToolCallEventType("powershell", event)) {
-			const command = String((event.input as { command?: unknown })?.command ?? "");
+			const command = String((event.input as { command?: unknown } | undefined)?.command ?? "");
 			const denyReason = checkProjectDenyCommands(command, ctx.cwd);
 			if (denyReason) {
 				return { block: true, reason: `[zee-worker:${role || "worker"}] ${denyReason}` };
@@ -46,7 +46,7 @@ export default function zeeWorkerGuard(pi: ExtensionAPI) {
 		}
 
 		if (WRITE_LOCKED_ROLES.has(role) && (isToolCallEventType("write", event) || isToolCallEventType("edit", event))) {
-			const rawPath = String((event.input as { path?: unknown })?.path ?? "");
+			const rawPath = String((event.input as { path?: unknown } | undefined)?.path ?? "");
 			if (isToolCallEventType("edit", event)) {
 				return {
 					block: true,

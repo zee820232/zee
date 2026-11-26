@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v5.0.4 — 精简高杠杆确定性 CLI 原语（12 核心子命令）
+ * zee-tool.mjs v5.0.5 — 精简高杠杆确定性 CLI 原语（13 核心子命令）
  *
  * 子命令：
  *   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
@@ -12,6 +12,7 @@
  *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
  *   sandbox-clean <sandboxDir>
  *   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
+ *   recommend-models [--harness pi|t3|agy|codex|claude] [--budget large|medium|small] [--prefer-provider <id>] [--models '<json>'] [--models-file <path>]
  *   resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
  *   provider-health [--clear [modelKey]]
  *   doctor [--repo <path>] [--harness <h>]
@@ -51,6 +52,7 @@ const KNOWN_VALUE_FLAGS = new Set([
   "conversation-id", "budget", "unit-upsert", "units", "decision", "fallback",
   "branch", "base", "head", "sha", "prefix", "delegate-id", "surface", "role",
   "config", "dir", "unit", "phase", "why", "evidence", "result",
+  "models", "models-file", "prefer-provider",
 ]);
 
 const MULTI_VALUE_FLAGS = new Set(["unit-upsert", "fallback"]);
@@ -156,7 +158,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v5.0.4 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v5.0.5 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
 
 可用命令：
   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
@@ -168,6 +170,7 @@ function usage() {
   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
   sandbox-clean <sandboxDir>
   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
+  recommend-models [--harness pi|t3|agy|codex|claude] [--budget large|medium|small] [--prefer-provider <id>] [--models '<json>'] [--models-file <path>]
   resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
   provider-health [--clear [modelKey]]
   doctor [--repo <path>] [--harness <h>]`);
@@ -1030,6 +1033,26 @@ function extractBindingPair(spec, harness) {
   return null;
 }
 
+const MODELS_CATALOG_PATH = path.join(SOURCE_SKILLS_DIR, "zee", "models.json");
+const FALLBACK_PARENT_ALIASES = new Set(["inherit-parent", "auto", "inherit"]);
+
+function loadModelsCatalog() {
+  try {
+    return JSON.parse(fs.readFileSync(MODELS_CATALOG_PATH, "utf8"));
+  } catch (e) {
+    throw new Error(`无法读取模型梯队目录 ${MODELS_CATALOG_PATH}：${e.message}`);
+  }
+}
+
+function isParentAlias(val) {
+  return FALLBACK_PARENT_ALIASES.has(String(val || "").trim().toLowerCase());
+}
+
+function extractSlotRawModel(pref) {
+  if (!pref || typeof pref !== "object") return "";
+  return pref.model || pref.modelHint || pref.swarmModel || "";
+}
+
 function cmdResolveModel(args) {
   const { flags } = parseFlags(args);
   const harness = normalizeHarnessName(flags.harness || detectActiveHarness());
@@ -1091,7 +1114,8 @@ function cmdResolveModel(args) {
   let activeBinding = extractBindingPair(activeSpec, harness) || extractBindingPair(slot, harness)?.prefer || extractBindingPair(slot, harness);
   let cooldownFallback = null;
 
-  if (!ignoreCooldown) {
+  const initialModelRef = activeBinding?.model || activeSpec?.modelHint || activeSpec?.model || activeSpec?.swarmModel || "";
+  if (!ignoreCooldown && !isParentAlias(initialModelRef)) {
     const pId = activeBinding?.providerInstanceId;
     const mId = activeBinding?.model || activeSpec?.modelHint || activeSpec?.swarmModel;
     const cd = mId ? getModelCooldown(pId, mId) : { active: false };
@@ -1099,7 +1123,7 @@ function cmdResolveModel(args) {
       const bSpec = slot.backup;
       const bBind = extractBindingPair(bSpec, harness) || extractBindingPair(slot, harness)?.backup;
       const bModelId = bBind?.model || bSpec?.modelHint || bSpec?.swarmModel;
-      const bCd = bModelId ? getModelCooldown(bBind?.providerInstanceId, bModelId) : { active: false };
+      const bCd = bModelId && !isParentAlias(bModelId) ? getModelCooldown(bBind?.providerInstanceId, bModelId) : { active: false };
       if (!bCd.active) {
         cooldownFallback = { skippedKey: cd.key, reason: cd.entry?.reason || "cooldown", remainingSec: cd.remainingSec };
         activeSpec = bSpec;
@@ -1109,6 +1133,53 @@ function cmdResolveModel(args) {
   }
 
   const effort = activeSpec?.effort || "medium";
+  const effectiveRawModel = activeBinding?.model || activeSpec?.model || activeSpec?.modelHint || "";
+  const hasExplicitSwarmModel = Boolean(harness === "antigravity" && (activeBinding?.swarmModel || activeSpec?.swarmModel));
+  if (isParentAlias(effectiveRawModel) && !hasExplicitSwarmModel) {
+    let resolvedAlias;
+    if (harness === "antigravity") {
+      resolvedAlias = {
+        harness: "antigravity",
+        surface,
+        role,
+        slot: slotName,
+        inheritParent: true,
+        model: "inherit",
+        effectiveEffort: effort,
+        binding: null,
+        fallbackOn429: "inherit",
+      };
+    } else if (harness === "t3") {
+      resolvedAlias = {
+        harness: "t3",
+        surface,
+        role,
+        slot: slotName,
+        inheritParent: true,
+        modelHint: effectiveRawModel,
+        effort,
+        binding: null,
+        delegateTarget: null,
+        backup: slot?.backup || null,
+      };
+    } else {
+      resolvedAlias = {
+        harness,
+        surface,
+        role,
+        slot: slotName,
+        inheritParent: true,
+        modelHint: effectiveRawModel,
+        effort,
+        binding: null,
+        subagentArgs: { thinkingLevel: effort },
+        backup: slot?.backup || null,
+      };
+    }
+    console.log(JSON.stringify({ ok: true, resolved: resolvedAlias }, null, 2));
+    return;
+  }
+
   const resolvedFamily =
     source === "harnesses"
       ? activeBinding?.family || activeSpec?.family || extractModelFamily(activeBinding?.model || activeSpec?.swarmModel || activeSpec?.modelHint || "")
@@ -1182,34 +1253,375 @@ function cmdProviderHealth(args) {
   console.log(JSON.stringify({ ok: true, healthPath: resolveProviderHealthPath(), activeCount: cooldowns.length, cooldowns }, null, 2));
 }
 
+function isParentAliasSlot(pref) {
+  if (!pref || typeof pref !== "object") return false;
+  if (pref.swarmModel || pref.providerInstanceId || pref.family) return false;
+  return isParentAlias(extractSlotRawModel(pref));
+}
+
 function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings) {
   for (const sName of ["fast", "workhorse", "adversary"]) {
     const s = slotsObj?.[sName];
     const pref = s?.prefer;
+    const rawModel = extractSlotRawModel(pref);
     const hasAnyBindingModel = Boolean(
       pref?.bindings &&
         typeof pref.bindings === "object" &&
         Object.values(pref.bindings).some((b) => b && typeof b === "object" && (b.model || b.swarmModel)),
     );
-    if (!pref?.modelHint && !pref?.model && !pref?.swarmModel && !hasAnyBindingModel) {
+    if (!rawModel && !hasAnyBindingModel) {
       errors.push(`${label}.${sName}.prefer 缺失`);
     }
   }
-  const wf =
-    slotsObj?.workhorse?.prefer?.family ||
-    extractModelFamily(
-      slotsObj?.workhorse?.prefer?.model || slotsObj?.workhorse?.prefer?.modelHint || slotsObj?.workhorse?.prefer?.swarmModel || "",
-    );
-  const af =
-    slotsObj?.adversary?.prefer?.family ||
-    extractModelFamily(
-      slotsObj?.adversary?.prefer?.model || slotsObj?.adversary?.prefer?.modelHint || slotsObj?.adversary?.prefer?.swarmModel || "",
-    );
-  if (wf && af && wf === af) {
-    const msg = `${label}: workhorse (${wf}) 与 adversary (${af}) 属于同一模型家族`;
-    if (allowSingleFamily) warnings.push(`${msg}（已启用 singleFamily 单家族豁免）`);
-    else errors.push(`${msg}（非 singleFamily 模式必须为不同模型家族）`);
+  const wRaw = extractSlotRawModel(slotsObj?.workhorse?.prefer);
+  const aRaw = extractSlotRawModel(slotsObj?.adversary?.prefer);
+  const wIsAlias = isParentAliasSlot(slotsObj?.workhorse?.prefer);
+  const aIsAlias = isParentAliasSlot(slotsObj?.adversary?.prefer);
+  if (aIsAlias) {
+    warnings.push(`${label}.adversary 使用父模型别名 (${aRaw})，未启用独立跨家族对抗审查`);
   }
+  if (!wIsAlias && !aIsAlias) {
+    const wf = slotsObj?.workhorse?.prefer?.family || extractModelFamily(wRaw);
+    const af = slotsObj?.adversary?.prefer?.family || extractModelFamily(aRaw);
+    if (wf && af && wf === af) {
+      const msg = `${label}: workhorse (${wf}) 与 adversary (${af}) 属于同一模型家族`;
+      if (allowSingleFamily) warnings.push(`${msg}（已启用 singleFamily 单家族豁免）`);
+      else errors.push(`${msg}（非 singleFamily 模式必须为不同模型家族）`);
+    }
+  }
+}
+
+async function readStdinText() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function extractOptionFromT3Model(modelObj) {
+  if (!Array.isArray(modelObj?.options)) return { optionKey: null, supportedEfforts: null };
+  const preferredKeys = ["thought_level", "reasoningEffort", "effort", "thinking"];
+  for (const k of preferredKeys) {
+    const found = modelObj.options.find((o) => o && o.id === k && Array.isArray(o.values));
+    if (found) return { optionKey: k, supportedEfforts: found.values };
+  }
+  return { optionKey: null, supportedEfforts: null };
+}
+
+function parseCandidateModelsInput(rawText, harness) {
+  const trimmed = String(rawText || "").replace(/^\uFEFF/, "").trim();
+  if (!trimmed) return { items: [], inferredPreferProvider: null };
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.providers)) {
+      const activeProviders = parsed.providers.filter((p) => p && p.canRunChildTask === true && Array.isArray(p.models) && p.models.length > 0);
+      const hasNativeNonPi = activeProviders.some((p) => p.providerInstanceId !== "pi" && p.driverKind !== "pi");
+      const targetProviders =
+        harness === "t3" && hasNativeNonPi
+          ? activeProviders.filter((p) => p.providerInstanceId !== "pi" && p.driverKind !== "pi")
+          : activeProviders;
+      const items = [];
+      for (const prov of targetProviders) {
+        for (const m of prov.models) {
+          if (!m?.id) continue;
+          const { optionKey, supportedEfforts } = extractOptionFromT3Model(m);
+          items.push({
+            providerInstanceId: prov.providerInstanceId || prov.driverKind || "",
+            model: String(m.id).trim(),
+            optionKey,
+            supportedEfforts,
+          });
+        }
+      }
+      return { items, inferredPreferProvider: parsed.inheritedProviderInstanceId || null };
+    }
+    const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.models) ? parsed.models : [];
+    const items = arr
+      .map((entry) => {
+        if (typeof entry === "string") {
+          const s = entry.trim();
+          const slash = s.indexOf("/");
+          if (slash > 0 && !s.startsWith("auto/") && !s.startsWith("magpie-")) {
+            return { providerInstanceId: s.slice(0, slash), model: s.slice(slash + 1), optionKey: null, supportedEfforts: null };
+          }
+          return { providerInstanceId: "", model: s, optionKey: null, supportedEfforts: null };
+        }
+        if (entry && typeof entry === "object" && (entry.model || entry.id)) {
+          return {
+            providerInstanceId: String(entry.providerInstanceId || entry.provider || "").trim(),
+            model: String(entry.model || entry.id).trim(),
+            optionKey: entry.optionKey || null,
+            supportedEfforts: Array.isArray(entry.supportedEfforts) ? entry.supportedEfforts : null,
+          };
+        }
+        return null;
+      })
+      .filter((x) => x && x.model);
+    return { items, inferredPreferProvider: null };
+  }
+
+  const items = [];
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^[-=]+$/.test(line) || /^provider\s+model\b/i.test(line)) continue;
+    const cols = line.split(/\s+/);
+    if (cols.length >= 2) items.push({ providerInstanceId: cols[0].trim(), model: cols[1].trim(), optionKey: null, supportedEfforts: null });
+    else if (cols.length === 1 && cols[0]) items.push({ providerInstanceId: "", model: cols[0].trim(), optionKey: null, supportedEfforts: null });
+  }
+  return { items, inferredPreferProvider: null };
+}
+
+function clampEffort(targetEffort, maxRuleEffort, supportedEfforts, ladder) {
+  const idxOf = (eff) => ladder.indexOf(String(eff || "").toLowerCase());
+  let maxIdx = ladder.length - 1;
+  const ruleIdx = idxOf(maxRuleEffort);
+  if (ruleIdx >= 0) maxIdx = Math.min(maxIdx, ruleIdx);
+  let targetIdx = idxOf(targetEffort);
+  if (targetIdx < 0) targetIdx = Math.min(idxOf("medium") >= 0 ? idxOf("medium") : 1, maxIdx);
+  const clampedIdx = Math.min(targetIdx, maxIdx);
+
+  if (Array.isArray(supportedEfforts) && supportedEfforts.length > 0) {
+    const supSet = new Set(supportedEfforts.map((s) => String(s).toLowerCase()));
+    for (let i = clampedIdx; i >= 0; i--) {
+      if (supSet.has(ladder[i])) return ladder[i];
+    }
+    for (let i = clampedIdx + 1; i < ladder.length; i++) {
+      if (supSet.has(ladder[i])) return ladder[i];
+    }
+  }
+  return ladder[clampedIdx] || "medium";
+}
+
+function scoreModelByRules(baseModel, rules, defaultScore, defaultMaxEffort) {
+  for (const rule of rules || []) {
+    if (new RegExp(rule.pattern, "i").test(baseModel)) {
+      return { matched: true, score: Number(rule.score) || defaultScore, maxEffort: rule.maxEffort || defaultMaxEffort };
+    }
+  }
+  return { matched: false, score: defaultScore, maxEffort: defaultMaxEffort };
+}
+
+function formatRecommendedEntry(entry, roleSlot, harness, targetEffort, ladder) {
+  if (!entry) return null;
+  const maxEffort = roleSlot === "fast" ? entry.fastMaxEffort : entry.flagshipMaxEffort;
+  const effort = clampEffort(targetEffort, maxEffort, entry.supportedEfforts, ladder);
+  if (harness === "t3") {
+    return {
+      family: entry.family,
+      modelHint: entry.baseModel,
+      effort,
+      providerInstanceId: entry.providerInstanceId,
+      model: entry.model,
+      ...(entry.optionKey ? { options: { [entry.optionKey]: effort } } : {}),
+    };
+  }
+  if (harness === "antigravity") {
+    return {
+      family: entry.family,
+      modelHint: entry.baseModel,
+      effort,
+      model: "inherit",
+      swarmModel: `${entry.baseModel}-${effort}`,
+    };
+  }
+  return {
+    family: entry.family,
+    modelHint: entry.baseModel,
+    effort,
+    ...(entry.providerInstanceId ? { providerInstanceId: entry.providerInstanceId } : {}),
+    model: entry.model,
+  };
+}
+
+async function cmdRecommendModels(args) {
+  const { flags } = parseFlags(args);
+  const harness = normalizeHarnessName(flags.harness || detectActiveHarness());
+  const catalog = loadModelsCatalog();
+  const budgetKey = String(flags.budget || "medium").trim().toLowerCase();
+  const budgetSpec = catalog.budgets?.[budgetKey];
+  if (!budgetSpec) {
+    console.error(JSON.stringify({ ok: false, error: `未知 budget "${budgetKey}"，可选：${Object.keys(catalog.budgets || {}).join(", ")}` }));
+    process.exit(1);
+  }
+
+  let rawText = typeof flags.models === "string" ? flags.models : "";
+  if (!rawText) {
+    const fileArg = typeof flags["models-file"] === "string" ? flags["models-file"] : null;
+    if (fileArg === "-") rawText = await readStdinText();
+    else if (fileArg) rawText = fs.readFileSync(path.resolve(fileArg), "utf8");
+    else if (!process.stdin.isTTY) rawText = await readStdinText();
+  }
+  if (!rawText || !rawText.trim()) {
+    console.error(JSON.stringify({ ok: false, error: "缺少输入模型清单：请通过 stdin、--models 或 --models-file 传入" }));
+    process.exit(1);
+  }
+
+  let parsed;
+  try {
+    parsed = parseCandidateModelsInput(rawText, harness);
+  } catch (e) {
+    console.error(JSON.stringify({ ok: false, error: `模型清单解析失败：${e.message}` }));
+    process.exit(1);
+  }
+
+  const preferProvider = String(flags["prefer-provider"] || parsed.inferredPreferProvider || "").trim().toLowerCase();
+  const ladder = Array.isArray(catalog.effortLadder) ? catalog.effortLadder : ["low", "medium", "high", "xhigh"];
+  const excludeRes = (catalog.tierRules?.excludeFromSubagents || []).map((p) => new RegExp(p, "i"));
+  const optInRes = (catalog.tierRules?.optInOnly || []).map((p) => new RegExp(p, "i"));
+
+  const enriched = [];
+  for (const item of parsed.items) {
+    const lowModel = item.model.toLowerCase();
+    const baseModel = (lowModel.split("/").pop() || lowModel).trim();
+    if (!baseModel || isParentAlias(baseModel) || excludeRes.some((re) => re.test(baseModel) || re.test(lowModel))) continue;
+    let routePriority = 1;
+    if (harness === "t3") {
+      if (!lowModel.includes("/")) routePriority = 4;
+      else if (lowModel.startsWith("auto/")) routePriority = 2;
+      else routePriority = 1;
+    } else {
+      if (lowModel.startsWith("auto/")) routePriority = 3;
+      else if (!lowModel.includes("/")) routePriority = 2;
+      else routePriority = 1;
+    }
+    const flagshipInfo = scoreModelByRules(baseModel, catalog.tierRules?.flagship, 70, "xhigh");
+    const fastInfo = scoreModelByRules(baseModel, catalog.tierRules?.fastQuality, 65, "high");
+    const providerBonus = preferProvider && item.providerInstanceId.toLowerCase() === preferProvider ? 2 : 0;
+    const isOptIn = optInRes.some((re) => re.test(baseModel) || re.test(lowModel));
+    const family = extractModelFamily(baseModel);
+    enriched.push({
+      key: `${item.providerInstanceId}\0${item.model}`.toLowerCase(),
+      dedupKey: harness === "t3" ? baseModel : `${item.providerInstanceId.toLowerCase()}\0${baseModel}`,
+      providerInstanceId: item.providerInstanceId,
+      model: item.model,
+      baseModel,
+      family,
+      optionKey: item.optionKey,
+      supportedEfforts: item.supportedEfforts,
+      routePriority,
+      providerBonus,
+      flagshipScore: flagshipInfo.score + providerBonus,
+      flagshipMaxEffort: flagshipInfo.maxEffort,
+      fastScore: fastInfo.score + providerBonus,
+      fastMaxEffort: fastInfo.maxEffort,
+      matchedFastRule: fastInfo.matched,
+      isOptIn,
+    });
+  }
+
+  const dedupMap = new Map();
+  const skippedDuplicates = [];
+  for (const cand of enriched) {
+    const existing = dedupMap.get(cand.dedupKey);
+    if (!existing) {
+      dedupMap.set(cand.dedupKey, cand);
+      continue;
+    }
+    const candBetter =
+      cand.routePriority > existing.routePriority ||
+      (cand.routePriority === existing.routePriority && cand.providerBonus > existing.providerBonus);
+    if (candBetter) {
+      skippedDuplicates.push({ dropped: existing.model, kept: cand.model, reason: "duplicate_base_model" });
+      dedupMap.set(cand.dedupKey, cand);
+    } else {
+      skippedDuplicates.push({ dropped: cand.model, kept: existing.model, reason: "duplicate_base_model" });
+    }
+  }
+
+  const deduped = [...dedupMap.values()];
+  const optInCandidates = deduped.filter((m) => m.isOptIn);
+  let eligible = deduped.filter((m) => !m.isOptIn);
+  const warnings = [];
+  let fallbackToOptIn = false;
+
+  if (eligible.length === 0 && optInCandidates.length > 0) {
+    eligible = optInCandidates;
+    fallbackToOptIn = true;
+    warnings.push("未检测到 Tier S/A 旗舰候选，已兜底使用 opt-in 轻量/第三方模型。");
+  }
+  if (eligible.length === 0) {
+    console.error(JSON.stringify({ ok: false, error: "过滤后没有可用于子代理的候选模型", harness }));
+    process.exit(1);
+  }
+
+  const flagshipRanked = [...eligible].sort((a, b) => b.flagshipScore - a.flagshipScore || b.fastScore - a.fastScore);
+  const workhorsePrefer = flagshipRanked[0];
+  const restWh = flagshipRanked.filter((m) => m.key !== workhorsePrefer.key);
+  const bestWhAny = restWh[0] || null;
+  const bestWhDiffFam = restWh.find((m) => m.family && workhorsePrefer.family && m.family !== workhorsePrefer.family) || null;
+  const workhorseBackup = bestWhDiffFam && bestWhAny && bestWhAny.flagshipScore - bestWhDiffFam.flagshipScore <= 6 ? bestWhDiffFam : bestWhAny;
+
+  const diffFromWh = flagshipRanked.filter((m) =>
+    workhorsePrefer.family && m.family ? m.family !== workhorsePrefer.family : m.key !== workhorsePrefer.key,
+  );
+  let singleFamily = false;
+  let adversaryPrefer;
+  if (diffFromWh.length > 0) {
+    adversaryPrefer = diffFromWh[0];
+  } else {
+    singleFamily = true;
+    adversaryPrefer = restWh[0] || workhorsePrefer;
+    warnings.push(`当前可用模型仅单一家族 (${workhorsePrefer.family || "unknown"})，已自动标记 singleFamily: true。`);
+  }
+
+  const restAdv = flagshipRanked.filter((m) => m.key !== adversaryPrefer.key);
+  const adversaryBackup =
+    restAdv.find((m) => m.family !== workhorsePrefer.family && m.family !== adversaryPrefer.family) ||
+    restAdv.find((m) => m.family !== workhorsePrefer.family) ||
+    restAdv[0] ||
+    null;
+
+  const fastRanked = [...eligible].sort((a, b) => {
+    if (b.fastScore !== a.fastScore) return b.fastScore - a.fastScore;
+    const aIsWh = a.key === workhorsePrefer.key ? 1 : 0;
+    const bIsWh = b.key === workhorsePrefer.key ? 1 : 0;
+    if (aIsWh !== bIsWh) return aIsWh - bIsWh;
+    return b.flagshipScore - a.flagshipScore;
+  });
+  let fastPrefer = fastRanked[0];
+  if (fastPrefer.key === workhorsePrefer.key) {
+    const altFast = fastRanked.find((m) => m.key !== workhorsePrefer.key && m.matchedFastRule);
+    if (altFast) fastPrefer = altFast;
+  }
+  const restFast = fastRanked.filter((m) => m.key !== fastPrefer.key);
+  const fastBackup = restFast.find((m) => fastPrefer.family && m.family && m.family !== fastPrefer.family) || restFast[0] || null;
+
+  const efforts = budgetSpec.efforts || { fast: "low", workhorse: "high", adversary: "high" };
+  const slots = {
+    fast: {
+      prefer: formatRecommendedEntry(fastPrefer, "fast", harness, efforts.fast, ladder),
+      ...(fastBackup ? { backup: formatRecommendedEntry(fastBackup, "fast", harness, efforts.fast, ladder) } : {}),
+    },
+    workhorse: {
+      prefer: formatRecommendedEntry(workhorsePrefer, "workhorse", harness, efforts.workhorse, ladder),
+      ...(workhorseBackup ? { backup: formatRecommendedEntry(workhorseBackup, "workhorse", harness, efforts.workhorse, ladder) } : {}),
+    },
+    adversary: {
+      prefer: formatRecommendedEntry(adversaryPrefer, "adversary", harness, efforts.adversary, ladder),
+      ...(adversaryBackup ? { backup: formatRecommendedEntry(adversaryBackup, "adversary", harness, efforts.adversary, ladder) } : {}),
+    },
+  };
+
+  console.log(JSON.stringify({
+    ok: true,
+    harness,
+    budget: budgetKey,
+    budgetLabel: budgetSpec.label,
+    singleFamily,
+    fallbackToOptIn,
+    warnings,
+    harnessConfig: {
+      budget: budgetKey,
+      ...(singleFamily ? { singleFamily: true } : {}),
+      slots,
+    },
+    optInModels: optInCandidates.map((m) => ({
+      ...(m.providerInstanceId ? { providerInstanceId: m.providerInstanceId } : {}),
+      model: m.model,
+      family: m.family,
+    })),
+    skippedDuplicates,
+  }, null, 2));
 }
 
 function cmdDoctor(args) {
@@ -1359,6 +1771,7 @@ switch (cmd) {
   case "sandbox-export": cmdSandboxExport(rest); break;
   case "sandbox-clean": cmdSandboxClean(rest); break;
   case "gate-tamper-diff": cmdGateTamperDiff(rest); break;
+  case "recommend-models": await cmdRecommendModels(rest); break;
   case "resolve-model": cmdResolveModel(rest); break;
   case "provider-health": cmdProviderHealth(rest); break;
   case "doctor": cmdDoctor(rest); break;

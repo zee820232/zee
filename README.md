@@ -1,4 +1,4 @@
-# Zee v5.0.4
+# Zee v5.0.5
 
 **个人主厨 + 可过夜（Personal Head Chef + Overnight Ready）** — 面向 Pi CLI、Antigravity (AGY) 与 Codex / Claude Code 的极简多模型工程工作流。
 

@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "budgets": {
+    "large": {
+      "label": "large（满血推理，对齐 pstack large）",
+      "efforts": {
+        "workhorse": "xhigh",
+        "adversary": "xhigh",
+        "fast": "medium"
+      }
+    },
+    "medium": {
+      "label": "medium（均衡主力，推荐，对齐 pstack medium）",
+      "efforts": {
+        "workhorse": "high",
+        "adversary": "high",
+        "fast": "low"
+      }
+    },
+    "small": {
+      "label": "small（省时日常，对齐 pstack small）",
+      "efforts": {
+        "workhorse": "medium",
+        "adversary": "medium",
+        "fast": "low"
+      }
+    }
+  },
+  "effortLadder": [
+    "low",
+    "medium",
+    "high",
+    "xhigh"
+  ],
+  "parentAliases": [
+    "inherit-parent",
+    "auto",
+    "inherit"
+  ],
+  "tierRules": {
+    "flagship": [
+      { "pattern": "claude-opus-5-5", "score": 100, "maxEffort": "xhigh" },
+      { "pattern": "claude-fable-5-2", "score": 96, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6\\.2-astra", "score": 95, "maxEffort": "xhigh" },
+      { "pattern": "gemini-4-neon", "score": 94, "maxEffort": "xhigh" },
+      { "pattern": "claude-sonnet-5-5", "score": 92, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6\\.2-sol", "score": 90, "maxEffort": "xhigh" },
+      { "pattern": "gemini-4-carbon", "score": 89, "maxEffort": "high" },
+      { "pattern": "gpt-6\\.1-terra", "score": 88, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6-astra", "score": 87, "maxEffort": "xhigh" },
+      { "pattern": "claude-opus-", "score": 86, "maxEffort": "xhigh" },
+      { "pattern": "claude-fable-", "score": 85, "maxEffort": "xhigh" },
+      { "pattern": "gemini-4-argon", "score": 84, "maxEffort": "high" },
+      { "pattern": "gpt-6\\.1-sol", "score": 83, "maxEffort": "xhigh" },
+      { "pattern": "claude-sonnet-", "score": 82, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6-luna", "score": 80, "maxEffort": "xhigh" },
+      { "pattern": "gpt-5\\.", "score": 78, "maxEffort": "xhigh" },
+      { "pattern": "gemini-4-hydrogen", "score": 76, "maxEffort": "xhigh" }
+    ],
+    "fastQuality": [
+      { "pattern": "gemini-4-hydrogen", "score": 95, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6\\.2-sol", "score": 92, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6\\.1-sol", "score": 90, "maxEffort": "xhigh" },
+      { "pattern": "claude-haiku-5-5", "score": 88, "maxEffort": "high" },
+      { "pattern": "claude-sonnet-5-5", "score": 86, "maxEffort": "xhigh" },
+      { "pattern": "gpt-6-luna", "score": 84, "maxEffort": "xhigh" },
+      { "pattern": "gemini-4-argon", "score": 82, "maxEffort": "high" },
+      { "pattern": "gemini-4-carbon", "score": 80, "maxEffort": "high" },
+      { "pattern": "claude-haiku-", "score": 78, "maxEffort": "high" }
+    ],
+    "optInOnly": [
+      "deepseek",
+      "gemini-3\\.8",
+      "gemini-2\\.",
+      "flash[-_]?lite",
+      "(?:^|[-_/])(mini|nano|small|tiny|lite)(?:$|[-_/])",
+      "qwen",
+      "glm",
+      "llama",
+      "mistral",
+      "mixtral",
+      "kimi",
+      "swe-"
+    ],
+    "excludeFromSubagents": [
+      "gemini-pro-orchestrator"
+    ]
+  }
+}

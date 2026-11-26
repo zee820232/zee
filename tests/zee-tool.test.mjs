@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ZEE_TOOL = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
 
-function runTool(args, { env = {}, allowFail = false } = {}) {
+function runTool(args, { env = {}, allowFail = false, input = undefined } = {}) {
   const res = spawnSync(process.execPath, [ZEE_TOOL, ...args], {
     encoding: "utf8",
+    input,
     env: { ...process.env, ...env },
   });
   if (!allowFail) {
@@ -368,6 +369,165 @@ test("多宿主严格隔离：宿主环境变量检测、legacy slots 不串读�
     fs.writeFileSync(cfgPath, JSON.stringify(multiCfg, null, 2), "utf8");
     const t3BadDoc = runTool(["doctor", "--harness", "t3"], { env: cleanHarnessEnv, allowFail: true });
     assert.notEqual(t3BadDoc.status, 0);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("recommend-models 对齐 pstack 能力梯队与预算阶梯，且支持 inherit-parent 别名", () => {
+  const piCatalog = [
+    "provider  model                                   context  max-out  thinking  images",
+    "magpie    auto/deepseek-v4.1-flash                1M       128K     yes       yes   ",
+    "magpie    auto/gemini-4-hydrogen                  1.0M     65.5K    yes       yes   ",
+    "magpie    auto/gpt-6.1-sol                        500K     128K     yes       yes   ",
+    "magpie    auto/gpt-6.2-astra                      272K     128K     yes       yes   ",
+    "magpie    magpie-2/agy-cli/gemini-4-hydrogen      1.0M     65.5K    yes       yes   ",
+    "magpie    magpie-2/codex/gpt-6.1-sol              500K     128K     yes       yes   ",
+    "magpie    magpie-2/codex/gpt-6.2-astra            272K     128K     yes       yes   ",
+    "magpie    magpie-2/vm/claude-sonnet-5-5           1M       128K     yes       yes   ",
+    "magpie    magpie-2/workbuddy/deepseek-v4.1-flash  1M       128K     yes       yes   ",
+  ].join("\n");
+
+  // 1. Pi 9 模型实测目录 (--budget medium)：零 deepseek，去重优先 auto/*
+  const piMed = JSON.parse(runTool(["recommend-models", "--harness", "pi", "--budget", "medium"], { input: piCatalog }).stdout);
+  assert.equal(piMed.ok, true);
+  const piSlots = piMed.harnessConfig.slots;
+  assert.equal(piSlots.workhorse.prefer.model, "auto/gpt-6.2-astra");
+  assert.equal(piSlots.workhorse.prefer.effort, "high");
+  assert.equal(piSlots.workhorse.backup.model, "magpie-2/vm/claude-sonnet-5-5");
+  assert.equal(piSlots.adversary.prefer.model, "magpie-2/vm/claude-sonnet-5-5");
+  assert.equal(piSlots.adversary.backup.model, "auto/gemini-4-hydrogen");
+  assert.equal(piSlots.fast.prefer.model, "auto/gemini-4-hydrogen");
+  assert.equal(piSlots.fast.prefer.effort, "low");
+  assert.equal(piSlots.fast.backup.model, "auto/gpt-6.1-sol");
+  assert.doesNotMatch(JSON.stringify(piSlots), /deepseek/i);
+  assert.ok(piMed.optInModels.some((m) => /deepseek-v4\.1-flash/.test(m.model)));
+  assert.ok(piMed.skippedDuplicates.length >= 4);
+
+  // 2. --budget large (xhigh/xhigh/medium + carbon 钳制到 high) 与 --budget small (medium/medium/low)
+  const carbonCatalog = JSON.stringify([
+    { providerInstanceId: "t3", model: "gemini-4-carbon" },
+    { providerInstanceId: "codex", model: "gpt-6.2-astra" },
+    { providerInstanceId: "t3", model: "gemini-4-hydrogen" },
+  ]);
+  const largeRes = JSON.parse(runTool(["recommend-models", "--harness", "pi", "--budget", "large"], { input: carbonCatalog }).stdout);
+  assert.equal(largeRes.harnessConfig.slots.workhorse.prefer.effort, "xhigh");
+  assert.equal(largeRes.harnessConfig.slots.adversary.prefer.effort, "high");
+  assert.equal(largeRes.harnessConfig.slots.fast.prefer.effort, "medium");
+
+  const smallRes = JSON.parse(runTool(["recommend-models", "--harness", "pi", "--budget", "small"], { input: piCatalog }).stdout);
+  assert.equal(smallRes.harnessConfig.slots.workhorse.prefer.effort, "medium");
+  assert.equal(smallRes.harnessConfig.slots.adversary.prefer.effort, "medium");
+  assert.equal(smallRes.harnessConfig.slots.fast.prefer.effort, "low");
+
+  // 3. T3 orchestrator_capabilities JSON：排除 disabled / pi / gemini-pro-orchestrator / deepseek / gemini-3.8-flash
+  const t3Caps = JSON.stringify({
+    inheritedProviderInstanceId: "antigravity",
+    providers: [
+      {
+        providerInstanceId: "antigravity",
+        driverKind: "antigravity",
+        canRunChildTask: true,
+        models: [
+          { id: "gemini-4-neon", options: [{ id: "thought_level", values: ["low", "medium", "high", "xhigh"] }] },
+          { id: "gemini-4-hydrogen", options: [{ id: "thought_level", values: ["low", "medium", "high", "xhigh"] }] },
+          { id: "gemini-pro-orchestrator-neon", options: [{ id: "thought_level", values: ["low", "medium", "high", "xhigh"] }] },
+          { id: "gemini-3.8-flash", options: [{ id: "thought_level", values: ["low", "medium", "high"] }] },
+        ],
+      },
+      {
+        providerInstanceId: "codex",
+        driverKind: "codex",
+        canRunChildTask: true,
+        models: [
+          { id: "gpt-6.2-astra", options: [{ id: "reasoningEffort", values: ["low", "medium", "high", "xhigh"] }] },
+          { id: "gpt-6.2-sol", options: [{ id: "reasoningEffort", values: ["low", "medium", "high", "xhigh"] }] },
+          { id: "auto/deepseek-v4.1-flash", options: [{ id: "reasoningEffort", values: ["none", "low", "high", "max"] }] },
+        ],
+      },
+      {
+        providerInstanceId: "pi",
+        driverKind: "pi",
+        canRunChildTask: true,
+        models: [{ id: "magpie/auto/gpt-6.2-astra" }],
+      },
+      {
+        providerInstanceId: "claudeAgent",
+        driverKind: "claudeAgent",
+        canRunChildTask: false,
+        models: [{ id: "claude-opus-5-5" }],
+      },
+    ],
+  });
+  const t3Med = JSON.parse(runTool(["recommend-models", "--harness", "t3", "--budget", "medium"], { input: t3Caps }).stdout);
+  const t3Slots = t3Med.harnessConfig.slots;
+  assert.equal(t3Slots.workhorse.prefer.providerInstanceId, "antigravity");
+  assert.equal(t3Slots.workhorse.prefer.model, "gemini-4-neon");
+  assert.deepEqual(t3Slots.workhorse.prefer.options, { thought_level: "high" });
+  assert.equal(t3Slots.adversary.prefer.providerInstanceId, "codex");
+  assert.equal(t3Slots.adversary.prefer.model, "gpt-6.2-astra");
+  assert.deepEqual(t3Slots.adversary.prefer.options, { reasoningEffort: "high" });
+  assert.equal(t3Slots.fast.prefer.providerInstanceId, "antigravity");
+  assert.equal(t3Slots.fast.prefer.model, "gemini-4-hydrogen");
+  assert.deepEqual(t3Slots.fast.prefer.options, { thought_level: "low" });
+  assert.doesNotMatch(JSON.stringify(t3Slots), /deepseek|gemini-3\.8|orchestrator|"providerInstanceId":"pi"/i);
+
+  // 4. 仅剩 optInOnly 模型时自动兜底放行并标记 fallbackToOptIn
+  const optInOnlyInput = JSON.stringify([{ providerInstanceId: "magpie", model: "auto/deepseek-v4.1-flash" }]);
+  const optRes = JSON.parse(runTool(["recommend-models", "--harness", "pi", "--budget", "medium"], { input: optInOnlyInput }).stdout);
+  assert.equal(optRes.fallbackToOptIn, true);
+  assert.equal(optRes.harnessConfig.slots.workhorse.prefer.model, "auto/deepseek-v4.1-flash");
+
+  // 5. inherit-parent 别名兼容 doctor 与跨宿主 resolve-model
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "zee-inherit-alias-"));
+  const cfgPath = path.join(tmp, "zee-config.json");
+  try {
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        version: 3,
+        harnesses: {
+          pi: {
+            slots: {
+              fast: { prefer: { model: "inherit-parent", effort: "low" } },
+              workhorse: { prefer: { model: "inherit-parent", effort: "high" } },
+              adversary: { prefer: { model: "auto", effort: "high" } },
+            },
+          },
+          t3: {
+            slots: {
+              fast: { prefer: { model: "inherit-parent", effort: "low" } },
+              workhorse: { prefer: { model: "inherit-parent", effort: "high" } },
+              adversary: { prefer: { model: "inherit-parent", effort: "high" } },
+            },
+          },
+          agy: {
+            singleFamily: true,
+            slots: {
+              fast: { prefer: { model: "inherit-parent", effort: "low" } },
+              workhorse: { prefer: { model: "inherit-parent", effort: "high" } },
+              adversary: { prefer: { model: "inherit-parent", effort: "high" } },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    const doc = JSON.parse(runTool(["doctor", "--harness", "pi"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
+    assert.equal(doc.ok, true);
+    assert.ok(doc.warnings.some((w) => /父模型别名/.test(w)));
+
+    const piRes = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "coder"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
+    assert.equal(piRes.resolved.inheritParent, true);
+    assert.deepEqual(piRes.resolved.subagentArgs, { thinkingLevel: "high" });
+
+    const t3Res = JSON.parse(runTool(["resolve-model", "--harness", "t3", "--role", "coder"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
+    assert.equal(t3Res.resolved.inheritParent, true);
+    assert.equal(t3Res.resolved.delegateTarget, null);
+
+    const agyRes = JSON.parse(runTool(["resolve-model", "--harness", "agy", "--role", "coder"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
+    assert.equal(agyRes.resolved.inheritParent, true);
+    assert.equal(agyRes.resolved.model, "inherit");
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

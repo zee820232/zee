@@ -1,5 +1,5 @@
 interface:
   display_name: "Zee Review"
-  short_description: "只读跨家族三轴对抗审查（仅保留实证问题，不改代码）"
+  short_description: "只读跨家族实证对抗审查与爆炸半径校验（支持 --strict 沙盒对抗与 --quick 聚焦快审）"
 policy:
   allow_implicit_invocation: false

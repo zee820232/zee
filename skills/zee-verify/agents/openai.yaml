@@ -1,5 +1,5 @@
 interface:
   display_name: "Zee Verify"
-  short_description: "项目实机验证技能全生命周期：生成 verify-<app>（init）、防腐维护（maintain）或冷启动实机验收（run）"
+  short_description: "无谎言实机验证闭环：init 生成自跑验真 .agents/verify-ctl.mjs、maintain 防腐保鲜或 run 实测与防篡改校验"
 policy:
   allow_implicit_invocation: false

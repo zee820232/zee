@@ -1,22 +1,29 @@
 #!/usr/bin/env node
 /**
- * Google Antigravity Lifecycle Hook for zee v5.0.6 (Stop + standalone PreToolUse helper)
+ * Google Antigravity Lifecycle Hook for zee v5.1.0 (Stop + standalone PreToolUse helper)
  *
  * 1. Antigravity PreToolUse 协议要求 decision ∈ {"allow","deny","ask","force_ask"}，无透传项；
  *    为避免空对象 {} 误拦普通 run_command（或 "allow" 越权绕过用户审批），hooks.json 在 AGY 下仅挂载 Stop。
- * 2. Stop 在存在活跃 mode==="night" && status==="running" 的对应 conversationId 运行总线、
+ * 2. Stop 在存在活跃（24h 内）mode==="night" && status==="running" 的对应 conversationId 运行总线、
  *    且 fullyIdle && !continuationActive 时阻止静默断尾（安全透传严格返回 {}）。
  * 3. handlePreToolUse 仍保留供直调或单测校验。
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import {
   RUNS_ROOT,
   checkProjectDenyCommands,
   evaluateDestructiveCommand,
 } from "../skills/zee/scripts/lib/guard-core.mjs";
+import { repoKeyCandidates } from "../skills/zee/scripts/lib/repo-utils.mjs";
+
+const DEFAULT_NIGHT_STALE_MS = 24 * 60 * 60 * 1000;
+
+function getNightStaleMs() {
+  const n = Number(process.env.ZEE_NIGHT_STALE_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_NIGHT_STALE_MS;
+}
 
 function respond(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -24,22 +31,25 @@ function respond(obj) {
 
 function findLatestNightState(cwd, conversationId = "") {
   if (!cwd || !fs.existsSync(RUNS_ROOT)) return null;
-  const absRepo = path.resolve(cwd);
-  const base = path.basename(absRepo).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "task";
-  const hash = crypto.createHash("sha256").update(absRepo).digest("hex").slice(0, 8);
-  const repoRunDir = path.join(RUNS_ROOT, `${base}-${hash}`);
-  if (!fs.existsSync(repoRunDir)) return null;
+  const maxAgeMs = getNightStaleMs();
+  const now = Date.now();
 
   let latest = null;
-  for (const slug of fs.readdirSync(repoRunDir)) {
-    const sp = path.join(repoRunDir, slug, "state.json");
-    if (!fs.existsSync(sp)) continue;
-    try {
-      const st = JSON.parse(fs.readFileSync(sp, "utf8"));
-      if (st.mode !== "night") continue;
-      if (st.conversationId && conversationId && st.conversationId !== conversationId) continue;
-      if (!latest || String(st.updatedAt || "").localeCompare(String(latest.updatedAt || "")) > 0) latest = st;
-    } catch {}
+  for (const key of repoKeyCandidates(cwd)) {
+    const repoRunDir = path.join(RUNS_ROOT, key);
+    if (!fs.existsSync(repoRunDir)) continue;
+    for (const slug of fs.readdirSync(repoRunDir)) {
+      const sp = path.join(repoRunDir, slug, "state.json");
+      if (!fs.existsSync(sp)) continue;
+      try {
+        const st = JSON.parse(fs.readFileSync(sp, "utf8"));
+        if (st.mode !== "night") continue;
+        if (st.conversationId && conversationId && st.conversationId !== conversationId) continue;
+        const tsMs = Date.parse(st.updatedAt || st.createdAt || "") || fs.statSync(sp).mtimeMs;
+        if (Number.isFinite(tsMs) && now - tsMs > maxAgeMs) continue;
+        if (!latest || String(st.updatedAt || "").localeCompare(String(latest.updatedAt || "")) > 0) latest = st;
+      } catch {}
+    }
   }
   return latest;
 }

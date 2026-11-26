@@ -106,7 +106,12 @@ test("extractModelFamily 与 enforcePiRoleTools 行为准确", () => {
 
   assert.deepEqual(enforcePiRoleTools("architect", ["read", "edit", "bash", "powershell", "write"]), ["read", "write"]);
   assert.deepEqual(enforcePiRoleTools("architect", undefined), ["read", "grep", "find", "ls"]);
+  assert.deepEqual(enforcePiRoleTools("architect", ["bash", "edit"]), ["read", "grep", "find", "ls"]);
+  assert.deepEqual(enforcePiRoleTools("judge", undefined), ["read", "grep", "find", "ls"]);
+  assert.deepEqual(enforcePiRoleTools("judge", ["bash"]), ["read", "grep", "find", "ls"]);
   assert.deepEqual(enforcePiRoleTools("scout", ["read", "bash", "write", "edit"]), ["read", "bash"]);
+  assert.deepEqual(enforcePiRoleTools("scout", ["edit", "write"]), ["read", "grep", "find", "ls", "bash"]);
   assert.deepEqual(enforcePiRoleTools("reviewer", ["read", "write", "edit", "grep"]), ["read", "write", "grep"]);
+  assert.deepEqual(enforcePiRoleTools("reviewer", ["edit"]), ["read", "grep", "find", "ls", "bash", "write"]);
   assert.deepEqual(enforcePiRoleTools("coder", ["read", "write", "edit", "bash"]), ["read", "write", "edit", "bash"]);
 });

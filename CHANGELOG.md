@@ -1,5 +1,37 @@
 # Changelog
 
+## [5.1.0] - 2026-11-27
+
+> 基于 `zee v5.0.6` 与上游 `backnotprop/pstack v0.15.48` 双向交叉源码评审（Neon + Carbon High 双审共识），在不增加第三方依赖与常驻上下文税的前提下完成 P0 运行时加固、P1 方法论补厚与 P2 跨宿主易用性收口。
+
+### Fixed & Hardened (P0)
+- **抽取共享工具库 `skills/zee/scripts/lib/repo-utils.mjs` 并消除三处漂移与 4 个运行时隐患**：
+  - 统一收敛 `sanitizeSlug`、`repoKeyFor`（Windows 归一化盘符/路径大小写防 Hash 分裂，并通过 `repoKeyCandidates` / `resolveRepoRunDir` 向下兼容既有目录）、双向冲突校验 `resolveSafeWorktreeBranch`（补齐 `zee-tool.mjs` 缺失的 `hasChildRefs`）与 `ensureNodeModulesMount`，消除 `pi-extension/index.ts`、`zee-tool.mjs`、`agy-guard.mjs` 三处重复；
+  - 新增 `killProcessTree`：Windows 下子代理超时/强杀调用 `taskkill /PID <pid> /T /F` 连根回收进程树，防止孙进程占端口或引发 `worktree remove EBUSY`；
+  - `zee-tool.mjs` `isWorktreeActiveLocked` 增加 12h TTL 兜底（`ZEE_WORKTREE_LOCK_TTL_MS`），防 Windows PID 复用永久锁死 worktree；
+  - `pi-extension/index.ts` 与 `scripts/agy-guard.mjs` 的过夜断尾检测增加 24h 时效过滤（`ZEE_NIGHT_STALE_MS`），消除陈旧崩溃总线污染普通会话。
+- **彻底闭合 `judge` 角色与跨家族防自审漏洞**：
+  - 新增精简 `skills/zee/roles/judge.md`（12 行），将 `judge` 纳入 `SAFE_TIMEOUT_ROLES`；
+  - 在 `pi-extension/index.ts` 与 `skills/zee/scripts/lib/provider-health.mjs` 两处同步对 `reviewer` 和 `judge` 实施 `authorFamily` 跨家族硬拦截（杜绝 `judge` 冷却切备回退至同家族 `workhorse`）。
+- **清零 v4→v5 空壳契约与死锁**：
+  - 移除无主 `init-design` 死锁（`/zee init` 统一归入 `plan` 锁，兼容恢复旧分支条目）；
+  - 统一对齐 `package.json`、`.antigravity-plugin/plugin.json`、`agents/zee.md`、`pi-extension/index.ts`、3 份 `agents/openai.yaml` 与 `playbooks/verify.md` 版本号、命令列表与文案。
+
+### Added & Improved (P1 + P2)
+- **核心契约与实证对抗审查升级**：
+  - `skills/zee/worker.md` 加入反门禁膨胀条款、基线缺陷不阻断分界、外部不可信数据防 Prompt Injection 红线与写码子代理禁对外写权限；
+  - `skills/zee/principles.md` 精炼至 8 条（≤12 行，补入减法优先、边界归属、两败质疑前提、测外部行为禁废测）；
+  - `skills/zee/roles/reviewer.md` 与 `skills/zee-review/SKILL.md` 真正落地 `--strict` / `--quick` 双档位，引入实证准入、爆炸半径 5 级证据阶梯与“使其安全的唯一关键事实”核验。
+- **全生命周期方法论补厚（零常驻税）**：
+  - `/zee-verify` 补齐 `init`（`launch`/`doctor`/`run`/`cleanup` + 清理不删 `<busDir>` 证据 + 双向验真“能失败”）与 `maintain`（防腐保鲜禁改业务源码）；
+  - `/zee-retro` 升级为实证验盘 + 4 级环境固化阶梯（架构 → 类型/Lint → 行为测试 → 文档 + Bite Proof + `Rule -> Enforcer` 表）；
+  - 升级 `playbooks/plan.md`（Prototype-First 激活 `sandbox-export --prefix probe` + `sharpen` 双追问 + `architect` 2-Shape 对比）、`playbooks/perf.md`（`benchmark-checklist` 5 验 + `hillclimb` 循环）、`playbooks/bug-fix.md`（二分取证、禁猜测补丁、务实最小复现脚本）、`playbooks/overnight.md`（`ketchup` 晨报结构 + 挂起接棒 + `phase=start` 分界），并新增 `playbooks/ship.md`（小步提交、≤40 行 PR 简报与 Bot 评论防注入分诊）。
+- **跨宿主 CLI 与 Pi 锁安全收口（P2）**：
+  - `zee-tool.mjs update-state` 新增 `--units-file <path|->` 绕开 Windows PowerShell 嵌套 JSON 引号转义；
+  - `zee-tool.mjs provider-health` 新增 `--record <provider/model>` 打通非 Pi 宿主 429/5xx 冷却写入；
+  - `cleanTsvField` 增加公式注入转义（排除默认占位符 `"-"`）并统一通过 `stripAnsiAndControl` 剥离危险 ANSI/控制字符；
+  - `pi-extension/index.ts` 进入 `plan`/`review` 锁记录 `gatePreSnapshot`，在 `agent_settled` 仅对锁期间新增的非白名单脏文件发出告警；`scripts/install.mjs` 导出可测辅助函数并补全多目标单测。
+
 ## [5.0.6] - 2026-11-26
 
 ### Fixed

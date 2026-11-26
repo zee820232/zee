@@ -778,20 +778,32 @@ export function enforcePiRoleTools(role, requestedTools) {
   const base = Array.isArray(requestedTools) && requestedTools.length > 0 ? [...requestedTools] : null;
 
   if (normalizedRole === "judge") {
-    const allowed = new Set(["read", "grep", "find", "ls"]);
-    return base ? base.filter((t) => allowed.has(t)) : ["read", "grep", "find", "ls"];
+    const fallback = ["read", "grep", "find", "ls"];
+    const allowed = new Set(fallback);
+    if (!base) return fallback;
+    const filtered = base.filter((t) => allowed.has(t));
+    return filtered.length > 0 ? filtered : fallback;
   }
   if (normalizedRole === "scout") {
+    const fallback = ["read", "grep", "find", "ls", "bash"];
     const forbidden = new Set(["edit", "write"]);
-    return base ? base.filter((t) => !forbidden.has(t)) : ["read", "grep", "find", "ls", "bash"];
+    if (!base) return fallback;
+    const filtered = base.filter((t) => !forbidden.has(t));
+    return filtered.length > 0 ? filtered : fallback;
   }
   if (normalizedRole === "architect") {
+    const fallback = ["read", "grep", "find", "ls"];
     const forbidden = new Set(["edit", "bash", "powershell"]);
-    return base ? base.filter((t) => !forbidden.has(t)) : ["read", "grep", "find", "ls"];
+    if (!base) return fallback;
+    const filtered = base.filter((t) => !forbidden.has(t));
+    return filtered.length > 0 ? filtered : fallback;
   }
   if (normalizedRole === "verifier" || normalizedRole === "reviewer") {
+    const fallback = ["read", "grep", "find", "ls", "bash", "write"];
     const forbidden = new Set(["edit"]);
-    return base ? base.filter((t) => !forbidden.has(t)) : ["read", "grep", "find", "ls", "bash", "write"];
+    if (!base) return fallback;
+    const filtered = base.filter((t) => !forbidden.has(t));
+    return filtered.length > 0 ? filtered : fallback;
   }
   return base;
 }

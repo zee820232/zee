@@ -477,7 +477,10 @@ test("v4.2.0 mine-transcripts (retro+recall+脱敏)、queue-finding/list-finding
       "ts\tunit\tphase\tdecision\twhy\tevidence\tresult\n2026-11-25T00:00:00Z\tU1\tverify\tFAIL\tpstack smoke failed\texit 1\tREVISE\n",
     );
 
-    const retro = runTool(["mine-transcripts", "--mode", "retro", "--repo", tmpRepo, "--source-dir", srcDir]);
+    const retro = runTool(["mine-transcripts", "--mode", "retro", "--repo", tmpRepo, "--source-dir", srcDir], true, {
+      HOME: tmpRepo,
+      USERPROFILE: tmpRepo,
+    });
     assert.equal(retro.json.ok, true);
     assert.ok(retro.json.totalScanned >= 3);
     const retroRaw = JSON.stringify(retro.json);
@@ -701,5 +704,93 @@ test("v4.2.1：功能分支 cleanup-worktrees、provider-health 429 冷却联动
     fs.rmSync(tmpRepo, { recursive: true, force: true });
     fs.rmSync(tmpMeta, { recursive: true, force: true });
     if (wtPath) fs.rmSync(path.dirname(path.dirname(path.dirname(wtPath))), { recursive: true, force: true });
+  }
+});
+
+test("v4.2.2 回归 [P1/P2]：sandbox-clean 支持在沙盒 cwd 内自清、resolve-finding 关闭/复发闭环、mine-transcripts 过滤 ADR 与 <skill> 噪声", () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-tool-"));
+  const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-mine-"));
+  const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-mut-selfclean-"));
+  const fakeProjSandbox = fs.mkdtempSync(path.join(os.tmpdir(), "zee-mut-projguard-"));
+  try {
+    // 1. sandbox-clean 在 cwd === sandboxDir 时成功清理，含 .agents/zee.project.json 的伪装目录仍硬拒绝
+    fs.writeFileSync(path.join(sandboxDir, "probe.txt"), "ok\n");
+    const cleanInside = spawnSync(process.execPath, [TOOL, "sandbox-clean", sandboxDir], {
+      cwd: sandboxDir,
+      encoding: "utf8",
+    });
+    assert.equal(cleanInside.status, 0, `sandbox-clean inside sandbox failed: ${cleanInside.stderr}`);
+    assert.equal(fs.existsSync(sandboxDir), false);
+
+    fs.mkdirSync(path.join(fakeProjSandbox, ".agents"), { recursive: true });
+    fs.writeFileSync(path.join(fakeProjSandbox, ".agents", "zee.project.json"), "{}");
+    const rejectProj = runTool(["sandbox-clean", fakeProjSandbox], false);
+    assert.equal(rejectProj.status, 1);
+    assert.equal(fs.existsSync(fakeProjSandbox), true);
+
+    // 2. resolve-finding 关闭 systemic 簇；--include-resolved 可回溯；日后复发自动重开计数
+    runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "hit 1"]);
+    runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "hit 2"]);
+    const hit3 = runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "hit 3"]);
+    assert.equal(hit3.json.systemic, true);
+
+    const resolved = runTool([
+      "resolve-finding",
+      "--repo",
+      tmpRepo,
+      "--pattern",
+      "hardcoded-slot",
+      "--note",
+      "fixed in commit 609afe1",
+    ]);
+    assert.equal(resolved.json.ok, true);
+    assert.equal(resolved.json.resolvedEntries, 3);
+
+    const activeList = runTool(["list-findings", "--repo", tmpRepo]);
+    assert.equal(activeList.json.clusters.length, 0, "已关闭 pattern 不应再出现在活跃列表");
+    assert.equal(activeList.json.resolvedPatterns.length, 1);
+
+    const withResolved = runTool(["list-findings", "--repo", tmpRepo, "--include-resolved"]);
+    assert.equal(withResolved.json.clusters.length, 1);
+    assert.equal(withResolved.json.clusters[0].resolved, true);
+
+    // 复发后从 1 重新计数
+    const recur = runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "reoccurred"]);
+    assert.equal(recur.json.patternCount, 1);
+    assert.equal(recur.json.systemic, false);
+
+    // 3. mine-transcripts --mode retro 不把 ADR/doc 正文与 <skill> 展开块误判为 human_correction
+    fs.mkdirSync(path.join(tmpRepo, "docs", "adr"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRepo, "docs", "adr", "0001-policy.md"),
+      "# ADR 0001\nNever use mutable globals. Do not bypass tests. 禁止直接改主干。\n",
+    );
+    fs.writeFileSync(
+      path.join(srcDir, "sessions.jsonl"),
+      [
+        JSON.stringify({
+          role: "user",
+          timestamp: new Date().toISOString(),
+          content: '<skill name="zee-retro">Never add prose only. Do not skip Bite Proof.</skill>',
+        }),
+        JSON.stringify({
+          role: "user",
+          timestamp: new Date().toISOString(),
+          content: "不对，别这样写，这里应该把重试计数清零",
+        }),
+      ].join("\n") + "\n",
+    );
+    const retro = runTool(["mine-transcripts", "--mode", "retro", "--repo", tmpRepo, "--source-dir", srcDir], true, {
+      HOME: tmpRepo,
+      USERPROFILE: tmpRepo,
+    });
+    const humanSnippets = retro.json.snippets.filter((s) => s.signal === "human_correction");
+    assert.equal(humanSnippets.length, 1, `仅应匹配 1 条真实人类纠偏，实际: ${JSON.stringify(humanSnippets)}`);
+    assert.ok(humanSnippets[0].snippet.includes("重试计数清零"));
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(srcDir, { recursive: true, force: true });
+    fs.rmSync(sandboxDir, { recursive: true, force: true });
+    fs.rmSync(fakeProjSandbox, { recursive: true, force: true });
   }
 });

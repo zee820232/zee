@@ -16,7 +16,7 @@ Orchestrator works directly with the user in Chinese (never delegate user interv
 1. **Beat 1 (`Scout ∥ UI` in parallel)**:
    - **`Scout` (0→1 Research & Live Probe Mode)**: inspect local runtimes, compilers, SDKs, package managers, and **live-verify every critical build/test/headless-screenshot/automation API** inside an isolated `/tmp/zee-probe-*` sandbox so downstream slices never build against broken flags or stale library APIs.
    - **`UI`** (if visual): produces `<busDir>/DESIGN.md` (Design Read 3 dials, palette/type/spacing tokens, component rules) and `<busDir>/ui-spec.md` (including visual rubric & exact screenshot states).
-   - Record checkpoint with `zee-tool.mjs update-state "<busDir>" --status stage2-beat1` (pass `--delegate-id` on manual increments; on Pi `zee_subagent` auto-accounts `delegatesDispatched`) and `zee-tool.mjs log-decision`.
+   - Record checkpoint with `zee-tool.mjs update-state "<busDir>" --status stage2-beat1` (on Pi, `zee_subagent` auto-accounts `delegatesDispatched` — NEVER manually pass `--inc-delegates` or `--delegate-id` on Pi; only non-Pi harnesses without `zee_subagent` pass `--inc-delegates --delegate-id <id>`) and `zee-tool.mjs log-decision`.
 2. **Beat 2 (`Architect` — consumes Beat 1 outputs)**:
    - Consumes `<busDir>/context.md` and `<busDir>/DESIGN.md` / `ui-spec.md` to emit ONE clean, single-source `<busDir>/ARCHITECTURE.md`, `<busDir>/GLOSSARY.md`, and a **Vertical Milestone Roadmap** (`M0 -> M1 -> M2..Mk -> M_final`), keeping every slice **≤5 files and ≤400 LOC**.
    - **No Dual-Truth Patching**: update the single canonical contract cleanly (no trailing amendments), validate with `zee-tool.mjs check-plan`, and update `<busDir>/state.json` + `decisions.tsv`.

@@ -317,7 +317,8 @@ export class HubStore {
 
 function fitToWidth(line: string, width: number): string {
 	if (width <= 0) return "";
-	return visibleWidth(line) <= width ? line : truncateToWidth(line, width, "…");
+	const singleLine = String(line ?? "").replace(/[\r\n]+/g, " ");
+	return visibleWidth(singleLine) <= width ? singleLine : truncateToWidth(singleLine, width, "…");
 }
 
 function padToWidth(line: string, width: number): string {
@@ -570,6 +571,14 @@ const TAB_TITLES = [
 	"3 Gates & Trail",
 	"4 Worktrees & Cost",
 	"5 Controls",
+] as const;
+
+const TAB_TITLES_COMPACT = [
+	"1总览",
+	"2车道",
+	"3门禁",
+	"4树/费",
+	"5控制",
 ] as const;
 
 export class ZeeHubOverlayComponent implements Component {
@@ -986,7 +995,8 @@ export class ZeeHubOverlayComponent implements Component {
 		if (!inv) {
 			lines.push(fg(this.theme, "dim", "  (尚未加载，按 'r' 异步刷新盘点)"));
 		} else if (!inv.ok) {
-			lines.push(fg(this.theme, "warning", `  盘点失败: ${inv.error || "非 Git 仓库"}`));
+			const cleanErr = String(inv.error || "非 Git 仓库").replace(/[\r\n]+/g, " ").trim();
+			lines.push(fg(this.theme, "warning", `  盘点失败: ${cleanErr}`));
 		} else {
 			const bucketSummary = WORKTREE_BUCKETS.map((b) => `${b}:${inv.bucketCounts[b] ?? 0}`).join(" | ");
 			lines.push(`  ${bucketSummary}`);
@@ -1062,13 +1072,16 @@ export class ZeeHubOverlayComponent implements Component {
 		const innerWidth = Math.max(10, width - 4);
 
 		// Header
-		const title = ` zee Hub v4.2.1 · ${snap.riskLevel}·${snap.routingMode}·${snap.trustLevel} · ${snap.phase} `;
+		const title = ` zee Hub v4.2.2 · ${snap.riskLevel}·${snap.routingMode}·${snap.trustLevel} · ${snap.phase} `;
 		const topBorder = fitToWidth(buildBorderLine("╭", "╮", `─${title}`, "─", width), width);
 
-		// Tab Bar
-		const tabs = TAB_TITLES.map((t, idx) =>
-			idx === this.activeTab ? fg(this.theme, "accent", bold(this.theme, `[${t}]`)) : fg(this.theme, "dim", ` ${t} `),
-		).join(" ");
+		// Tab Bar（窄屏 <94 列自动切换中文短标签，防止 80 列截断 [5 Controls]）
+		const tabLabels = width < 94 ? TAB_TITLES_COMPACT : TAB_TITLES;
+		const tabs = tabLabels
+			.map((t, idx) =>
+				idx === this.activeTab ? fg(this.theme, "accent", bold(this.theme, `[${t}]`)) : fg(this.theme, "dim", ` ${t} `),
+			)
+			.join(" ");
 		const tabLine = fitToWidth(buildInteriorLine(tabs, width), width);
 		const sepLine = fitToWidth(buildBorderLine("├", "┤", "", "─", width), width);
 

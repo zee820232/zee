@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v4.2.1 — 零依赖纯 Node 多模型工作流辅助引擎
+ * zee-tool.mjs v4.2.2 — 零依赖纯 Node 多模型工作流辅助引擎
  *
  * 子命令：
  *   validate [configPath] [--check-live]
@@ -21,7 +21,8 @@
  *   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
  *   mine-transcripts [--mode retro|recall] [--repo <repoRoot>] [--days 14] [--harness auto|agy|pi|claude|codex] [--query <text>] [--limit 20] [--source-dir <extraDir>]
  *   queue-finding --repo <repoRoot> --category <cat> --pattern <slug> --summary <text> [--file <path>] [--source <src>]
- *   list-findings --repo <repoRoot> [--min-count 1]
+ *   list-findings --repo <repoRoot> [--min-count 1] [--include-resolved]
+ *   resolve-finding --repo <repoRoot> --pattern <slug> [--note <text>]
  *   readiness [repoRoot]
  *   match-skills --repo <repoRoot> --files <csv> [--role <role>]
  *   provider-health [--clear [modelKey]]
@@ -116,6 +117,7 @@ const KNOWN_VALUE_FLAGS = new Set([
   "category",
   "pattern",
   "summary",
+  "note",
   "file",
   "source",
   "min-count",
@@ -136,6 +138,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "allow-standalone",
   "clear",
   "ignore-cooldown",
+  "include-resolved",
   "help",
 ]);
 
@@ -197,7 +200,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v4.2.1 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v4.2.2 — zee 多模型工作流辅助引擎（当前宿主: ${detectActiveHarness()}）
 
 可用命令：
   validate [配置文件] [--check-live]
@@ -234,8 +237,10 @@ function usage() {
                                  只读挖掘多宿主会话与运行总线中的纠偏信号（retro）或历史决策检索（recall），自动脱敏凭据
   queue-finding --repo <仓库路径> --category <类别> --pattern <模式标识> --summary <摘要> [--file <路径>] [--source <来源>]
                                  向 .agents/gardening-queue.jsonl 追加工程坏味道/重复问题并统计系统性频次
-  list-findings --repo <仓库路径> [--min-count 1]
-                                 聚合并排序展示 .agents/gardening-queue.jsonl 中的高频模式
+  list-findings --repo <仓库路径> [--min-count 1] [--include-resolved]
+                                 聚合并排序展示 .agents/gardening-queue.jsonl 中未关闭的高频模式（支持 --include-resolved）
+  resolve-finding --repo <仓库路径> --pattern <模式标识> [--note <修复说明>]
+                                 以追加审计方式关闭花园队列中已固化的 pattern（后续复发会自动重新计数）
   readiness [仓库路径]
                                  检查仓库 .agents/zee.project.json 与 verify-* 就绪度并计算有效信任等级 (T1/T2/T3)
   match-skills --repo <仓库路径> --files <csv> [--role <角色>]
@@ -1922,10 +1927,12 @@ function cmdSandboxClean(args) {
   }
   const sandboxDir = path.resolve(rawDir);
   const baseName = path.basename(sandboxDir);
+  // 校验沙盒目录本身位于 tmp 根下且非真实 Git/zee 仓库；不传 process.cwd() 避免用户恰好 cd 进沙盒时自拒
   if (
-    !isAllowedZeeTmpPath(sandboxDir, process.cwd()) ||
+    !isAllowedZeeTmpPath(sandboxDir, "") ||
     !/^zee-(?:mut|rev|probe|sim|retro|verify)-[a-z0-9][a-z0-9_.-]*$/i.test(baseName) ||
-    fs.existsSync(path.join(sandboxDir, ".git"))
+    fs.existsSync(path.join(sandboxDir, ".git")) ||
+    fs.existsSync(path.join(sandboxDir, ".agents", "zee.project.json"))
   ) {
     console.error(
       JSON.stringify({
@@ -1934,6 +1941,12 @@ function cmdSandboxClean(args) {
       }),
     );
     process.exit(1);
+  }
+  const relCwd = path.relative(sandboxDir, process.cwd());
+  if (relCwd === "" || (!relCwd.startsWith("..") && !path.isAbsolute(relCwd))) {
+    try {
+      process.chdir(os.tmpdir());
+    } catch {}
   }
   fs.rmSync(sandboxDir, { recursive: true, force: true });
   console.log(JSON.stringify({ ok: true, removed: true, sandboxDir }, null, 2));
@@ -2148,6 +2161,16 @@ function readFindingsFile(queuePath) {
   return rows;
 }
 
+function getLatestResolveIndices(rows) {
+  const latestResolveIdx = new Map();
+  rows.forEach((r, idx) => {
+    if (r && r.action === "resolve" && typeof r.pattern === "string" && r.pattern.trim()) {
+      latestResolveIdx.set(r.pattern.trim(), idx);
+    }
+  });
+  return latestResolveIdx;
+}
+
 function cmdQueueFinding(args) {
   const { flags, positional } = parseFlags(args);
   const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
@@ -2170,7 +2193,9 @@ function cmdQueueFinding(args) {
   };
   fs.appendFileSync(queuePath, JSON.stringify(entry) + "\n", "utf8");
   const allRows = readFindingsFile(queuePath);
-  const patternCount = allRows.filter((r) => r.pattern === pattern).length;
+  const latestResolveIdx = getLatestResolveIndices(allRows);
+  const cutoff = latestResolveIdx.has(pattern) ? latestResolveIdx.get(pattern) : -1;
+  const patternCount = allRows.filter((r, idx) => idx > cutoff && r.action !== "resolve" && r.pattern === pattern).length;
   console.log(
     JSON.stringify(
       {
@@ -2186,17 +2211,64 @@ function cmdQueueFinding(args) {
   );
 }
 
+function cmdResolveFinding(args) {
+  const { flags, positional } = parseFlags(args);
+  const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  const pattern = typeof flags.pattern === "string" ? flags.pattern.trim() : "";
+  const note = typeof flags.note === "string" && flags.note.trim() ? flags.note.trim() : "resolved";
+  if (!pattern) {
+    console.error("用法：resolve-finding --repo <repoRoot> --pattern <slug> [--note <text>]");
+    process.exit(1);
+  }
+  const queuePath = path.join(repoRoot, ".agents", "gardening-queue.jsonl");
+  fs.mkdirSync(path.dirname(queuePath), { recursive: true });
+  const prevRows = readFindingsFile(queuePath);
+  const latestResolveIdx = getLatestResolveIndices(prevRows);
+  const cutoff = latestResolveIdx.has(pattern) ? latestResolveIdx.get(pattern) : -1;
+  const resolvedEntries = prevRows.filter((r, idx) => idx > cutoff && r.action !== "resolve" && r.pattern === pattern).length;
+
+  const entry = {
+    ts: new Date().toISOString(),
+    action: "resolve",
+    pattern,
+    note,
+  };
+  fs.appendFileSync(queuePath, JSON.stringify(entry) + "\n", "utf8");
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        queuePath,
+        pattern,
+        note,
+        resolvedEntries,
+        entry,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 function cmdListFindings(args) {
   const { flags, positional } = parseFlags(args);
   const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
   const minCount = Math.max(1, Number(flags["min-count"]) || 1);
+  const includeResolved = Boolean(flags["include-resolved"]);
   const queuePath = path.join(repoRoot, ".agents", "gardening-queue.jsonl");
   const rows = readFindingsFile(queuePath);
+  const latestResolveIdx = getLatestResolveIndices(rows);
 
   const byPattern = new Map();
-  for (const r of rows) {
+  let activeEntries = 0;
+  rows.forEach((r, idx) => {
+    if (!r || r.action === "resolve") return;
     const pat = String(r.pattern || "").trim();
-    if (!pat) continue;
+    if (!pat) return;
+    const cutoff = latestResolveIdx.has(pat) ? latestResolveIdx.get(pat) : -1;
+    const isResolved = idx < cutoff;
+    if (!includeResolved && isResolved) return;
+    activeEntries += 1;
     let bucket = byPattern.get(pat);
     if (!bucket) {
       bucket = {
@@ -2204,6 +2276,7 @@ function cmdListFindings(args) {
         category: r.category || "general",
         count: 0,
         systemic: false,
+        resolved: isResolved,
         latestTs: r.ts || null,
         files: [],
         summaries: [],
@@ -2211,7 +2284,8 @@ function cmdListFindings(args) {
       byPattern.set(pat, bucket);
     }
     bucket.count += 1;
-    bucket.systemic = bucket.count >= 3;
+    bucket.resolved = bucket.resolved && isResolved;
+    bucket.systemic = !bucket.resolved && bucket.count >= 3;
     if (r.ts && (!bucket.latestTs || String(r.ts) > String(bucket.latestTs))) {
       bucket.latestTs = r.ts;
     }
@@ -2219,7 +2293,13 @@ function cmdListFindings(args) {
     if (r.summary && !bucket.summaries.includes(r.summary) && bucket.summaries.length < 5) {
       bucket.summaries.push(r.summary);
     }
-  }
+  });
+
+  const resolvedPatterns = [...latestResolveIdx.entries()].map(([pat, idx]) => ({
+    pattern: pat,
+    resolvedAt: rows[idx]?.ts || null,
+    note: rows[idx]?.note || null,
+  }));
 
   const clusters = [...byPattern.values()]
     .filter((c) => c.count >= minCount)
@@ -2230,7 +2310,8 @@ function cmdListFindings(args) {
       {
         ok: true,
         queuePath,
-        totalEntries: rows.length,
+        totalEntries: activeEntries,
+        resolvedPatterns,
         clusters,
       },
       null,
@@ -2360,6 +2441,9 @@ function parseEntriesFromFile(filePath, mtimeMs) {
       try {
         const obj = JSON.parse(trimmed);
         if (!obj || typeof obj !== "object") continue;
+        if (obj.action === "resolve" && obj.pattern) {
+          continue;
+        }
         if (obj.category && obj.pattern && obj.summary) {
           entries.push({
             source: filePath,
@@ -2532,14 +2616,28 @@ function cmdMineTranscripts(args) {
         snippets.push({ signal: key, source: ent.source, ts: ent.ts, snippet: compact });
         continue;
       }
-      const isHumanOrLog = /^(?:user|human|operator|unknown|doc)/.test(ent.role || "");
-      if (!isHumanOrLog) continue;
-      if (CORRECTION_RE.test(safeText)) {
-        bumpCluster("human_correction", compact);
-        snippets.push({ signal: "human_correction", source: ent.source, ts: ent.ts, snippet: compact });
-      } else if (RETRY_INTERRUPT_RE.test(safeText)) {
-        bumpCluster("retry_or_interruption", compact);
-        snippets.push({ signal: "retry_or_interruption", source: ent.source, ts: ent.ts, snippet: compact });
+      // 过滤 ADR/设计文档正文与 <skill ...> 展开提示词，避免将规范文档里的 "Never / 禁止 / Do not" 误报为人类纠偏信号
+      if (ent.kind === "adr" || ent.kind === "doc") continue;
+      const isHumanTurn = ent.kind === "transcript" && /^(?:user|human|operator)$/.test(ent.role || "");
+      const isLogTurn = ent.kind === "transcript" && /^(?:user|human|operator|unknown)$/.test(ent.role || "");
+      if (!isLogTurn) continue;
+      const strippedSkillText = safeText
+        .replace(/<skill\b[^>]*>[\s\S]*?<\/skill>/gi, " ")
+        .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/gi, " ")
+        .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, " ")
+        .replace(/^#\s*AGENTS\.md\s+instructions\b[\s\S]*/i, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!strippedSkillText || /^\[(?:ZEE_REVIEW_MODE|MANDATORY_BUS_DIR|zee-worker)\b/i.test(strippedSkillText)) {
+        continue;
+      }
+      const cleanCompact = strippedSkillText.length > 280 ? `${strippedSkillText.slice(0, 277)}...` : strippedSkillText;
+      if (isHumanTurn && CORRECTION_RE.test(strippedSkillText)) {
+        bumpCluster("human_correction", cleanCompact);
+        snippets.push({ signal: "human_correction", source: ent.source, ts: ent.ts, snippet: cleanCompact });
+      } else if (RETRY_INTERRUPT_RE.test(strippedSkillText)) {
+        bumpCluster("retry_or_interruption", cleanCompact);
+        snippets.push({ signal: "retry_or_interruption", source: ent.source, ts: ent.ts, snippet: cleanCompact });
       }
     }
 
@@ -2880,6 +2978,9 @@ switch (cmd) {
     break;
   case "list-findings":
     cmdListFindings(rest);
+    break;
+  case "resolve-finding":
+    cmdResolveFinding(rest);
     break;
   case "readiness":
     cmdReadiness(rest);

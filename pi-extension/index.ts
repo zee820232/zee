@@ -960,7 +960,11 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		return nextFsm;
 	};
 
-	const hydrateFromDisk = (ctx: ExtensionContext, explicitBusDir?: string) => {
+	const hydrateFromDisk = (
+		ctx: ExtensionContext,
+		explicitBusDir?: string,
+		options?: { checkBranchDrift?: boolean; clearBranchDrift?: boolean },
+	) => {
 		const prev = store.getSnapshot();
 		const cwd = ctx.cwd || prev.cwd || process.cwd();
 		const projectConfig = busSync.readProjectConfig(cwd);
@@ -991,10 +995,15 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				},
 				Date.now(),
 			);
+			const nextAhead = options?.clearBranchDrift
+				? false
+				: options?.checkBranchDrift
+					? hyd.busAheadOfBranch
+					: prev.busAheadOfBranch;
 			nextSnap = {
 				...nextSnap,
 				...fsmAfter,
-				busAheadOfBranch: hyd.busAheadOfBranch,
+				busAheadOfBranch: nextAhead,
 				busState: hyd.state,
 				decisionsTail: hyd.decisionsTail,
 				lastSyncAt: Date.now(),
@@ -1038,7 +1047,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		store.rearm(initialHub);
 
 		if (restoredSnap.busDir) {
-			hydrateFromDisk(ctx, restoredSnap.busDir);
+			hydrateFromDisk(ctx, restoredSnap.busDir, { checkBranchDrift: true });
 		}
 		if (mountWidget) {
 			mountHud(ctx);
@@ -1177,7 +1186,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					true,
 					true,
 				);
-				hydrateFromDisk(ctx, busDir);
+				hydrateFromDisk(ctx, busDir, { clearBranchDrift: true });
 				return;
 			}
 			if (typeof parsed.statePath === "string") {
@@ -1185,8 +1194,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				const wasAhead = store.getSnapshot().busAheadOfBranch;
 				hydrateFromDisk(ctx, bDir);
 				if (!wasAhead) {
+					const nowTs = Date.now();
 					pi.appendEntry("zee-fsm", toPersistedFsmEntry(store.getSnapshot()));
-					store.update((p) => ({ ...p, branchEntryTs: Date.now() }), false);
+					store.update((p) => ({ ...p, branchEntryTs: nowTs, busAheadOfBranch: false }), false);
 				}
 				return;
 			}
@@ -1195,8 +1205,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 				const wasAhead = store.getSnapshot().busAheadOfBranch;
 				hydrateFromDisk(ctx, bDir);
 				if (!wasAhead) {
+					const nowTs = Date.now();
 					pi.appendEntry("zee-fsm", toPersistedFsmEntry(store.getSnapshot()));
-					store.update((p) => ({ ...p, branchEntryTs: Date.now() }), false);
+					store.update((p) => ({ ...p, branchEntryTs: nowTs, busAheadOfBranch: false }), false);
 				}
 				return;
 			}
@@ -1229,6 +1240,17 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			setGate("none", ctx);
 		} else if (gate === "init-design" && fs.existsSync(path.join(ctx.cwd, ".agents", "zee.project.json"))) {
 			setGate("none", ctx);
+		}
+		// 无总线的一次性辅助命令（如 /zee-setup、/zee recall、/zee-retro）结算后回归 IDLE，保持 HUD 零噪音
+		const afterGate = store.getSnapshot();
+		if (
+			!afterGate.busDir &&
+			afterGate.writeGate === "none" &&
+			afterGate.activeWorkers.length === 0 &&
+			afterGate.phase === "PREFLIGHT" &&
+			(afterGate.track === "direct" || afterGate.track === "retro" || afterGate.track === "recall" || afterGate.track === "triage")
+		) {
+			dispatchFsm({ type: "SET_PHASE", phase: "IDLE", reason: "单轮辅助命令结束归零" }, ctx, true, true);
 		}
 	});
 
@@ -1496,7 +1518,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					false,
 				);
 				if (hookRes.busDirOverride) {
-					hydrateFromDisk(ctx, hookRes.busDirOverride);
+					hydrateFromDisk(ctx, hookRes.busDirOverride, { clearBranchDrift: true });
 				}
 				setGate(resolvedGate, ctx, true);
 				if (lockNotice && resolvedGate !== "none" && !isSilentSession(ctx)) {
@@ -2201,7 +2223,15 @@ export default function zeeExtension(pi: ExtensionAPI) {
 						if (msg?.role !== "assistant") return;
 
 						thinkingStreamStartedAt = 0;
-						details.usage.turns += 1;
+						const text = extractMessageText(msg.content).trim();
+						const msgOutTokens = msg.usage?.output ?? 0;
+						// Pi CLI 遇 429/5xx 会自动内部退避重试并发出多次 stopReason="error" 的空 message_end；
+						// 零产出、零工具动作、零输出 token 的上游重试错误不计为有效轮次，避免误杀 429 熔断器
+						const isZeroProgressErrorRetry =
+							msg.stopReason === "error" && !text && msgOutTokens === 0 && details.lastActions.length === 0;
+						if (!isZeroProgressErrorRetry) {
+							details.usage.turns += 1;
+						}
 						if (msg.usage) {
 							details.usage.input += msg.usage.input ?? 0;
 							details.usage.output += msg.usage.output ?? 0;
@@ -2214,7 +2244,6 @@ export default function zeeExtension(pi: ExtensionAPI) {
 						if (msg.stopReason) details.stopReason = msg.stopReason;
 						if (msg.errorMessage) details.errorMessage = msg.errorMessage;
 
-						const text = extractMessageText(msg.content).trim();
 						if (text) latestAssistantText = text;
 						streamingAssistantText = "";
 						emitProgress();
@@ -2407,6 +2436,8 @@ export default function zeeExtension(pi: ExtensionAPI) {
 						exitCode: outcome.code,
 						turns: details.usage.turns,
 						hasOutput: hasProducedText,
+						hasToolCalls: details.lastActions.length > 0,
+						outputTokens: details.usage.output,
 					})
 				: { transient: false, kind: null, ttlMs: 0, reason: "" };
 
@@ -2589,7 +2620,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 			details.status = "completed";
 			workerFinalized = true;
 			const bodyRaw = latestAssistantText.trim() || streamingAssistantText.trim();
-			const verdictMatch = bodyRaw.match(/\bVERDICT:\s*(PASS|FAIL|REVISE|INCONCLUSIVE)\b/i);
+			const verdictMatch = bodyRaw.match(/\bVERDICT\*{0,2}\s*:\s*[*`_\s]*(PASS|FAIL|REVISE|INCONCLUSIVE)\b/i);
 			const willRecordGate = Boolean(
 				verdictMatch && !details.roleViolation && (role === "verifier" || role === "reviewer" || role === "judge"),
 			);

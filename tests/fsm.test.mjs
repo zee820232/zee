@@ -627,3 +627,45 @@ test("v4.2.1：fsm.ts 保持零 provider-health/node:fs 依赖；Hub Tab 4 展�
   assert.equal(store.getSnapshot().providerCooldowns.length, 0);
   store.dispose();
 });
+
+test("v4.2.2：init-design 带活跃 busDir 解锁转 EXECUTING；Hub Tab 4 清洗换行防裂框 & 80 列短 Tab 完整显示第 5 页", () => {
+  const now = Date.now();
+  let f = fsm.createInitialFsmSnapshot("auto", now);
+  f = fsm.reduceFsm(f, { type: "START_RUN", track: "init", slug: "envdiff", busDir: "/tmp/zee-bus", phase: "INIT_DESIGN" }, now);
+  f = fsm.reduceFsm(f, { type: "SET_WRITE_GATE", gate: "init-design" }, now + 100);
+  f = fsm.reduceFsm(f, { type: "SET_WRITE_GATE", gate: "none" }, now + 200);
+  assert.equal(f.phase, "EXECUTING", "M0 解锁 init-design 且存在活跃 busDir 时应转入 EXECUTING 而非 IDLE");
+
+  const snap = {
+    ...hubUi.createInitialHubSnapshot(REPO_ROOT, f),
+    worktreeInventory: {
+      ok: false,
+      repoRoot: "/tmp/non-git",
+      worktrees: [],
+      bucketCounts: { primary: 0, active_hold: 0, keep_dirty: 0, safe_to_prune: 0, safe_to_prune_detached: 0, review_unmerged: 0 },
+      fetchedAt: now,
+      error: "检查失败：/tmp/non-git 不是合法的 Git 仓库\nfatal: not a git repository\nline3",
+    },
+  };
+  const store = new hubUi.HubStore(snap);
+  const fakeTui = { terminal: { rows: 30 }, requestRender: () => {} };
+  const hub = new hubUi.ZeeHubOverlayComponent(store, fakeTui, {}, {}, () => {});
+
+  // 80 列窄终端 Tab 栏必须使用短标题完整显示第 5 页，无截断
+  const rendered80 = hub.render(80);
+  assert.ok(rendered80[1].includes("5控制"), `80 列 Tab 栏必须完整显示第 5 页，实际: ${rendered80[1]}`);
+  for (const l of rendered80) {
+    assert.equal(/[\r\n]/.test(l), false);
+    assert.ok(visibleWidth(l) <= 80);
+  }
+
+  // Tab 4 含多行 inv.error 时必须清洗换行且保持右边框完整对齐
+  hub.handleInput("4");
+  const tab4 = hub.render(80);
+  for (const l of tab4) {
+    assert.equal(/[\r\n]/.test(l), false, "Tab 4 渲染行绝不可含嵌入换行符导致裂框");
+    assert.ok(visibleWidth(l) <= 80);
+  }
+  assert.ok(tab4.some((l) => l.includes("盘点失败:") && l.endsWith("│")));
+  store.dispose();
+});

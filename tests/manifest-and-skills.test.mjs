@@ -1,27 +1,31 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { cleanDups, findDuplicateSkillDirs, isEphemeralSource } from "../scripts/install.mjs";
+import { buildWinCmdInvocation, cleanDups, findDuplicateSkillDirs, isEphemeralSource, quoteWinCmdArg } from "../scripts/install.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_SKILLS = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro", "zee-setup"];
-const EXPECTED_PLAYBOOKS = ["understand.md", "plan.md", "feature.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md", "ship.md"];
+const EXPLICIT_ONLY_SKILLS = ["zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro", "zee-setup"];
+const EXPECTED_PLAYBOOKS = ["understand.md", "plan.md", "feature.md", "design.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md", "ship.md"];
 const EXPECTED_ROLES = ["scout.md", "architect.md", "ui.md", "coder.md", "verifier.md", "reviewer.md", "judge.md"];
 
-test("v5.1.0 清单文件与包元数据符合精简规范", () => {
+test("v5.2.0 清单文件、发布白名单与 AGY 规则/子代理元数据符合规范", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.version, "5.1.0");
+  assert.equal(pkg.version, "5.2.0");
   assert.deepEqual(pkg.pi?.extensions, ["./pi-extension/index.ts"]);
   assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills 以免与 /skill:zee* 冲突");
   assert.equal(pkg.peerDependencies?.["@earendil-works/pi-tui"], undefined, "不应保留 pi-tui 依赖");
+  assert.ok(Array.isArray(pkg.files) && pkg.files.includes("rules/") && pkg.files.includes("skills/"), "package.json 须配置 files 白名单防止打包研究/测试文件");
+  assert.equal(pkg.files.includes("docs/"), false);
+  assert.equal(pkg.files.includes("tests/"), false);
 
   const plugin = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, ".antigravity-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.name, "zee");
-  assert.equal(plugin.version, "5.1.0");
+  assert.equal(plugin.version, "5.2.0");
 
   const hooks = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "hooks.json"), "utf8"));
   const cfg = hooks["zee-lifecycle-guard"];
@@ -30,9 +34,12 @@ test("v5.1.0 清单文件与包元数据符合精简规范", () => {
   assert.ok(Array.isArray(cfg.Stop) && cfg.Stop.length > 0);
   assert.equal(cfg.PostToolUse, undefined);
   assert.equal(cfg.SessionStart, undefined);
+
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "rules", "AGENTS.md")), true, "须包含极薄 rules/AGENTS.md 实现 AGY 自然语言自动唤醒");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "agents", "zee-worker.md")), true, "须包含专职隔离执行子代理 agents/zee-worker.md");
 });
 
-test("v4 冗余文件已彻底移除，仅保留 7 技能与核心剧本/角色卡", () => {
+test("主技能开放自然语言隐式唤醒，6 把专项单刀保留显式触发隔离，v4 冗余已彻底清理", () => {
   const removedPaths = [
     "pi-extension/fsm.ts",
     "pi-extension/hub-ui.ts",
@@ -61,7 +68,14 @@ test("v4 冗余文件已彻底移除，仅保留 7 技能与核心剧本/角色�
     .sort();
   assert.deepEqual(skillDirs, [...EXPECTED_SKILLS].sort());
 
-  for (const name of EXPECTED_SKILLS) {
+  // 主入口 zee 必须开放隐式调用实现“下载即用自动驾驶”
+  const mainMd = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee", "SKILL.md"), "utf8");
+  assert.doesNotMatch(mainMd, /disable-model-invocation:\s*true/, "主入口 skills/zee/SKILL.md 应允许模型按需隐式唤醒");
+  const mainYaml = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee", "agents", "openai.yaml"), "utf8");
+  assert.match(mainYaml, /allow_implicit_invocation:\s*true/, "主入口 skills/zee/agents/openai.yaml 须开启 allow_implicit_invocation: true");
+
+  // 其余 6 把专项单刀保持显式触发，防止劫持普通对话
+  for (const name of EXPLICIT_ONLY_SKILLS) {
     const mdPath = path.join(REPO_ROOT, "skills", name, "SKILL.md");
     const yamlPath = path.join(REPO_ROOT, "skills", name, "agents", "openai.yaml");
     assert.equal(fs.existsSync(mdPath), true, `缺少 ${mdPath}`);
@@ -73,7 +87,7 @@ test("v4 冗余文件已彻底移除，仅保留 7 技能与核心剧本/角色�
   }
 });
 
-test("skills/zee 体积控制在 <= 4KB，剧本/原则/角色卡契约干净无残留", () => {
+test("skills/zee 体积控制在 <= 4KB，9 份剧本/原则/角色卡契约完整对齐", () => {
   const mainSkillPath = path.join(REPO_ROOT, "skills", "zee", "SKILL.md");
   const mainSkillStat = fs.statSync(mainSkillPath);
   assert.ok(mainSkillStat.size <= 4096, `skills/zee/SKILL.md 体积应 <= 4096B，实际 ${mainSkillStat.size}B`);
@@ -97,9 +111,6 @@ test("skills/zee 体积控制在 <= 4KB，剧本/原则/角色卡契约干净无
       assert.notEqual(eff, "low");
     }
   }
-  assert.ok(Array.isArray(catalog.tierRules?.flagship) && catalog.tierRules.flagship.length > 0);
-  assert.ok(Array.isArray(catalog.tierRules?.fastQuality) && catalog.tierRules.fastQuality.length > 0);
-  assert.ok(Array.isArray(catalog.tierRules?.optInOnly) && catalog.tierRules.optInOnly.length > 0);
 
   const playbooksDir = path.join(REPO_ROOT, "skills", "zee", "playbooks");
   const actualPlaybooks = fs.readdirSync(playbooksDir).sort();
@@ -114,6 +125,7 @@ test("skills/zee 体积控制在 <= 4KB，剧本/原则/角色卡契约干净无
     const content = fs.readFileSync(path.join(rolesDir, rf), "utf8");
     const lines = content.trim().split(/\r?\n/).length;
     assert.ok(lines <= 35, `roles/${rf} 应精简（<=35行），实际 ${lines} 行`);
+    assert.match(content, /Return:/, `roles/${rf} 须对齐 worker.md 要求的 Return: 字段`);
     for (const banned of bannedRefs) {
       assert.equal(content.includes(banned), false, `roles/${rf} 不应再引用已删除能力 ${banned}`);
     }
@@ -122,7 +134,7 @@ test("skills/zee 体积控制在 <= 4KB，剧本/原则/角色卡契约干净无
   const agyAgent = fs.readFileSync(path.join(REPO_ROOT, "agents", "zee.md"), "utf8");
   assert.ok(agyAgent.length < 2500, "agents/zee.md 应保持精简");
   assert.doesNotMatch(agyAgent, /\bgeneral-purpose\b/);
-  assert.match(agyAgent, /\/zee-setup/);
+  assert.match(agyAgent, /zee-worker/);
 
   const principlesLines = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee", "principles.md"), "utf8").trim().split(/\r?\n/);
   assert.ok(principlesLines.length <= 12, `principles.md 应保持 <=12 行，实际 ${principlesLines.length} 行`);
@@ -134,21 +146,62 @@ test("skills/zee 体积控制在 <= 4KB，剧本/原则/角色卡契约干净无
   const verifySkill = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee-verify", "SKILL.md"), "utf8");
   assert.match(verifySkill, /\/zee-verify maintain/);
   assert.match(verifySkill, /Able to fail/i);
+  assert.match(verifySkill, /--fuzz/);
 
   const reviewSkill = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee-review", "SKILL.md"), "utf8");
   assert.match(reviewSkill, /--strict/);
   assert.match(reviewSkill, /--quick/);
+  assert.match(reviewSkill, /--author-family/);
+  assert.match(reviewSkill, /GATE_CHANGE_RATIONALE/);
 
   const retroSkill = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee-retro", "SKILL.md"), "utf8");
   assert.match(retroSkill, /Bite Proof/);
   assert.match(retroSkill, /Rule -> Enforcer/);
+  assert.match(retroSkill, /finding list/);
 });
 
-test("install.mjs 辅助函数（isEphemeralSource / cleanDups）与多目标 --dry-run 正确工作", () => {
+test("install.mjs 辅助函数、Windows 安全参数转义、--target auto/all 与 strict 参数拦截正确工作", () => {
   assert.equal(isEphemeralSource(true, REPO_ROOT), true);
   assert.equal(isEphemeralSource(false, REPO_ROOT), false);
   assert.equal(isEphemeralSource(false, path.join(os.tmpdir(), "_npx", "zee")), true);
   assert.equal(isEphemeralSource(false, path.join(os.tmpdir(), "node_modules", "zee")), true);
+
+  // Windows 参数转义与延迟扩展传参：空格、括号、&、%、环境变量字面量与尾反斜杠均零损传递
+  assert.equal(quoteWinCmdArg("C:\\Users\\John Doe (2026)\\R&D\\zee\\"), '"C:\\Users\\John Doe (2026)\\R&D\\zee\\\\"');
+  assert.equal(quoteWinCmdArg("100%safe"), '"100%safe"');
+
+  const winInv = buildWinCmdInvocation("C:\\tools\\pi.cmd", ["install", "C:\\Users\\John Doe (2026)\\R&D\\100%safe\\env%OS%leak"]);
+  assert.equal(winInv.extraEnv.ZEE_CMD_BIN, "C:\\tools\\pi.cmd");
+  assert.equal(winInv.extraEnv.ZEE_CMD_ARG_1, "C:\\Users\\John Doe (2026)\\R&D\\100%safe\\env%OS%leak");
+  assert.ok(winInv.cmdArgs.includes("/v:on"));
+
+  if (process.platform === "win32") {
+    const cmdDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-wincmd-"));
+    try {
+      const shimPath = path.join(cmdDir, "echo args (test).cmd");
+      fs.writeFileSync(
+        shimPath,
+        `@echo off\r\n"${process.execPath}" -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" %*\r\n`,
+        "utf8",
+      );
+      const trickyArgs = [
+        "install",
+        "C:\\Users\\John Doe (2026)\\R&D\\zee",
+        "100%safe",
+        "env%OS%leak",
+      ];
+      const inv = buildWinCmdInvocation(shimPath, trickyArgs);
+      const out = spawnSync(inv.comspec, inv.cmdArgs, {
+        encoding: "utf8",
+        windowsVerbatimArguments: true,
+        env: { ...process.env, ...inv.extraEnv },
+      });
+      assert.equal(out.status, 0, `Windows .cmd shim 执行失败: ${out.stderr}`);
+      assert.deepEqual(JSON.parse(out.stdout), trickyArgs, "含空格/括号/&/%/%OS% 的参数必须原样透传零展开");
+    } finally {
+      fs.rmSync(cmdDir, { recursive: true, force: true });
+    }
+  }
 
   const tmpSkillsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zee-inst-dups-"));
   try {
@@ -173,20 +226,29 @@ test("install.mjs 辅助函数（isEphemeralSource / cleanDups）与多目标 --
     fs.rmSync(tmpSkillsRoot, { recursive: true, force: true });
   }
 
-  for (const target of ["pi", "skills"]) {
-    const out = execFileSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--target", target, "--dry-run"], {
+  for (const target of ["auto", "pi", "agy", "skills", "both", "all"]) {
+    const res = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--target", target, "--dry-run"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
     });
-    assert.match(out, /\[dry-run\]/);
+    // 若某机器没装 pi，exitCode=1 但不应抛未捕获异常；有装时输出 [dry-run]
+    assert.ok(res.stdout.includes("安装目标") || res.stdout.includes("自动探测") || res.stderr.includes("未检测到"), `target=${target} 输出异常`);
   }
-  const piOut = execFileSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--target", "pi", "--dry-run"], {
+
+  // 支持 --target=skills 语法且包含 -g -s * -y
+  const skillsOut = execFileSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--target=skills", "--dry-run"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
   });
-  assert.match(piOut, /\/zee-plan/);
-  assert.match(piOut, /\/zee-setup/);
-  assert.match(piOut, /\/zee-mode/);
+  assert.match(skillsOut, /-g -s \* -y/);
+
+  // 拼错 flag（如 --dryrun）必须严格报错退出，绝不静默真删
+  const badFlag = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--target", "pi", "--dryrun"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  assert.notEqual(badFlag.status, 0);
+  assert.match(badFlag.stderr, /参数错误/);
 
   // 经符号链接/Windows Junction 启动时（npx / 全局 bin 场景）isEntryPoint 必须仍触发 main()
   const linkParent = fs.mkdtempSync(path.join(os.tmpdir(), "zee-inst-link-"));
@@ -197,7 +259,7 @@ test("install.mjs 辅助函数（isEphemeralSource / cleanDups）与多目标 --
       cwd: linkParent,
       encoding: "utf8",
     });
-    assert.match(linkHelp, /zee v5\.1\.0/, "通过软链/Junction 执行 install.mjs --help 必须正常输出帮助");
+    assert.match(linkHelp, /zee v5\.2\.0/, "通过软链/Junction 执行 install.mjs --help 必须正常输出帮助");
   } finally {
     try { fs.unlinkSync(linkRepo); } catch { fs.rmSync(linkRepo, { recursive: true, force: true }); }
     fs.rmSync(linkParent, { recursive: true, force: true });

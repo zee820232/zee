@@ -1,5 +1,0 @@
-interface:
-  display_name: "Zee Setup"
-  short_description: "配置 zee 角色模型、思考强度并审计当前宿主规则"
-policy:
-  allow_implicit_invocation: false

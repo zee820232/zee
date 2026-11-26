@@ -1,16 +1,13 @@
 ---
 name: zee-plan
-description: >-
-  先通过多轮决策树访谈（grill）把需求与取舍彻底聊透，再由架构师（可选多模型 Arena）沉淀成可执行的 plan.md 计划文档并干净停机，绝不直接改生产代码。
+description: Zee 0→1 / 复杂需求规划入口：探索摸底、关键决策澄清与原子 unit 批量落盘
 disable-model-invocation: true
 ---
 
-# zee-plan — 深度访谈并沉淀计划文档
+# `/zee-plan` — 规划与单元拆解
 
-This is the shortcut entry for `zee` **`plan` mode**.
-
-> **Zero-Config Standalone（单兵开箱即用）**：若未配置 `~/.agents/zee-config.json`，调用 `zee-tool.mjs resolve-model --allow-standalone --role architect` 退化为当前会话模型完成侦察、访谈与规划出稿（向用户输出一句简短中文提示即可，绝不阻塞）。
-
-1. Read sibling `../zee/SKILL.md` (Preflight + User-Facing Language Policy) and `../zee/references/plan-mode.md` in full.
-2. Execute `zee` strictly in **`plan` mode** (append `L3` if the user asks for multi-model Arena debate on the plan).
-3. Communicate with the user in Simplified Chinese, write the finalized plan document, and **stop cleanly without modifying production source code**.
+1. 遵循 `skills/zee/SKILL.md`、`skills/zee/principles.md` 与 `skills/zee/playbooks/plan.md`。
+2. 先运行 `<Zee Tool CLI> init-run <repoRoot> <slug>` 创建任务总线 `busDir`。
+3. 摸清当前仓库状况（非空可快速检索；空目录跳过侦察，**禁止刷外部 `todo` 工具或无关历史记忆检索空耗时间**，争取 1–3 轮完成落盘）。
+4. 向用户（或当前会话指令）确认最多 3–5 个关键架构/交互决策点（附推荐项；若对方已要求“按推荐直接推进”则立即敲定）。
+5. 将设计契约与互不踩文件的 `units` 写入 `<busDir>/plan.md`，并使用 `<Zee Tool CLI> update-state <busDir> --status planned --units '[...]'` **一次性批量落盘**后汇报。

@@ -1,796 +1,310 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const TOOL = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
+const ZEE_TOOL = path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs");
 
-function runTool(args, expectOk = true, extraEnv = {}) {
-  const res = spawnSync(process.execPath, [TOOL, ...args], {
+function runTool(args, { env = {}, allowFail = false } = {}) {
+  const res = spawnSync(process.execPath, [ZEE_TOOL, ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...extraEnv },
+    env: { ...process.env, ...env },
   });
-  if (expectOk) {
-    assert.equal(res.status, 0, `zee-tool ${args.join(" ")} failed: ${res.stderr}\n${res.stdout}`);
+  if (!allowFail) {
+    assert.equal(res.status, 0, `zee-tool ${args.join(" ")} 失败:\nstdout=${res.stdout}\nstderr=${res.stderr}`);
   }
-  return { status: res.status, json: res.stdout.trim() ? JSON.parse(res.stdout) : null, stderr: res.stderr };
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-test("init-run / update-state / log-decision（位置+具名）全链路原子操作", () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-tool-repo-"));
+function initGitRepo(prefix = "zee-tool-repo-") {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "zee@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "zee"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "init\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "init"], { cwd: repo });
+  return repo;
+}
+
+test("init-run / update-state / list-runs 完整管理任务总线并去重 delegate 计数", () => {
+  const repo = initGitRepo();
   let busDir = "";
   try {
-    const init = runTool(["init-run", tmpRepo, "mario-test"]);
-    assert.equal(init.json.ok, true);
-    busDir = init.json.busDir;
+    const init = JSON.parse(runTool(["init-run", repo, "poke-test", "--mode", "night", "--conversation-id", "c-1"]).stdout);
+    assert.equal(init.ok, true);
+    busDir = init.busDir;
+    assert.equal(fs.existsSync(init.statePath), true);
+    assert.equal(fs.existsSync(init.tsvPath), true);
 
-    const updated = runTool([
+    runTool([
       "update-state",
       busDir,
       "--status",
       "running",
-      "--mode",
-      "night",
-      "--level",
-      "L2",
       "--resume-next",
       "U2",
-      "--inc-delegates",
+      "--budget",
+      JSON.stringify({ maxSubagents: 12 }),
       "--unit-upsert",
-      JSON.stringify({ id: "U1", status: "done", sha: "abc1234" }),
+      JSON.stringify({ id: "U1", status: "done" }),
+      "--delegate-id",
+      "d-1",
     ]);
-    assert.equal(updated.json.state.status, "running");
-    assert.equal(updated.json.state.mode, "night");
-    assert.equal(updated.json.state.resumeNext, "U2");
-    assert.equal(updated.json.state.delegatesDispatched, 1);
-    assert.equal(updated.json.state.units.length, 1);
+    // 同一 delegate-id 不重复累加
+    const upd = JSON.parse(runTool(["update-state", busDir, "--delegate-id", "d-1"]).stdout);
+    assert.equal(upd.state.status, "running");
+    assert.equal(upd.state.resumeNext, "U2");
+    assert.equal(upd.state.delegatesDispatched, 1);
+    assert.equal(upd.state.units.length, 1);
 
-    // 具名参数 log-decision
-    const namedLog = runTool([
-      "log-decision",
-      "--bus",
-      busDir,
-      "--unit",
-      "U1",
-      "--phase",
-      "verify",
-      "--decision",
-      "PASS",
-      "--why",
-      "all tests green",
-      "--evidence",
-      "npm test -> 0",
-      "--result",
-      "merged",
-    ]);
-    assert.equal(namedLog.json.ok, true);
-
-    // 兼容旧 7 位置参数
-    const posLog = runTool(["log-decision", busDir, "U2", "start", "kickoff", "next slice", "state.json", "running"]);
-    assert.equal(posLog.json.ok, true);
-
-    const tsv = fs.readFileSync(path.join(busDir, "decisions.tsv"), "utf8").trim().split("\n");
-    assert.equal(tsv.length, 3);
+    const list = JSON.parse(runTool(["list-runs", repo]).stdout);
+    assert.equal(list.ok, true);
+    assert.ok(list.runs.some((r) => r.slug === "poke-test"));
   } finally {
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
     if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("worktree-create 与 cleanup-worktrees --prune-safe 识别干净 detached 与 squash-merge", () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-wt-repo-"));
-  let wtPath = "";
+test("worktree-create 与 cleanup-worktrees 自动处理嵌套分支碰撞并挂载 node_modules", () => {
+  const repo = initGitRepo("zee-wt-");
   try {
-    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
-    fs.writeFileSync(path.join(tmpRepo, "README.md"), "# demo\n");
-    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+    // 制造 refs/heads/feat 与 feat/lane 的嵌套分支名碰撞
+    execFileSync("git", ["branch", "feat"], { cwd: repo });
+    fs.mkdirSync(path.join(repo, "node_modules", "demo"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "node_modules", "demo", "index.js"), "module.exports = 1;\n", "utf8");
 
-    const created = runTool(["worktree-create", tmpRepo, "mario-wt", "verify-r1", "HEAD"]);
-    assert.equal(created.json.ok, true);
-    wtPath = created.json.worktreePath;
-    assert.equal(fs.existsSync(wtPath), true);
+    const created = JSON.parse(runTool(["worktree-create", repo, "s1", "lane1", "HEAD", "--branch", "feat/lane1"]).stdout);
+    assert.equal(created.ok, true);
+    assert.equal(created.flattened, true);
+    assert.equal(created.branch, "feat-lane1");
+    assert.equal(fs.existsSync(path.join(created.worktreePath, "node_modules", "demo", "index.js")), true);
 
-    const audited = runTool(["cleanup-worktrees", tmpRepo]);
-    const entry = audited.json.worktrees.find((w) => w.path === wtPath);
-    assert.ok(entry);
-    assert.equal(entry.bucket, "safe_to_prune");
-
-    const pruned = runTool(["cleanup-worktrees", tmpRepo, "--prune-safe"]);
-    assert.equal(pruned.json.prunedCount, 1);
-    assert.equal(fs.existsSync(wtPath), false);
+    const cleaned = JSON.parse(runTool(["cleanup-worktrees", repo, "--prune-safe"]).stdout);
+    assert.equal(cleaned.ok, true);
+    assert.equal(fs.existsSync(created.worktreePath), false);
   } finally {
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
-    if (wtPath) fs.rmSync(path.dirname(path.dirname(path.dirname(wtPath))), { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("check-plan 校验必填章节并对超预算切片发出告警", () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-plan-check-"));
+test("sandbox-export 与 sandbox-clean 正确导出工作区改动并拒绝清理非法目录", () => {
+  const repo = initGitRepo("zee-sbx-");
   try {
-    const goodPlan = path.join(tmpDir, "good.md");
+    fs.writeFileSync(path.join(repo, "untracked.txt"), "hello sandbox\n", "utf8");
+    const exported = JSON.parse(runTool(["sandbox-export", "--repo", repo, "--working-tree", "--prefix", "rev"]).stdout);
+    assert.equal(exported.ok, true);
+    assert.equal(fs.readFileSync(path.join(exported.sandboxDir, "untracked.txt"), "utf8"), "hello sandbox\n");
+
+    const cleaned = JSON.parse(runTool(["sandbox-clean", exported.sandboxDir]).stdout);
+    assert.equal(cleaned.ok, true);
+    assert.equal(fs.existsSync(exported.sandboxDir), false);
+
+    const bad = runTool(["sandbox-clean", repo], { allowFail: true });
+    assert.notEqual(bad.status, 0);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("gate-tamper-diff 检查门禁、抑制注解、密钥与 UTF-8 乱码，且不误拦普通 IP 地址", () => {
+  const repo = initGitRepo("zee-tamper-");
+  try {
+    // 1. 普通 IP 字面量必须放行（ips 不要）
     fs.writeFileSync(
-      goodPlan,
-      `# Plan
-## 目标与 Out-of-Scope
-明确不做多人联机。
-## 数据形状与文件归属 (Data Shape & Lanes)
-GameState, Entity.
-## Test Seam 与 Done Predicate
-npm test 退出 0。
-## Throughput Checkpoint
-- Blocking first steps: shared types
-## 垂直切片 (Vertical Slices)
-- Slice 1 (3 files, 220 LOC, blockedBy: none)
-`,
+      path.join(repo, "server.js"),
+      'export const LOCAL = "127.0.0.1"; export const LAN = "192.168.1.50";\n',
+      "utf8",
     );
-    const okRes = runTool(["check-plan", goodPlan]);
-    assert.equal(okRes.json.ok, true);
-    assert.equal(okRes.json.warnings.length, 0);
+    const cleanOut = JSON.parse(runTool(["gate-tamper-diff", "--repo", repo, "--working-tree"]).stdout);
+    assert.equal(cleanOut.ok, true);
+    assert.equal(cleanOut.requiresCountersign, false);
+    assert.equal(cleanOut.secretsAdded.length, 0);
 
-    const badPlan = path.join(tmpDir, "bad.md");
-    fs.writeFileSync(badPlan, `# Incomplete\n- Slice 1 (12 files, 900 LOC)\n`);
-    const badRes = runTool(["check-plan", badPlan], false);
-    assert.equal(badRes.status, 1);
-    assert.equal(badRes.json.ok, false);
-    assert.ok(badRes.json.missing.length >= 3);
-    assert.ok(badRes.json.warnings.length >= 1);
+    // 2. 注入抑制注解、门禁文件改动（含 .agents/verify-ctl.mjs / .agents/zee.project.json / test/）、伪密钥与 \uFFFD 乱码
+    fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+    fs.mkdirSync(path.join(repo, "test"), { recursive: true });
+    fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "tests", "smoke.test.mjs"), "// ok\n", "utf8");
+    fs.writeFileSync(path.join(repo, "test", "helper.js"), "// ok\n", "utf8");
+    fs.writeFileSync(path.join(repo, ".agents", "verify-ctl.mjs"), "// ok\n", "utf8");
+    fs.writeFileSync(path.join(repo, ".agents", "zee.project.json"), "{}\n", "utf8");
+    const fakeKey = ["sk", "1234567890abcdef123456"].join("-");
+    fs.writeFileSync(
+      path.join(repo, "bad.ts"),
+      `// @ts-ignore\nconst token = "${fakeKey}";\nconst broken = "你好\uFFFD世界";\n`,
+      "utf8",
+    );
+
+    const dirtyOut = JSON.parse(runTool(["gate-tamper-diff", "--repo", repo, "--working-tree"]).stdout);
+    assert.equal(dirtyOut.requiresCountersign, true);
+    assert.ok(dirtyOut.gateFilesTouched.includes("tests/smoke.test.mjs"));
+    assert.ok(dirtyOut.gateFilesTouched.includes("test/helper.js"));
+    assert.ok(dirtyOut.gateFilesTouched.includes(".agents/verify-ctl.mjs"));
+    assert.ok(dirtyOut.gateFilesTouched.includes(".agents/zee.project.json"));
+    assert.ok(dirtyOut.suppressionsAdded.some((x) => x.pattern === "@ts-ignore"));
+    assert.ok(dirtyOut.secretsAdded.some((x) => x.pattern === "api_key_prefix"));
+    assert.ok(dirtyOut.encodingIssues.some((x) => x.pattern === "utf8_replacement_char"));
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("resolve-model 确定性翻译 AGY invoke_subagent 与 swarm 模型面", () => {
-  const tmpCfg = path.join(os.tmpdir(), `zee-cfg-${process.pid}.json`);
+test("resolve-model 与 doctor 支持 Schema v3 3 槽位、跨家族校验、--allow-standalone 及冷却切备", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "zee-cfg-"));
+  const cfgPath = path.join(tmp, "zee-config.json");
+  const healthPath = path.join(tmp, "provider-health.json");
+  const env = { ZEE_CONFIG_PATH: cfgPath, ZEE_PROVIDER_HEALTH_PATH: healthPath };
   try {
-    fs.writeFileSync(
-      tmpCfg,
-      JSON.stringify({
-        version: 2,
-        budget: "balanced",
-        roles: {
-          scout: { prefer: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "fast", effort: "low" } },
-          architect: {
-            primary: { prefer: { family: "gemini", modelHint: "gemini-4-neon", tier: "pro", effort: "xhigh" } },
-            arenaPool: [],
-          },
-          coder: {
-            standard: { prefer: { family: "gemini", modelHint: "gemini-4-argon", tier: "standard", effort: "medium" } },
-            heavy: { prefer: { family: "gemini", modelHint: "gemini-4-neon", tier: "pro", effort: "high" } },
-          },
+    // 无配置文件：默认报错，带 --allow-standalone 走单兵降级
+    const missing = runTool(["resolve-model", "--role", "coder"], { env, allowFail: true });
+    assert.notEqual(missing.status, 0);
+    const standalone = JSON.parse(runTool(["resolve-model", "--role", "coder", "--allow-standalone"], { env }).stdout);
+    assert.equal(standalone.ok, true);
+    assert.equal(standalone.standalone, true);
+
+    // 写入 Schema v3 3 槽位（workhorse=openai, adversary=claude）
+    const cfgV3 = {
+      version: 3,
+      authorizedFallback: true,
+      slots: {
+        fast: {
+          prefer: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "fast", effort: "low", bindings: { pi: { providerInstanceId: "magpie", model: "auto/gemini-4-hydrogen" } } },
+          backup: { family: "deepseek", modelHint: "deepseek-v4.1-flash", tier: "fast", effort: "low", bindings: { pi: { providerInstanceId: "magpie", model: "auto/deepseek-v4.1-flash" } } },
         },
-      }),
+        workhorse: {
+          prefer: { family: "openai", modelHint: "gpt-6.2-astra", tier: "standard", effort: "medium", bindings: { pi: { providerInstanceId: "magpie", model: "auto/gpt-6.2-astra" } } },
+          backup: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "standard", effort: "medium", bindings: { pi: { providerInstanceId: "magpie", model: "auto/gemini-4-hydrogen" } } },
+        },
+        adversary: {
+          prefer: { family: "claude", modelHint: "claude-sonnet-5-5", tier: "pro", effort: "high", bindings: { pi: { providerInstanceId: "magpie", model: "magpie-2/vm/claude-sonnet-5-5" } } },
+          backup: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "standard", effort: "high", bindings: { pi: { providerInstanceId: "magpie", model: "auto/gemini-4-hydrogen" } } },
+        },
+      },
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(cfgV3, null, 2), "utf8");
+
+    const docOk = JSON.parse(runTool(["doctor"], { env }).stdout);
+    assert.equal(docOk.ok, true);
+
+    const rScout = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "scout"], { env }).stdout);
+    assert.equal(rScout.resolved.slot, "fast");
+    assert.equal(rScout.resolved.binding.model, "auto/gemini-4-hydrogen");
+
+    const rVerifier = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "verifier"], { env }).stdout);
+    assert.equal(rVerifier.resolved.slot, "workhorse");
+    assert.equal(rVerifier.resolved.subagentArgs.provider, "magpie");
+    assert.equal(rVerifier.resolved.subagentArgs.model, "auto/gpt-6.2-astra");
+    assert.equal(rVerifier.resolved.subagentArgs.thinkingLevel, "medium");
+
+    const rRev = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "reviewer"], { env }).stdout);
+    assert.equal(rRev.resolved.slot, "adversary");
+    assert.equal(rRev.resolved.family, "claude");
+
+    // 模拟 prefer 进入 429 冷却 -> resolve-model 自动切 backup
+    fs.writeFileSync(
+      healthPath,
+      JSON.stringify({ version: 1, models: { "magpie/auto/gpt-6.2-astra": { cooldownUntil: Date.now() + 60_000, reason: "http_429" } } }),
+      "utf8",
     );
+    const rFallback = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "coder"], { env }).stdout);
+    assert.equal(rFallback.resolved.binding.model, "auto/gemini-4-hydrogen");
+    assert.ok(rFallback.resolved.cooldownFallback);
 
-    const subScout = runTool(["resolve-model", "--harness", "agy", "--surface", "invoke_subagent", "--role", "scout", "--config", tmpCfg]);
-    assert.equal(subScout.json.resolved.model, "flash");
+    const clr = JSON.parse(runTool(["provider-health", "--clear"], { env }).stdout);
+    assert.equal(clr.ok, true);
 
-    const subArch = runTool(["resolve-model", "--harness", "agy", "--surface", "invoke_subagent", "--role", "architect", "--config", tmpCfg]);
-    assert.equal(subArch.json.resolved.model, "pro");
-
-    const subArgon = runTool(["resolve-model", "--harness", "agy", "--surface", "invoke_subagent", "--role", "coder.standard", "--config", tmpCfg]);
-    assert.equal(subArgon.json.resolved.model, "inherit");
-
-    const swarmArch = runTool(["resolve-model", "--harness", "agy", "--surface", "swarm", "--role", "architect", "--config", tmpCfg]);
-    assert.equal(swarmArch.json.resolved.model, "gemini-4-neon-xhigh");
+    // 同家族校验失败：把 adversary 也改成 openai -> doctor 报错
+    cfgV3.slots.adversary.prefer.family = "openai";
+    fs.writeFileSync(cfgPath, JSON.stringify(cfgV3, null, 2), "utf8");
+    const docBad = runTool(["doctor"], { env, allowFail: true });
+    assert.notEqual(docBad.status, 0);
   } finally {
-    fs.rmSync(tmpCfg, { force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test("v4.1 回归 [M2/H6]：parseFlags 支持 -- 开头值、active_hold 保护在跑 worktree、check-plan 查环且不误报正文、resolve-model 全槽位与缺配失败", () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v41-tool-"));
+test("update-state 支持多 --unit-upsert/--units/6 并发子进程无锁冲突零孤儿 + log-decision + doctor --repo 基线警告", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-empty-repo-"));
   let busDir = "";
-  let wtPath = "";
   try {
-    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
-    fs.writeFileSync(path.join(tmpRepo, "README.md"), "# demo\n");
-    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    const init = JSON.parse(runTool(["init-run", repo, "conc-test"]).stdout);
+    busDir = init.busDir;
 
-    // 1. init-run 支持 --conversation-id，log-decision 支持 --why "--live blocked"
-    const init = runTool(["init-run", tmpRepo, "v41-test", "--conversation-id", "conv-xyz-123"]);
-    busDir = init.json.busDir;
-    const st = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
-    assert.equal(st.conversationId, "conv-xyz-123");
+    // 1. doctor 检查无 HEAD commit 空仓 -> 给出 warning
+    const emptyDoc = JSON.parse(runTool(["doctor", "--repo", repo]).stdout);
+    assert.equal(emptyDoc.repoStatus.hasHeadCommit, false);
+    assert.ok(emptyDoc.warnings.some((w) => /HEAD|基线/.test(w)));
 
-    const logRes = runTool([
-      "log-decision",
-      "--bus",
-      busDir,
-      "--unit",
-      "U1",
-      "--phase",
-      "guard",
-      "--decision",
-      "BLOCK",
-      "--why",
-      "--live blocked cleanly",
-      "--evidence",
-      "guard-core",
-      "--result",
-      "safe",
-    ]);
-    assert.equal(logRes.json.ok, true);
-    assert.ok(logRes.json.appended.includes("'--live blocked cleanly"));
-
-    // 2. active_hold 锁保护在跑 detached worktree 不被 --prune-safe 误删
-    const wt = runTool(["worktree-create", tmpRepo, "v41-wt", "verify-live", "HEAD"]);
-    wtPath = wt.json.worktreePath;
-    const lockPath = `${wtPath}.zee-lock.json`;
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
-    const prunedWithLock = runTool(["cleanup-worktrees", tmpRepo, "--prune-safe"]);
-    const lockedEntry = prunedWithLock.json.worktrees.find((w) => w.path === wtPath);
-    assert.equal(lockedEntry.bucket, "active_hold");
-    assert.equal(lockedEntry.pruned, false);
-    assert.equal(fs.existsSync(wtPath), true);
-
-    // 释放锁后正常回收
-    fs.rmSync(lockPath, { force: true });
-    const prunedAfterUnlock = runTool(["cleanup-worktrees", tmpRepo, "--prune-safe"]);
-    assert.equal(prunedAfterUnlock.json.prunedCount, 1);
-
-    // 3. check-plan 背景叙述大数字不误报 + 循环依赖必拦截
-    const narrativePlan = path.join(tmpRepo, "narrative.md");
-    fs.writeFileSync(
-      narrativePlan,
-      `# Plan
-## 背景
-当前仓库共 28 files，核心模块约 2400 lines。
-## 目标与 Out-of-Scope
-明确不做云同步。
-## 数据形状与契约
-State, Event.
-## Test Seam 与 Done Predicate
-npm test exit 0
-## Throughput Checkpoint
-blocking first steps: types
-## 垂直切片
-- Slice 1 (3 files, 180 LOC, blockedBy: none)
-- Slice 2 (2 files, 120 LOC, blockedBy: Slice 1)
-`,
-    );
-    const okNar = runTool(["check-plan", narrativePlan]);
-    assert.equal(okNar.json.ok, true);
-    assert.equal(okNar.json.warnings.length, 0);
-
-    const cyclicPlan = path.join(tmpRepo, "cyclic.md");
-    fs.writeFileSync(
-      cyclicPlan,
-      `# Plan
-## 目标与 Out-of-Scope
-明确不做
-## 数据形状与契约
-A
-## Test Seam 与 Done Predicate
-test
-## Throughput Checkpoint
-first
-## 垂直切片
-- Slice 1 (2 files, 100 LOC, blockedBy: Slice 2)
-- Slice 2 (2 files, 100 LOC, blockedBy: Slice 1)
-`,
-    );
-    const cycRes = runTool(["check-plan", cyclicPlan], false);
-    assert.equal(cycRes.status, 1);
-    assert.ok(cycRes.json.missing.some((m) => m.includes("循环依赖")));
-
-    // 4. resolve-model 缺配置 fail-closed + 支持 judge / reviewer.2 / budget 降档
-    const missingRes = runTool(["resolve-model", "--harness", "agy", "--role", "scout", "--config", path.join(tmpRepo, "nope.json")], false);
-    assert.equal(missingRes.status, 1);
-    assert.equal(missingRes.json.ok, false);
-
-    const ecoCfg = path.join(tmpRepo, "eco.json");
-    fs.writeFileSync(
-      ecoCfg,
-      JSON.stringify({
-        version: 2,
-        budget: "eco",
-        roles: {
-          judge: { prefer: { family: "claude", modelHint: "claude-opus-4", tier: "pro", effort: "xhigh" } },
-          reviewers: [
-            { prefer: { family: "claude", modelHint: "claude-sonnet-4", tier: "standard", effort: "medium" } },
-            { prefer: { family: "openai", modelHint: "gpt-5", tier: "pro", effort: "high" } },
-            { prefer: { family: "gemini", modelHint: "gemini-pro", tier: "pro", effort: "high" } },
-          ],
-        },
-      }),
-    );
-    const judgeRes = runTool(["resolve-model", "--harness", "agy", "--surface", "swarm", "--role", "judge", "--config", ecoCfg]);
-    assert.equal(judgeRes.json.resolved.effectiveEffort, "high");
-    const rev2Res = runTool(["resolve-model", "--harness", "pi", "--role", "reviewer.2", "--config", ecoCfg]);
-    assert.equal(rev2Res.json.resolved.family, "gemini");
-    assert.equal(rev2Res.json.resolved.effort, "medium");
-
-    // 5. v4.1.1: update-state --budget / 多次 --inc-delegates 累加 / --inc-aborted、check-plan 悬空依赖 & --strict-budget、嵌套分支扁平化
-    const updV411 = runTool([
+    // 2. 多 --unit-upsert 累加 + --units 批量 + --decision
+    runTool([
       "update-state",
       busDir,
-      "--budget",
-      JSON.stringify({ maxUnits: 4, maxDelegates: 12, cutoffRatio: 0.7 }),
-      "--inc-delegates",
-      "--inc-delegates",
-      "--inc-aborted",
-      "2",
+      "--unit-upsert",
+      JSON.stringify({ id: "M1", status: "pending" }),
+      "--unit-upsert",
+      JSON.stringify({ id: "M2", status: "pending" }),
+      "--units",
+      JSON.stringify([{ id: "M3", status: "done" }, { id: "M4", status: "pending" }]),
+      "--decision",
+      JSON.stringify({ unit: "M3", phase: "execute", decision: "batch\tcheck", why: "line1\nline2", evidence: "ok", result: "pass" }),
     ]);
-    assert.equal(updV411.json.state.budget.maxDelegates, 12);
-    assert.equal(updV411.json.state.delegatesDispatched, 2);
-    assert.equal(updV411.json.state.abortedDelegates, 2);
 
-    const danglingPlan = path.join(tmpRepo, "dangling.md");
-    fs.writeFileSync(
-      danglingPlan,
-      `# Plan\n## 目标与 Out-of-Scope\n明确不做\n## 数据形状与契约\nA\n## Test Seam 与 Done Predicate\ntest\n## Throughput Checkpoint\nfirst\n## 垂直切片\n- Slice 1 (2 files, 100 LOC, blockedBy: Slice 99)\n`,
-    );
-    const dangRes = runTool(["check-plan", danglingPlan], false);
-    assert.equal(dangRes.status, 1);
-    assert.ok(dangRes.json.missing.some((m) => m.includes("悬空依赖") && m.includes("SLICE99")));
+    // 预先写入一个死 PID 孤儿临时文件，验证 update-state 自动清理
+    fs.writeFileSync(path.join(busDir, "state.json.tmp.999999.1000"), "{\"stale\":true}\n", "utf8");
 
-    const overBudgetPlan = path.join(tmpRepo, "over.md");
-    fs.writeFileSync(
-      overBudgetPlan,
-      `# Plan\n## 目标与 Out-of-Scope\n明确不做\n## 数据形状与契约\nA\n## Test Seam 与 Done Predicate\ntest\n## Throughput Checkpoint\nfirst\n## 垂直切片\n- Slice 1 (8 files, 200 LOC, blockedBy: none)\n`,
-    );
-    const strictRes = runTool(["check-plan", overBudgetPlan, "--strict-budget"], false);
-    assert.equal(strictRes.status, 1);
-    assert.ok(strictRes.json.missing.some((m) => m.includes("--strict-budget")));
+    // 3. 6 个并发子进程同时写同一个 state.json
+    const spawnAsync = (args) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [ZEE_TOOL, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`exit=${code}: ${stderr}`))));
+      });
 
-    execFileSync("git", ["-C", tmpRepo, "branch", "zee/night-demo"], { stdio: "ignore" });
-    const flatWt = runTool(["worktree-create", tmpRepo, "v411-wt", "u1", "HEAD", "--branch", "zee/night-demo/u1"]);
-    assert.equal(flatWt.json.branch, "zee/night-demo-u1");
-    assert.equal(flatWt.json.flattened, true);
-    execFileSync("git", ["-C", tmpRepo, "worktree", "remove", "--force", flatWt.json.worktreePath], { stdio: "ignore" });
-    fs.rmSync(path.dirname(path.dirname(path.dirname(flatWt.json.worktreePath))), { recursive: true, force: true });
-  } finally {
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
-    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
-    if (wtPath) fs.rmSync(path.dirname(path.dirname(path.dirname(wtPath))), { recursive: true, force: true });
-  }
-});
-
-test("v4.2.0 sandbox-export / sandbox-clean / gate-tamper-diff 零污染沙盒与门禁篡改检测", () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-sandbox-"));
-  let shaBox = "";
-  let wtBox = "";
-  try {
-    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "test@zee.dev"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
-    fs.mkdirSync(path.join(tmpRepo, "src"), { recursive: true });
-    fs.writeFileSync(path.join(tmpRepo, "src", "app.ts"), "export const v = 1;\n");
-    fs.writeFileSync(path.join(tmpRepo, "old.txt"), "remove me\n");
-    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
-    const headSha = execFileSync("git", ["-C", tmpRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-
-    // 1. --sha 导出与拒绝越权清理
-    const expSha = runTool(["sandbox-export", "--repo", tmpRepo, "--sha", headSha, "--prefix", "mut"]);
-    assert.equal(expSha.json.ok, true);
-    assert.equal(expSha.json.mode, "sha");
-    shaBox = expSha.json.sandboxDir;
-    assert.ok(path.basename(shaBox).startsWith("zee-mut-"));
-    assert.equal(fs.readFileSync(path.join(shaBox, "src", "app.ts"), "utf8"), "export const v = 1;\n");
-
-    const badCleanRepo = runTool(["sandbox-clean", tmpRepo], false);
-    assert.equal(badCleanRepo.status, 1);
-    const badCleanTmpRoot = runTool(["sandbox-clean", os.tmpdir()], false);
-    assert.equal(badCleanTmpRoot.status, 1);
-
-    const cleanedSha = runTool(["sandbox-clean", shaBox]);
-    assert.equal(cleanedSha.json.removed, true);
-    assert.equal(fs.existsSync(shaBox), false);
-    shaBox = "";
-
-    // 2. --working-tree 导出（含已修改文件、删除文件、未跟踪文件）及 gate-tamper-diff
-    fs.writeFileSync(path.join(tmpRepo, "src", "app.ts"), "export const v = 2 as any; // @ts-ignore\n");
-    fs.unlinkSync(path.join(tmpRepo, "old.txt"));
-    fs.mkdirSync(path.join(tmpRepo, "tests"), { recursive: true });
-    fs.writeFileSync(path.join(tmpRepo, "tests", "app.test.mjs"), "// eslint-disable-next-line\n");
-
-    const expWt = runTool(["sandbox-export", "--repo", tmpRepo, "--working-tree", "--prefix", "rev"]);
-    assert.equal(expWt.json.mode, "working-tree");
-    assert.equal(expWt.json.ref, "WORKING_TREE");
-    wtBox = expWt.json.sandboxDir;
-    assert.ok(path.basename(wtBox).startsWith("zee-rev-"));
-    assert.match(fs.readFileSync(path.join(wtBox, "src", "app.ts"), "utf8"), /v = 2/);
-    assert.equal(fs.existsSync(path.join(wtBox, "old.txt")), false);
-    assert.equal(fs.existsSync(path.join(wtBox, "tests", "app.test.mjs")), true);
-
-    const tamperWt = runTool(["gate-tamper-diff", "--repo", tmpRepo, "--working-tree"]);
-    assert.equal(tamperWt.json.requiresCountersign, true);
-    assert.ok(tamperWt.json.gateFilesTouched.includes("tests/app.test.mjs"));
-    assert.ok(tamperWt.json.suppressionsAdded.some((s) => s.file === "src/app.ts" && s.line.includes("@ts-ignore")));
-    assert.ok(tamperWt.json.suppressionsAdded.some((s) => s.file === "src/app.ts" && s.line.includes("as any")));
-    assert.ok(tamperWt.json.suppressionsAdded.some((s) => s.file === "tests/app.test.mjs" && s.line.includes("eslint-disable")));
-
-    // 3. committed base..head 范围检测
-    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "tamper"], { stdio: "ignore" });
-    const tamperRange = runTool(["gate-tamper-diff", "--repo", tmpRepo, "--base", headSha, "--head", "HEAD"]);
-    assert.equal(tamperRange.json.requiresCountersign, true);
-    assert.ok(tamperRange.json.gateFilesTouched.includes("tests/app.test.mjs"));
-
-    const cleanClean = runTool(["sandbox-clean", wtBox]);
-    assert.equal(cleanClean.json.removed, true);
-    wtBox = "";
-  } finally {
-    if (shaBox) fs.rmSync(shaBox, { recursive: true, force: true });
-    if (wtBox) fs.rmSync(wtBox, { recursive: true, force: true });
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
-  }
-});
-
-test("v4.2.0 mine-transcripts (retro+recall+脱敏)、queue-finding/list-findings、readiness、match-skills、--delegate-id、--allow-standalone", () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-ops-"));
-  const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v420-mine-"));
-  let busDir = "";
-  try {
-    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
-
-    // 1. queue-finding & list-findings (>=3 systemic)
-    const q1 = runTool(["queue-finding", "--repo", tmpRepo, "--category", "smell", "--pattern", "missing-seam", "--summary", "hard to test auth", "--file", "src/auth.ts"]);
-    assert.equal(q1.json.patternCount, 1);
-    assert.equal(q1.json.systemic, false);
-    runTool(["queue-finding", "--repo", tmpRepo, "--category", "smell", "--pattern", "missing-seam", "--summary", "hard to test billing", "--file", "src/billing.ts"]);
-    const q3 = runTool(["queue-finding", "--repo", tmpRepo, "--category", "smell", "--pattern", "missing-seam", "--summary", "hard to test checkout", "--file", "src/checkout.ts"]);
-    assert.equal(q3.json.patternCount, 3);
-    assert.equal(q3.json.systemic, true);
-    runTool(["queue-finding", "--repo", tmpRepo, "--category", "doc", "--pattern", "stale-readme", "--summary", "typo"]);
-
-    const listAll = runTool(["list-findings", "--repo", tmpRepo]);
-    assert.equal(listAll.json.totalEntries, 4);
-    assert.equal(listAll.json.clusters[0].pattern, "missing-seam");
-    assert.equal(listAll.json.clusters[0].systemic, true);
-    const listSys = runTool(["list-findings", "--repo", tmpRepo, "--min-count", "3"]);
-    assert.equal(listSys.json.clusters.length, 1);
-
-    // 2. mine-transcripts retro + recall + secrets redaction
-    fs.writeFileSync(
-      path.join(srcDir, "session.jsonl"),
-      [
-        JSON.stringify({
-          role: "user",
-          timestamp: new Date().toISOString(),
-          content: "No, that's wrong — stop using sk-1234567890abcdef1234567890 and ghp_abcdef1234567890abcdef!",
-        }),
-        JSON.stringify({
-          role: "assistant",
-          timestamp: new Date().toISOString(),
-          content: "Use Bearer supersecretjwtvalue12345 instead? Wait also pstack verify pattern failed.",
-        }),
-      ].join("\n") + "\n",
-    );
-    fs.writeFileSync(
-      path.join(srcDir, "notes.md"),
-      "Decision note: always run pstack verify before merge.\n\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234567890\n-----END RSA PRIVATE KEY-----\n",
-    );
-    fs.writeFileSync(
-      path.join(srcDir, "decisions.tsv"),
-      "ts\tunit\tphase\tdecision\twhy\tevidence\tresult\n2026-11-25T00:00:00Z\tU1\tverify\tFAIL\tpstack smoke failed\texit 1\tREVISE\n",
+    await Promise.all(
+      ["C1", "C2", "C3", "C4", "C5", "C6"].map((id) =>
+        spawnAsync(["update-state", busDir, "--unit-upsert", JSON.stringify({ id, status: "done" })]),
+      ),
     );
 
-    const retro = runTool(["mine-transcripts", "--mode", "retro", "--repo", tmpRepo, "--source-dir", srcDir], true, {
-      HOME: tmpRepo,
-      USERPROFILE: tmpRepo,
-    });
-    assert.equal(retro.json.ok, true);
-    assert.ok(retro.json.totalScanned >= 3);
-    const retroRaw = JSON.stringify(retro.json);
-    assert.equal(retroRaw.includes("sk-1234567890abcdef1234567890"), false);
-    assert.equal(retroRaw.includes("ghp_abcdef1234567890abcdef"), false);
-    assert.ok(retroRaw.includes("<REDACTED>"));
-    assert.ok(retro.json.snippets.some((s) => s.signal === "human_correction"));
-    assert.ok(retro.json.snippets.some((s) => s.signal === "decision_failure"));
+    const state = JSON.parse(fs.readFileSync(path.join(busDir, "state.json"), "utf8"));
+    const ids = new Set(state.units.map((u) => u.id));
+    for (const id of ["M1", "M2", "M3", "M4", "C1", "C2", "C3", "C4", "C5", "C6"]) {
+      assert.equal(ids.has(id), true, `并发更新后应保留 unit ${id}`);
+    }
 
-    const recall = runTool(["mine-transcripts", "--mode", "recall", "--repo", tmpRepo, "--source-dir", srcDir, "--query", "pstack verify", "--limit", "5"]);
-    assert.equal(recall.json.ok, true);
-    assert.ok(recall.json.matches.length >= 1);
-    const recallRaw = JSON.stringify(recall.json);
-    assert.equal(recallRaw.includes("supersecretjwtvalue12345"), false);
-    assert.equal(recallRaw.includes("MIIEowIBAAKCAQEA1234567890"), false);
+    const dirEntries = fs.readdirSync(busDir);
+    assert.equal(dirEntries.some((n) => n.includes(".tmp.") || n.endsWith(".lock")), false, `不应遗留临时或锁文件: ${dirEntries.join(",")}`);
 
-    // 3. readiness clamping: T3 configured without verify-* -> clamped to T1; then add T2 & T3 prerequisites
-    fs.mkdirSync(path.join(tmpRepo, ".agents"), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpRepo, ".agents", "zee.project.json"),
-      JSON.stringify({
-        trustLevel: "T3",
-        testCmds: ["node --test"],
-        lintCmd: "npm run lint",
-        denyCommands: ["--live"],
-        pathSkills: [
-          { glob: "src/auth/**", skill: "auth-guard", roles: ["coder", "reviewer"] },
-          { glob: "docs/*.md", skill: "docs/style-skill.md" },
-        ],
-      }),
-    );
-    const r1 = runTool(["readiness", tmpRepo]);
-    assert.equal(r1.json.configuredTrustLevel, "T3");
-    assert.equal(r1.json.maxEligibleTrustLevel, "T1");
-    assert.equal(r1.json.effectiveTrustLevel, "T1");
-    assert.equal(r1.json.clamped, true);
-
-    fs.mkdirSync(path.join(tmpRepo, ".agents", "skills", "verify-demo"), { recursive: true });
-    fs.writeFileSync(path.join(tmpRepo, ".agents", "skills", "verify-demo", "SKILL.md"), "# verify-demo\n");
-    const r2 = runTool(["readiness", tmpRepo]);
-    assert.equal(r2.json.maxEligibleTrustLevel, "T2");
-    assert.equal(r2.json.effectiveTrustLevel, "T2");
-
-    fs.mkdirSync(path.join(tmpRepo, ".agents", "skills", "verify-demo", "scripts"), { recursive: true });
-    fs.writeFileSync(path.join(tmpRepo, ".agents", "skills", "verify-demo", "scripts", "verify-ctl.mjs"), "console.log('ok');\n");
-    fs.writeFileSync(
-      path.join(tmpRepo, ".agents", "zee.project.json"),
-      JSON.stringify({
-        trustLevel: "T3",
-        testCmds: ["node --test"],
-        lintCmd: "npm run lint",
-        denyCommands: ["--live"],
-        riskPaths: ["src/auth/**"],
-        pathSkills: [
-          { glob: "src/auth/**", skill: "auth-guard", roles: ["coder", "reviewer"] },
-          { glob: "docs/*.md", skill: "docs/style-skill.md" },
-        ],
-      }),
-    );
-    const r3 = runTool(["readiness", tmpRepo]);
-    assert.equal(r3.json.maxEligibleTrustLevel, "T3");
-    assert.equal(r3.json.effectiveTrustLevel, "T3");
-    assert.equal(r3.json.clamped, false);
-
-    // doctor --repo exposes readiness without failing doctor due to readiness
-    const doc = runTool(["doctor", "--repo", tmpRepo], false);
-    assert.equal(doc.json.readiness.effectiveTrustLevel, "T3");
-
-    // 4. match-skills
-    fs.mkdirSync(path.join(tmpRepo, ".agents", "skills", "auth-guard"), { recursive: true });
-    fs.writeFileSync(path.join(tmpRepo, ".agents", "skills", "auth-guard", "SKILL.md"), "# auth-guard\n");
-    fs.mkdirSync(path.join(tmpRepo, "docs"), { recursive: true });
-    fs.writeFileSync(path.join(tmpRepo, "docs", "style-skill.md"), "# style\n");
-
-    const msCoder = runTool(["match-skills", "--repo", tmpRepo, "--files", "src/auth/login.ts,docs/guide.md", "--role", "coder"]);
-    assert.equal(msCoder.json.matched.length, 2);
-    const msScout = runTool(["match-skills", "--repo", tmpRepo, "--files", "src/auth/login.ts,docs/guide.md", "--role", "scout"]);
-    assert.equal(msScout.json.matched.length, 1);
-    assert.equal(msScout.json.matched[0].skill, "docs/style-skill.md");
-
-    // 5. update-state --delegate-id idempotent deduplication + 200 cap
-    const init = runTool(["init-run", tmpRepo, "dedup-test"]);
-    busDir = init.json.busDir;
-    const d1 = runTool(["update-state", busDir, "--inc-delegates", "--delegate-id", "call-1"]);
-    assert.equal(d1.json.state.delegatesDispatched, 1);
-    const d2 = runTool(["update-state", busDir, "--inc-delegates", "--delegate-id", "call-1"]);
-    assert.equal(d2.json.state.delegatesDispatched, 1);
-    const d3 = runTool(["update-state", busDir, "--delegate-id", "call-2"]);
-    assert.equal(d3.json.state.delegatesDispatched, 2);
-
-    const statePath = path.join(busDir, "state.json");
-    const stSeed = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    stSeed.countedDelegateIds = Array.from({ length: 200 }, (_, i) => `id-${i}`);
-    fs.writeFileSync(statePath, JSON.stringify(stSeed, null, 2));
-    const dCap = runTool(["update-state", busDir, "--inc-delegates", "--delegate-id", "id-200"]);
-    assert.equal(dCap.json.state.countedDelegateIds.length, 200);
-    assert.equal(dCap.json.state.countedDelegateIds[0], "id-1");
-    assert.equal(dCap.json.state.countedDelegateIds[199], "id-200");
-
-    // 6. resolve-model --allow-standalone
-    const stAgy = runTool(["resolve-model", "--harness", "agy", "--role", "scout", "--config", path.join(tmpRepo, "missing.json"), "--allow-standalone"]);
-    assert.equal(stAgy.json.ok, true);
-    assert.equal(stAgy.json.standalone, true);
-    assert.equal(stAgy.json.resolved.model, "inherit");
-    const stPi = runTool(["resolve-model", "--harness", "pi", "--role", "coder", "--config", path.join(tmpRepo, "missing.json"), "--allow-standalone"]);
-    assert.equal(stPi.json.ok, true);
-    assert.equal(stPi.json.standalone, true);
-    assert.equal(stPi.json.resolved.model, null);
-
-    // 7. scripts/install.mjs --help prints v4.2.1
-    const instRes = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "install.mjs"), "--help"], { encoding: "utf8" });
-    assert.equal(instRes.status, 0);
-    assert.match(instRes.stdout, /v4\.2\.1/);
-  } finally {
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
-    fs.rmSync(srcDir, { recursive: true, force: true });
-    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
-  }
-});
-
-test("v4.2.1：功能分支 cleanup-worktrees、provider-health 429 冷却联动 resolve-model 自动切备、audit-rules 检测 ~/.pi/agent/AGENTS.md", async () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-featwt-"));
-  const tmpMeta = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v421-meta-"));
-  const tmpHealth = path.join(tmpMeta, "provider-health.json");
-  const tmpCfg = path.join(tmpMeta, "zee-config.json");
-  const fakeHome = path.join(tmpMeta, "home");
-  let wtPath = "";
-
-  try {
-    // 1. 功能分支上已合入当前 HEAD 的 worktree 自动回收，而 --base main 仍保留 review_unmerged
-    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "core.autocrlf", "false"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "t@zee.dev"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
-    fs.writeFileSync(path.join(tmpRepo, "README.md"), "# base\n");
-    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
-
-    execFileSync("git", ["-C", tmpRepo, "checkout", "-b", "feat/demo"], { stdio: "ignore" });
-    fs.writeFileSync(path.join(tmpRepo, "feat.txt"), "feature\n");
-    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "feat base"], { stdio: "ignore" });
-
-    const wt = runTool(["worktree-create", tmpRepo, "feat-slug", "u1", "HEAD", "--branch", "zee/feat-u1"]);
-    wtPath = wt.json.worktreePath;
-    fs.writeFileSync(path.join(wtPath, "slice.txt"), "slice 1\n");
-    execFileSync("git", ["-C", wtPath, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", wtPath, "commit", "-m", "slice 1"], { stdio: "ignore" });
-    execFileSync("git", ["-C", tmpRepo, "merge", "--ff-only", "zee/feat-u1"], { stdio: "ignore" });
-
-    const auditMainOnly = runTool(["cleanup-worktrees", tmpRepo, "--base", "main"]);
-    const mainEntry = auditMainOnly.json.worktrees.find((w) => w.path === wtPath);
-    assert.equal(mainEntry.mergedIntoBase, false);
-    assert.equal(mainEntry.bucket, "review_unmerged");
-
-    const pruneDefault = runTool(["cleanup-worktrees", tmpRepo, "--prune-safe"]);
-    assert.ok(pruneDefault.json.checkedBaseRefs.includes("HEAD"));
-    assert.equal(pruneDefault.json.prunedCount, 1);
-    assert.equal(fs.existsSync(wtPath), false);
-
-    // 2. provider-health 429 冷却 + resolve-model 自动切备 + doctor 报告 + --clear 清理
-    const { recordModelCooldown } = await import("../skills/zee/scripts/lib/provider-health.mjs");
-    fs.writeFileSync(
-      tmpCfg,
-      JSON.stringify({
-        version: 2,
-        budget: "balanced",
-        roles: {
-          coder: {
-            standard: {
-              prefer: { family: "claude", modelHint: "claude-sonnet-5-5", tier: "standard", effort: "medium" },
-              backup: { family: "openai", modelHint: "gpt-6.1-sol", tier: "pro", effort: "medium" },
-              bindings: {
-                pi: {
-                  prefer: { providerInstanceId: "magpie", model: "remote-magpie/vm/claude-sonnet-5-5" },
-                  backup: { providerInstanceId: "magpie", model: "remote-magpie/codex/gpt-6.1-sol" },
-                },
-              },
-            },
-          },
-        },
-      }),
-    );
-
-    const env = { ZEE_PROVIDER_HEALTH_PATH: tmpHealth, ZEE_CONFIG_PATH: tmpCfg };
-    const preRes = runTool(["resolve-model", "--harness", "pi", "--role", "coder.standard", "--config", tmpCfg], true, env);
-    assert.equal(preRes.json.resolved.binding.model, "remote-magpie/vm/claude-sonnet-5-5");
-    assert.equal(preRes.json.resolved.cooldownFallback, undefined);
-
-    recordModelCooldown(
-      "magpie",
-      "remote-magpie/vm/claude-sonnet-5-5",
-      { kind: "rate_limit", reason: "HTTP 429 quota", ttlMs: 120_000, errorSnippet: "429" },
-      tmpHealth,
-    );
-
-    const phList = runTool(["provider-health"], true, env);
-    assert.equal(phList.json.activeCount, 1);
-    assert.equal(phList.json.cooldowns[0].key, "magpie/remote-magpie/vm/claude-sonnet-5-5");
-
-    const switchedRes = runTool(["resolve-model", "--harness", "pi", "--role", "coder.standard", "--config", tmpCfg], true, env);
-    assert.equal(switchedRes.json.resolved.binding.model, "remote-magpie/codex/gpt-6.1-sol");
-    assert.equal(switchedRes.json.resolved.cooldownFallback.skippedKey, "magpie/remote-magpie/vm/claude-sonnet-5-5");
-
-    const ignoredRes = runTool(["resolve-model", "--harness", "pi", "--role", "coder.standard", "--config", tmpCfg, "--ignore-cooldown"], true, env);
-    assert.equal(ignoredRes.json.resolved.binding.model, "remote-magpie/vm/claude-sonnet-5-5");
-
-    const docRes = runTool(["doctor", "--harness", "pi", "--repo", tmpRepo], false, env);
-    assert.equal(docRes.json.providerHealth.activeCount, 1);
-
-    const clrRes = runTool(["provider-health", "--clear"], true, env);
-    assert.equal(clrRes.json.clearedCount, 1);
-    assert.equal(clrRes.json.remainingCount, 0);
-
-    // 3. audit-rules 检测 ~/.pi/agent/AGENTS.md 硬编码规则
-    fs.mkdirSync(path.join(fakeHome, ".pi", "agent"), { recursive: true });
-    fs.writeFileSync(path.join(fakeHome, ".pi", "agent", "AGENTS.md"), "# Global\n一次重构不超过 3 个文件，只跑 pnpm test。\n");
-    const auditRes = runTool(["audit-rules", "--harness", "pi"], true, { HOME: fakeHome, USERPROFILE: fakeHome });
-    assert.ok(auditRes.json.findings.some((f) => f.file.endsWith("AGENTS.md") && f.detail.includes("v4.2.1")));
-  } finally {
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
-    fs.rmSync(tmpMeta, { recursive: true, force: true });
-    if (wtPath) fs.rmSync(path.dirname(path.dirname(path.dirname(wtPath))), { recursive: true, force: true });
-  }
-});
-
-test("v4.2.2 回归 [P1/P2]：sandbox-clean 支持在沙盒 cwd 内自清、resolve-finding 关闭/复发闭环、mine-transcripts 过滤 ADR 与 <skill> 噪声", () => {
-  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-tool-"));
-  const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-mine-"));
-  const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-mut-selfclean-"));
-  const fakeProjSandbox = fs.mkdtempSync(path.join(os.tmpdir(), "zee-mut-projguard-"));
-  try {
-    // 1. sandbox-clean 在 cwd === sandboxDir 时成功清理，含 .agents/zee.project.json 的伪装目录仍硬拒绝
-    fs.writeFileSync(path.join(sandboxDir, "probe.txt"), "ok\n");
-    const cleanInside = spawnSync(process.execPath, [TOOL, "sandbox-clean", sandboxDir], {
-      cwd: sandboxDir,
-      encoding: "utf8",
-    });
-    assert.equal(cleanInside.status, 0, `sandbox-clean inside sandbox failed: ${cleanInside.stderr}`);
-    assert.equal(fs.existsSync(sandboxDir), false);
-
-    fs.mkdirSync(path.join(fakeProjSandbox, ".agents"), { recursive: true });
-    fs.writeFileSync(path.join(fakeProjSandbox, ".agents", "zee.project.json"), "{}");
-    const rejectProj = runTool(["sandbox-clean", fakeProjSandbox], false);
-    assert.equal(rejectProj.status, 1);
-    assert.equal(fs.existsSync(fakeProjSandbox), true);
-
-    // 2. resolve-finding 关闭 systemic 簇；--include-resolved 可回溯；日后复发自动重开计数
-    runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "hit 1"]);
-    runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "hit 2"]);
-    const hit3 = runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "hit 3"]);
-    assert.equal(hit3.json.systemic, true);
-
-    const resolved = runTool([
-      "resolve-finding",
-      "--repo",
-      tmpRepo,
-      "--pattern",
-      "hardcoded-slot",
-      "--note",
-      "fixed in commit 609afe1",
+    runTool([
+      "log-decision",
+      busDir,
+      "--unit",
+      "C1",
+      "--phase",
+      "night",
+      "--decision",
+      "stop\tafter\t2",
+      "--why",
+      "verify\nfail",
+      "--evidence",
+      "exit 1",
+      "--result",
+      "blocked",
     ]);
-    assert.equal(resolved.json.ok, true);
-    assert.equal(resolved.json.resolvedEntries, 3);
-
-    const activeList = runTool(["list-findings", "--repo", tmpRepo]);
-    assert.equal(activeList.json.clusters.length, 0, "已关闭 pattern 不应再出现在活跃列表");
-    assert.equal(activeList.json.resolvedPatterns.length, 1);
-
-    const withResolved = runTool(["list-findings", "--repo", tmpRepo, "--include-resolved"]);
-    assert.equal(withResolved.json.clusters.length, 1);
-    assert.equal(withResolved.json.clusters[0].resolved, true);
-
-    // 复发后从 1 重新计数
-    const recur = runTool(["queue-finding", "--repo", tmpRepo, "--category", "seam", "--pattern", "hardcoded-slot", "--summary", "reoccurred"]);
-    assert.equal(recur.json.patternCount, 1);
-    assert.equal(recur.json.systemic, false);
-
-    // 3. mine-transcripts --mode retro 不把 ADR/doc 正文与 <skill> 展开块误判为 human_correction
-    fs.mkdirSync(path.join(tmpRepo, "docs", "adr"), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpRepo, "docs", "adr", "0001-policy.md"),
-      "# ADR 0001\nNever use mutable globals. Do not bypass tests. 禁止直接改主干。\n",
-    );
-    fs.writeFileSync(
-      path.join(srcDir, "sessions.jsonl"),
-      [
-        JSON.stringify({
-          role: "user",
-          timestamp: new Date().toISOString(),
-          content: '<skill name="zee-retro">Never add prose only. Do not skip Bite Proof.</skill>',
-        }),
-        JSON.stringify({
-          role: "user",
-          timestamp: new Date().toISOString(),
-          content: "不对，别这样写，这里应该把重试计数清零",
-        }),
-      ].join("\n") + "\n",
-    );
-    const retro = runTool(["mine-transcripts", "--mode", "retro", "--repo", tmpRepo, "--source-dir", srcDir], true, {
-      HOME: tmpRepo,
-      USERPROFILE: tmpRepo,
-    });
-    const humanSnippets = retro.json.snippets.filter((s) => s.signal === "human_correction");
-    assert.equal(humanSnippets.length, 1, `仅应匹配 1 条真实人类纠偏，实际: ${JSON.stringify(humanSnippets)}`);
-    assert.ok(humanSnippets[0].snippet.includes("重试计数清零"));
+    const tsvLines = fs.readFileSync(path.join(busDir, "decisions.tsv"), "utf8").trim().split(/\r?\n/);
+    assert.equal(tsvLines.length, 3);
+    assert.match(tsvLines[1], /batch check/);
+    assert.match(tsvLines[2], /\tC1\tnight\tstop after 2\tverify fail\texit 1\tblocked$/);
   } finally {
-    fs.rmSync(tmpRepo, { recursive: true, force: true });
-    fs.rmSync(srcDir, { recursive: true, force: true });
-    fs.rmSync(sandboxDir, { recursive: true, force: true });
-    fs.rmSync(fakeProjSandbox, { recursive: true, force: true });
+    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });

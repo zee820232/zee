@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v5.0.5 — 精简高杠杆确定性 CLI 原语（13 核心子命令）
+ * zee-tool.mjs v5.0.6 — 精简高杠杆确定性 CLI 原语（13 核心子命令）
  *
  * 子命令：
  *   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
@@ -158,7 +158,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v5.0.5 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v5.0.6 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
 
 可用命令：
   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
@@ -1132,7 +1132,7 @@ function cmdResolveModel(args) {
     }
   }
 
-  const effort = activeSpec?.effort || "medium";
+  const effort = enforceEffortFloor(activeSpec?.effort || "medium");
   const effectiveRawModel = activeBinding?.model || activeSpec?.model || activeSpec?.modelHint || "";
   const hasExplicitSwarmModel = Boolean(harness === "antigravity" && (activeBinding?.swarmModel || activeSpec?.swarmModel));
   if (isParentAlias(effectiveRawModel) && !hasExplicitSwarmModel) {
@@ -1272,6 +1272,10 @@ function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings)
     if (!rawModel && !hasAnyBindingModel) {
       errors.push(`${label}.${sName}.prefer 缺失`);
     }
+    const prefEffort = String(pref?.effort || "").trim().toLowerCase();
+    if (prefEffort && ["low", "minimal", "off", "none"].includes(prefEffort)) {
+      warnings.push(`${label}.${sName}.prefer.effort 为 "${prefEffort}"，已过低；最低思考档位为 "medium"（运行期已自动提升至 "medium"）`);
+    }
   }
   const wRaw = extractSlotRawModel(slotsObj?.workhorse?.prefer);
   const aRaw = extractSlotRawModel(slotsObj?.adversary?.prefer);
@@ -1371,25 +1375,33 @@ function parseCandidateModelsInput(rawText, harness) {
   return { items, inferredPreferProvider: null };
 }
 
+function enforceEffortFloor(rawEffort) {
+  const low = String(rawEffort || "medium").trim().toLowerCase();
+  if (!low || low === "low" || low === "minimal" || low === "off" || low === "none") return "medium";
+  return low;
+}
+
 function clampEffort(targetEffort, maxRuleEffort, supportedEfforts, ladder) {
-  const idxOf = (eff) => ladder.indexOf(String(eff || "").toLowerCase());
-  let maxIdx = ladder.length - 1;
-  const ruleIdx = idxOf(maxRuleEffort);
+  const safeLadder = Array.isArray(ladder) && ladder.length > 0 ? ladder.filter((e) => !["low", "minimal", "off", "none"].includes(String(e).toLowerCase())) : ["medium", "high", "xhigh"];
+  const effectiveLadder = safeLadder.length > 0 ? safeLadder : ["medium", "high", "xhigh"];
+  const idxOf = (eff) => effectiveLadder.indexOf(String(eff || "").toLowerCase());
+  let maxIdx = effectiveLadder.length - 1;
+  const ruleIdx = idxOf(enforceEffortFloor(maxRuleEffort));
   if (ruleIdx >= 0) maxIdx = Math.min(maxIdx, ruleIdx);
-  let targetIdx = idxOf(targetEffort);
-  if (targetIdx < 0) targetIdx = Math.min(idxOf("medium") >= 0 ? idxOf("medium") : 1, maxIdx);
+  let targetIdx = idxOf(enforceEffortFloor(targetEffort));
+  if (targetIdx < 0) targetIdx = 0;
   const clampedIdx = Math.min(targetIdx, maxIdx);
 
   if (Array.isArray(supportedEfforts) && supportedEfforts.length > 0) {
     const supSet = new Set(supportedEfforts.map((s) => String(s).toLowerCase()));
     for (let i = clampedIdx; i >= 0; i--) {
-      if (supSet.has(ladder[i])) return ladder[i];
+      if (supSet.has(effectiveLadder[i])) return enforceEffortFloor(effectiveLadder[i]);
     }
-    for (let i = clampedIdx + 1; i < ladder.length; i++) {
-      if (supSet.has(ladder[i])) return ladder[i];
+    for (let i = clampedIdx + 1; i < effectiveLadder.length; i++) {
+      if (supSet.has(effectiveLadder[i])) return enforceEffortFloor(effectiveLadder[i]);
     }
   }
-  return ladder[clampedIdx] || "medium";
+  return enforceEffortFloor(effectiveLadder[clampedIdx] || "medium");
 }
 
 function scoreModelByRules(baseModel, rules, defaultScore, defaultMaxEffort) {
@@ -1465,7 +1477,8 @@ async function cmdRecommendModels(args) {
   }
 
   const preferProvider = String(flags["prefer-provider"] || parsed.inferredPreferProvider || "").trim().toLowerCase();
-  const ladder = Array.isArray(catalog.effortLadder) ? catalog.effortLadder : ["low", "medium", "high", "xhigh"];
+  const rawLadder = Array.isArray(catalog.effortLadder) ? catalog.effortLadder : ["medium", "high", "xhigh"];
+  const ladder = rawLadder.filter((e) => !["low", "minimal", "off", "none"].includes(String(e).toLowerCase()));
   const excludeRes = (catalog.tierRules?.excludeFromSubagents || []).map((p) => new RegExp(p, "i"));
   const optInRes = (catalog.tierRules?.optInOnly || []).map((p) => new RegExp(p, "i"));
 
@@ -1586,7 +1599,7 @@ async function cmdRecommendModels(args) {
   const restFast = fastRanked.filter((m) => m.key !== fastPrefer.key);
   const fastBackup = restFast.find((m) => fastPrefer.family && m.family && m.family !== fastPrefer.family) || restFast[0] || null;
 
-  const efforts = budgetSpec.efforts || { fast: "low", workhorse: "high", adversary: "high" };
+  const efforts = budgetSpec.efforts || { fast: "medium", workhorse: "high", adversary: "high" };
   const slots = {
     fast: {
       prefer: formatRecommendedEntry(fastPrefer, "fast", harness, efforts.fast, ladder),

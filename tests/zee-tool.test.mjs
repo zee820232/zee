@@ -398,13 +398,14 @@ test("recommend-models 对齐 pstack 能力梯队与预算阶梯，且支持 inh
   assert.equal(piSlots.adversary.prefer.model, "magpie-2/vm/claude-sonnet-5-5");
   assert.equal(piSlots.adversary.backup.model, "auto/gemini-4-hydrogen");
   assert.equal(piSlots.fast.prefer.model, "auto/gemini-4-hydrogen");
-  assert.equal(piSlots.fast.prefer.effort, "low");
+  assert.equal(piSlots.fast.prefer.effort, "medium");
   assert.equal(piSlots.fast.backup.model, "auto/gpt-6.1-sol");
+  assert.equal(piSlots.fast.backup.effort, "medium");
   assert.doesNotMatch(JSON.stringify(piSlots), /deepseek/i);
   assert.ok(piMed.optInModels.some((m) => /deepseek-v4\.1-flash/.test(m.model)));
   assert.ok(piMed.skippedDuplicates.length >= 4);
 
-  // 2. --budget large (xhigh/xhigh/medium + carbon 钳制到 high) 与 --budget small (medium/medium/low)
+  // 2. --budget large (xhigh/xhigh/high + carbon 钳制到 high) 与 --budget small (全 medium，无 low)
   const carbonCatalog = JSON.stringify([
     { providerInstanceId: "t3", model: "gemini-4-carbon" },
     { providerInstanceId: "codex", model: "gpt-6.2-astra" },
@@ -413,12 +414,12 @@ test("recommend-models 对齐 pstack 能力梯队与预算阶梯，且支持 inh
   const largeRes = JSON.parse(runTool(["recommend-models", "--harness", "pi", "--budget", "large"], { input: carbonCatalog }).stdout);
   assert.equal(largeRes.harnessConfig.slots.workhorse.prefer.effort, "xhigh");
   assert.equal(largeRes.harnessConfig.slots.adversary.prefer.effort, "high");
-  assert.equal(largeRes.harnessConfig.slots.fast.prefer.effort, "medium");
+  assert.equal(largeRes.harnessConfig.slots.fast.prefer.effort, "high");
 
   const smallRes = JSON.parse(runTool(["recommend-models", "--harness", "pi", "--budget", "small"], { input: piCatalog }).stdout);
   assert.equal(smallRes.harnessConfig.slots.workhorse.prefer.effort, "medium");
   assert.equal(smallRes.harnessConfig.slots.adversary.prefer.effort, "medium");
-  assert.equal(smallRes.harnessConfig.slots.fast.prefer.effort, "low");
+  assert.equal(smallRes.harnessConfig.slots.fast.prefer.effort, "medium");
 
   // 3. T3 orchestrator_capabilities JSON：排除 disabled / pi / gemini-pro-orchestrator / deepseek / gemini-3.8-flash
   const t3Caps = JSON.stringify({
@@ -469,7 +470,7 @@ test("recommend-models 对齐 pstack 能力梯队与预算阶梯，且支持 inh
   assert.deepEqual(t3Slots.adversary.prefer.options, { reasoningEffort: "high" });
   assert.equal(t3Slots.fast.prefer.providerInstanceId, "antigravity");
   assert.equal(t3Slots.fast.prefer.model, "gemini-4-hydrogen");
-  assert.deepEqual(t3Slots.fast.prefer.options, { thought_level: "low" });
+  assert.deepEqual(t3Slots.fast.prefer.options, { thought_level: "medium" });
   assert.doesNotMatch(JSON.stringify(t3Slots), /deepseek|gemini-3\.8|orchestrator|"providerInstanceId":"pi"/i);
 
   // 4. 仅剩 optInOnly 模型时自动兜底放行并标记 fallbackToOptIn
@@ -516,6 +517,11 @@ test("recommend-models 对齐 pstack 能力梯队与预算阶梯，且支持 inh
     const doc = JSON.parse(runTool(["doctor", "--harness", "pi"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
     assert.equal(doc.ok, true);
     assert.ok(doc.warnings.some((w) => /父模型别名/.test(w)));
+    assert.ok(doc.warnings.some((w) => /最低思考档位/.test(w)));
+
+    const piFastRes = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "scout"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
+    assert.equal(piFastRes.resolved.inheritParent, true);
+    assert.deepEqual(piFastRes.resolved.subagentArgs, { thinkingLevel: "medium" });
 
     const piRes = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "coder"], { env: { ZEE_CONFIG_PATH: cfgPath } }).stdout);
     assert.equal(piRes.resolved.inheritParent, true);

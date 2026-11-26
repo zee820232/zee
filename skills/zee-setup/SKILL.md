@@ -18,9 +18,10 @@ disable-model-invocation: true
 2. **严禁跨宿主嗅探或修改**：
    - **`activeHarness !== "pi"` 时**：**严禁**执行 `pi --list-models`、`pi.cmd`、`pi --print`，也**严禁**读写 `~/.pi/agent/settings.json`、`~/.omp/` 或插件 `tests/`。
    - **`activeHarness === "pi"` 时**：**严禁**调用 `orchestrator_capabilities` 或 `swarm`。
-3. **禁止“低智模型 / 延迟测速”误配**：
+3. **禁止“低智模型 / `low` 思考档位 / 延迟测速”误配**：
    - **禁止**把 `deepseek`、`gemini-3.8`、`mini`/`lite`/`nano` 等轻量或非主力模型自动放进 `fast`/`workhorse`/`adversary`（仅作为 `optInModels` 列出，除非宿主无其他旗舰可选或用户点名指定）；
-   - **禁止**发 `"reply ok"` 测速竞赛或因模型未回复精确 `"ok"` 字样而剔除旗舰（必须按 `skills/zee/models.json` 能力梯队打分，预算档位仅调思考深度：`large`=`xhigh`/`medium`，`medium`=`high`/`low` 推荐，`small`=`medium`/`low`）。
+   - **最低思考档位为 `medium`，所有模型与所有槽位均禁止设置为 `low`**（阶梯仅使用 `medium < high < xhigh`）；
+   - **禁止**发 `"reply ok"` 测速竞赛或因模型未回复精确 `"ok"` 字样而剔除旗舰（必须按 `skills/zee/models.json` 能力梯队打分，预算档位：`large`=`xhigh`/`high`，`medium`=`high`/`medium` 推荐，`small`=`medium`/`medium`）。
 
 ## 执行步骤
 
@@ -35,7 +36,7 @@ disable-model-invocation: true
    - **`antigravity`（独立 AGY CLI，无 T3 Code）**：0 条 shell 探活，严格遵守 `AGENTS.md`（`invoke_subagent` 固定 `model: "inherit"`，配 Gemini 4 `swarmModel`，标记 `singleFamily: true`；仅已在 `/swarm` 中时可调 `swarm(action="models")`）。
    - **`codex` / `claude` / `cursor` / `local`**：收集当前宿主可用 slug 传给 `recommend-models --harness <activeHarness> --budget medium`，或引导用 `inherit-parent` / `--allow-standalone`。
 2. **展示简体中文推荐表并一次确认**：
-   - 列出推荐的 **预算档位**（默认 `medium`：主力 `high`、侦察 `low`；可切 `large` 满血 `xhigh` 或 `small` 日常 `medium`）、**3 槽位**（`fast` / `workhorse` / `adversary` 主+备）及支持开关 `inherit-parent` / `auto`（跟随当前父会话模型）。
+   - 列出推荐的 **预算档位**（默认 `medium`：`workhorse`/`adversary` 用 `high`、`fast` 用 `medium`；可切 `large` 满血 `xhigh`/`high` 或 `small` 日常全 `medium`）、**3 槽位**（`fast` / `workhorse` / `adversary` 主+备）及支持开关 `inherit-parent` / `auto`（跟随当前父会话模型）。
    - 若结果含 `optInModels`（如 `deepseek-v4.1-flash`、`gemini-3.8-flash`），仅单独附注一行“以下轻量渠道已按策略隔离未自动入选，如需指定请回复”，等待用户回复“按推荐”（或指定档位/调整槽位）。
 3. **合并写盘与验证**：
    - 读取现有 `~/.agents/zee-config.json`（若不存在则新建），**完整保留其他宿主的 `harnesses.<other>` 与旧版顶层 `slots` 不变**，将 `harnessConfig` 写入 `harnesses.<activeHarness>`（保持 `version: 3`, `authorizedFallback: true`）。

@@ -6,7 +6,7 @@
       "efforts": {
         "workhorse": "xhigh",
         "adversary": "xhigh",
-        "fast": "medium"
+        "fast": "high"
       }
     },
     "medium": {
@@ -14,7 +14,7 @@
       "efforts": {
         "workhorse": "high",
         "adversary": "high",
-        "fast": "low"
+        "fast": "medium"
       }
     },
     "small": {
@@ -22,12 +22,11 @@
       "efforts": {
         "workhorse": "medium",
         "adversary": "medium",
-        "fast": "low"
+        "fast": "medium"
       }
     }
   },
   "effortLadder": [
-    "low",
     "medium",
     "high",
     "xhigh"

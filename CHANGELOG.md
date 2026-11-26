@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.0.6] - 2026-11-26
+
+### Fixed
+- **移除 AGY `hooks.json` 的 `PreToolUse` 钩子以彻底解决独立 AGY CLI 误拒所有命令的问题**：
+  - Antigravity `PreToolUse` 契约要求返回 `decision`（`"allow" | "deny" | "ask" | "force_ask"`），不支持空对象 `{}` 作为透传，导致独立 `agy` CLI 在收到 `{}` 时以空 reason 拒绝执行 `run_command`；现仅在 `hooks.json` 保留明确支持 `{}` 透传的 `Stop` 过夜断尾守护。
+- **统一全模型与全槽位最低思考档位为 `medium`（禁用 `low`）**：
+  - 更新 `skills/zee/models.json`（`effortLadder` 为 `["medium", "high", "xhigh"]`，`large`: `xhigh`/`high`、`medium`: `high`/`medium`、`small`: `medium`/`medium`）；
+  - `zee-tool.mjs` 在 `recommend-models`、`resolve-model`（自动抬升遗留 `"low"`）与 `doctor` 中统一强制 `medium` 下限，并同步更新 `skills/zee-setup/SKILL.md` 及本机 `~/.agents/zee-config.json`。
+
 ## [5.0.5] - 2026-11-26
 
 ### Added & Fixed

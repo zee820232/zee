@@ -1,16 +1,9 @@
 {
   "zee-lifecycle-guard": {
     "enabled": true,
-    "PreInvocation": [
-      {
-        "type": "command",
-        "command": "node ./scripts/agy-guard.mjs",
-        "timeout": 5
-      }
-    ],
     "PreToolUse": [
       {
-        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "matcher": "run_command",
         "hooks": [
           {
             "type": "command",

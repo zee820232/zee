@@ -1,18 +1,14 @@
 /**
- * zee Worker Guard Extension (v4.2.0)
+ * zee Worker Guard Extension (v5.0.0)
  *
- * 专供 zee_subagent 启动的 Pi 子进程通过 `-ne -e worker-guard.ts` 挂载：
- * - 零自动路由、零斜杠命令、零 zee_subagent 工具、零系统提示词注入、零 HUD/Overlay 挂载
- * - 仅注册单一 tool_call 守卫，彻底堵死 `-ne` 带来的子进程安全真空：
- *   1. 对所有角色（含 coder / ui）无条件执行项目 denyCommands（token 边界匹配）与破坏性命令拦截（含括号子 shell）
- *   2. 对只读/门禁角色（scout / architect / judge / verifier / reviewer）在事前拦截对仓库源码的 write/edit
- *   3. 对纯只读角色（scout / architect / judge）额外执行只读 review 级 Bash 词法拦截（放行 /tmp/zee-* 沙盒内探针与装包）
+ * 供 zee_subagent 启动的 Pi 子进程通过 `-ne -e worker-guard.ts` 挂载：
+ * 1. 对所有角色执行项目 denyCommands（token 边界匹配）与通用破坏性命令拦截
+ * 2. 对只读/门禁角色（scout / architect / judge / verifier / reviewer）拦截 write/edit 写入仓库源码
  */
 
 import * as path from "node:path";
 import { type ExtensionAPI, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import {
-	checkBashUnderGate,
 	checkProjectDenyCommands,
 	evaluateDestructiveCommand,
 	isReadOnlyRoleWriteAllowed,
@@ -20,7 +16,6 @@ import {
 } from "../skills/zee/scripts/lib/guard-core.mjs";
 
 const WRITE_LOCKED_ROLES = new Set(["scout", "architect", "judge", "verifier", "reviewer"]);
-const STRICT_BASH_ROLES = new Set(["scout", "architect", "judge"]);
 
 function resolveExtraBusDir(cwd: string): string[] {
 	const raw = String(process.env.ZEE_BUS_DIR || "").trim();
@@ -47,12 +42,6 @@ export default function zeeWorkerGuard(pi: ExtensionAPI) {
 					reason: `[zee-worker:${role || "worker"} 安全护栏] ${destructive.reason}，子代理严禁自动执行。`,
 				};
 			}
-			if (STRICT_BASH_ROLES.has(role)) {
-				const violation = checkBashUnderGate(command, ctx.cwd, "review", extraAllowedDirs);
-				if (violation) {
-					return { block: true, reason: `[zee-worker:${role}] ${violation}` };
-				}
-			}
 			return undefined;
 		}
 
@@ -67,7 +56,7 @@ export default function zeeWorkerGuard(pi: ExtensionAPI) {
 			if (!isReadOnlyRoleWriteAllowed(rawPath, ctx.cwd, extraAllowedDirs)) {
 				return {
 					block: true,
-					reason: `[zee-worker:${role}] 只读/门禁角色禁止写入仓库路径 "${rawPath}"（仅允许写入 ~/.local/state/zee/runs/ 或 /tmp/zee-* 沙盒目录）。`,
+					reason: `[zee-worker:${role}] 只读/门禁角色禁止写入仓库路径 "${rawPath}"（仅允许写入 ~/.local/state/zee/runs/ 或 /tmp/zee-*）。`,
 				};
 			}
 		}

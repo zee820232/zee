@@ -1,5 +1,36 @@
 # Changelog
 
+## [5.0.1] - 2026-11-26
+
+> 基于 `D:\proj\poke-zee` 真实 Pi RPC 全链路实战与 `gemini-4-neon` 独立监督审查（`6.4 / 10`）暴露的 P0/P1 缺陷实施专项修复。
+
+### Fixed
+- **[P0] 修复展开 `<skill>` 消息后 `writeGate` 只读保护锁 0ms 自毁漏洞（`pi-extension/index.ts`）**：
+  - `before_agent_start` 优先解析 `<skill name="...">...</skill>` 及其尾随参数再推算 `nextGate`，彻底修复 `/zee-verify run` 与 `/zee plan|review|init` 刚上锁即被重置为 `none` 的漏洞。
+- **[P0] 修复 `update-state` 多参数覆盖、无锁并发丢 unit 与 Windows `renameSync` EPERM 留孤儿临时文件（`skills/zee/scripts/lib/fs-atomic.mjs`, `zee-tool.mjs`, `provider-health.mjs`, `pi-extension/index.ts`）**：
+  - 新增 `withFileLock` + `atomicWriteJson` 共享原语；支持多次 `--unit-upsert` / `--fallback` 累加及 `--units` 批量 upsert，杜绝并发覆盖与 `.tmp.*` 孤儿残留；恢复轻量 `log-decision` 原语写入 `decisions.tsv`。
+- **[P0] 修复 `gate-tamper-diff` 门禁目录与剧本文件漏监（`zee-tool.mjs`）**：
+  - `isGateFilePath` 新增对 `.agents/verify-ctl*`、`.agents/zee.project.json`、`verify-*/` 及单数 `test/` 目录的监测。
+- **[P1] 对齐预算字段、`verifier` 槽位、worktree 基线检查与 Pi 过夜防断尾提醒**：
+  - `recordSubagentBudgetAndCutoff` 同时兼容 `budget.maxDelegates ?? budget.maxSubagents`；`mapRoleToSlotName("verifier")` 对齐为 `"workhorse"`；`resolve-model --harness pi` 直接输出 `subagentArgs`；`doctor --repo` 检测 `hasHeadCommit` 与脏区；`agent_settled` 增加未收尾 `night` 状态提醒；更新 `plan`/`feature`/`bug-fix`/`overnight` 剧本及 `zee-plan`/`zee-retro` 技能防止刷 `todo` 超时与复盘脱离实盘。
+- **[P1] 收口优化：死进程 `.tmp.*` 清理、子代理短超时下限与“先落袋再加餐”规则**：
+  - `fs-atomic.mjs` 新增 `cleanStaleTempFiles`，在 `init-run` 与 `update-state` 时自动清理陈旧/死进程孤儿 `.tmp.*`；`pi-extension/index.ts` 新增 `resolveEffectiveSubagentTimeout`，为研发/审查类子代理施加 `120s` 最小安全超时下限；剧本补充“先落袋再加餐”、默认轻量验证不强拉 Playwright、`zee-review` 聚焦 diff 且省略 `timeoutMs`，本地 `zee-config.json` 将 `adversary` 思考强度调为 `medium`。
+
+## [5.0.0] - 2026-11-26
+
+> 架构大瘦身：**个人主厨 + 可过夜（Personal Head Chef + Overnight Ready）**，从重度仪式与 TUI 状态机全面回归“核心门禁 + 按需剧本 + 3 槽位多模型 + 真实无人值守”。
+
+### Removed
+- 彻底删除重量级控制台与状态机：`pi-extension/fsm.ts`、`pi-extension/hub-ui.ts`、`pi-extension/bus-sync.ts`、`/zee-hub`、`Ctrl+Alt+H` / `F2` 及 `@earendil-works/pi-tui` 依赖。
+- 移除冗余技能与模板碎片：`skills/zee-arch`、`skills/zee-init`、`skills/zee-setup`、`skills/zee/references/*`、`skills/zee/disciplines/*` 以及重复的 `agents/zee-*.md` 子角色文件。
+- 移除 `guard-core.mjs` / `worker-guard.ts` 中高误报的 `checkBashUnderGate` Bash 写入正则猜猜看；移除 `zee-tool.mjs` 11 个边缘分析/补丁子命令（保留最硬核的 11 个执行原语）。
+- `gate-tamper-diff` 默认不再扫描普通 IP 字面量，仅保留门禁篡改、抑制注解、高危密钥前缀与 UTF-8 `\uFFFD` 乱码审计。
+
+### Changed & Added
+- **Skill 与角色极致瘦身**：`skills/zee/SKILL.md`（≤4 KB）配合 `principles.md`、6 份按需 `playbooks/*.md`（`plan` / `feature` / `bug-fix` / `perf` / `verify` / `overnight`）与 6 份极简 `roles/*.md`。
+- **3 槽位模型配置（Schema v3）**：`zee-config.json` 简化为 `fast` / `workhorse` / `adversary` 三槽位，配合 `--allow-standalone` 单兵降级，零配置也能开箱即用。
+- **Pi 扩展聚焦执行稳定性**：保留 `/zee`、`/zee-plan`、`/zee-verify`、`/zee-review`、`/zee-night`、`/zee-retro`、`/zee-mode` 与增强版 `zee_subagent`（429/5xx 跨通道冷却与 0ms 切备、`authorFamily` 跨家族拦截、worktree 隔离与 `node_modules` junction、>2KB 输出抢救、只读越权回滚与 70% 预算提示）。
+
 ## [4.2.2] - 2026-11-26
 
 > 专项修复 `v4.2.1` 真实程序员 7 场景复测（`8.8 / 10`）中通过真机 Pi CLI + PTY 冒烟抓出的 4 项 P0/P1 现网缺陷与 P2 体验细节。

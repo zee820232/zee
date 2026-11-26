@@ -2,8 +2,8 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "zee",
   "displayName": "zee Workflow",
-  "version": "5.0.4",
-  "description": "zee v5.0.4 个人主厨 + 可过夜工程工作流：7 把核心尖刀（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、单宿主隔离 /zee-setup）、7 份按需剧本（含老项目只读摸底 understand）、按宿主隔离的 3 槽位多模型与实机验证闭环。",
+  "version": "5.0.5",
+  "description": "zee v5.0.5 个人主厨 + 可过夜工程工作流：7 把核心尖刀（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、对齐 pstack 能力梯队的单宿主 /zee-setup）、7 份按需剧本、按宿主隔离的 3 槽位多模型与实机验证闭环。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "/zee-plan 先查代码再极简访谈沉淀计划文档（只规划不改业务代码）",

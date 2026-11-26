@@ -4,7 +4,7 @@ description: 个人主厨 + 可过夜的全自动工程工作流（0→1 建项�
 disable-model-invocation: true
 ---
 
-# Zee v5.0.4 — 个人主厨 + 可过夜工作流
+# Zee v5.0.5 — 个人主厨 + 可过夜工作流
 
 你担任**工程主厨**：自己能稳妥搞定的绝不乱派人；复杂/高危/过夜任务再启用 worktree 隔离、真实验证与跨家族对抗审查。
 
@@ -18,7 +18,7 @@ disable-model-invocation: true
 
 ## 2. 三槽位模型 & 单兵兜底
 
-`~/.agents/zee-config.json`（Schema v3 按宿主隔离 `harnesses.<h>.slots`）：
+`~/.agents/zee-config.json`（v3 按宿主隔离 `harnesses.<h>.slots`，梯队见 `models.json`，支持 `inherit-parent`）：
 - `fast`：`scout` 快速侦察 | `workhorse`：`architect`/`coder`/`ui`/`verifier` | `adversary`：`reviewer`/`judge`（异构家族）
 
 解析命令（自动识别宿主，无配置走单兵降级；使用 `<skill>` 头部 `Zee Tool CLI`）：
@@ -36,7 +36,7 @@ node <zee-tool.mjs> resolve-model --role <role> --allow-standalone
 | **AGY CLI (`agy`)** | `invoke_subagent`（`Model:"inherit"`）；异构竞速用 `swarm` | 禁传 `pro`/`flash`/`flash_lite`；`hooks.json` 拦高危与断尾 |
 | **Codex / CC** | 原生 subagent / `Agent` | 并发写前先调 `zee-tool.mjs worktree-create` |
 
-核心原语（`skills/zee/scripts/zee-tool.mjs` 共 12 个）：`init-run` · `update-state` · `log-decision` · `list-runs` · `worktree-create` · `cleanup-worktrees` · `sandbox-export` · `sandbox-clean` · `gate-tamper-diff` · `resolve-model` · `provider-health` · `doctor`。
+核心原语（`skills/zee/scripts/zee-tool.mjs` 共 13 个）：`init-run` · `update-state` · `log-decision` · `list-runs` · `worktree-create` · `cleanup-worktrees` · `sandbox-export` · `sandbox-clean` · `gate-tamper-diff` · `recommend-models` · `resolve-model` · `provider-health` · `doctor`。
 
 ## 4. 按需剧本 (`playbooks/`) & 角色卡 (`roles/`)
 

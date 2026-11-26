@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.0.5] - 2026-11-26
+
+### Added & Fixed
+- **对齐 `pstack` 能力梯队与预算阶梯，重构模型自动分配机制**：
+  - 新增 `skills/zee/models.json` 声明式能力梯队（`flagship` / `fastQuality`）与预算思考阶梯（`large` = `xhigh`/`medium`、`medium` = `high`/`low` 推荐、`small` = `medium`/`low`），并将 `deepseek` / `gemini-3.8` / `mini` / `lite` 等降智/轻量通道隔离进 `optInOnly`，禁止自动入选；
+  - `zee-tool.mjs` 新增异步支持管道的 `recommend-models` 子命令（同时兼容 `pi --list-models` 文本表、T3 `orchestrator_capabilities` JSON 与模型列表 JSON），自动去重同类路由别名并输出异构 3 槽位推荐；
+  - `resolve-model` 与 `doctor` 新增 `inherit-parent` / `auto` / `inherit` 父模型别名支持；
+  - 重写 `/zee-setup` 引导流程：取消 `"reply ok"` 严苛匹配与测速竞速误配，直接按能力梯队推荐，默认即得 `gpt-6.2-astra` / `claude-sonnet-5-5` / `gemini-4-hydrogen` / `gpt-6.1-sol` 等一线主力。
+
 ## [5.0.4] - 2026-11-26
 
 ### Fixed & Improved

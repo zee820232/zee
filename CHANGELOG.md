@@ -1,5 +1,10 @@
 # Changelog
 
+## [5.0.3] - 2026-11-26
+
+### Added
+- **恢复极简独立命令 `/zee-setup`**：专职枚举当前宿主模型、30s 轻量实机探活、确认 `fast` / `workhorse` / `adversary` 三槽位跨家族分配并写入 `~/.agents/zee-config.json`（Schema v3），同步注册进 Pi 扩展（8 个扩展命令）与多宿主安装器，且不带重型初始化历史包袱。
+
 ## [5.0.2] - 2026-11-26
 
 ### Added

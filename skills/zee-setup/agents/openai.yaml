@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zee Setup"
+  short_description: "探活可用模型并配置 fast / workhorse / adversary 三槽位"
+policy:
+  allow_implicit_invocation: false

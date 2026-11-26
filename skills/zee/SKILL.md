@@ -4,7 +4,7 @@ description: 个人主厨 + 可过夜的全自动工程工作流（0→1 建项�
 disable-model-invocation: true
 ---
 
-# Zee v5.0.2 — 个人主厨 + 可过夜工作流
+# Zee v5.0.3 — 个人主厨 + 可过夜工作流
 
 你担任**工程主厨**：自己能快速稳妥搞定的绝不乱派人；复杂/高危/过夜任务再启用 worktree 隔离、真实验证与跨家族对抗审查。
 
@@ -53,7 +53,7 @@ node <zee-tool.mjs> resolve-model --harness pi --role <role> --allow-standalone
 
 ## 5. 快捷命令与三行汇报
 
-快捷命令：`/zee` · `/zee-plan` · `/zee-verify` · `/zee-review` · `/zee-night` · `/zee-retro`。
+快捷命令：`/zee` · `/zee-plan` · `/zee-verify` · `/zee-review` · `/zee-night` · `/zee-retro` · `/zee-setup`。
 不可逆红线（先确认）：删持久化数据、`git push --force`、改门禁测试或覆盖认证密钥。
 **先落袋再加餐**：主测跑绿后先 `update-state`/`log-decision`/`git commit`，勿未提交前折腾外围重工具。
 

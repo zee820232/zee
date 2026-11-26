@@ -3,19 +3,19 @@
 适用场景：`/zee-night`，用户在睡眠或离线前将清晰 `units` 队列交给 Zee 自动推进。
 
 ## 启动前置与续跑接棒
-1. 跑 `node <scripts>/zee-tool.mjs doctor --repo <repoRoot>` 确认 3 槽位、总线及 **Git 基线（`hasHeadCommit: true`）**。
-2. 确认 `<busDir>/plan.md` 与 `state.json` 存在可机测 `units`（可用 `--units-file <path|->` 批量写入）；开启夜跑模式并写一条 `phase=start` 轮次分界记录：
+1. 运行 `<ZEE_TOOL> doctor --repo <repoRoot>` 确认 `projectProfile`（Git 基线 `hasHeadCommit: true`、测试命令与 `verifiability`）与总线健康度；若无 Git 基线先 `init-run <repoRoot> <slug> --mode night --ensure-git`，若 `verifyCtl: false` 且为 Web/CLI/服务项目优先把自举 `.agents/verify-ctl.mjs` 列为 `U0`。
+2. 确认 `<busDir>/plan.md` 与 `state.json` 存在可机测 `units`（Windows PowerShell 复杂 JSON 一律走 `--units-file <path|->`）；开启夜跑模式并写入当前宿主 `conversationId`（若可得，供 AGY `Stop` Hook 严格会话隔离）与 `phase=start` 轮次分界：
    ```bash
-   node <scripts>/zee-tool.mjs update-state <busDir> --mode night --status running --budget '{"maxDelegates":12,"maxFailuresPerUnit":2}'
-   node <scripts>/zee-tool.mjs log-decision <busDir> --unit RUN --phase start --decision "night-start" --why "进入过夜推进" --result running
+   <ZEE_TOOL> update-state <busDir> --mode night --status running [--conversation-id <cid>] --budget '{"maxDelegates":12,"maxFailuresPerUnit":2}'
+   <ZEE_TOOL> log-decision <busDir> --unit RUN --phase start --decision "night-start" --why "进入过夜推进" --result running
    ```
 3. **冷启动接棒（`session-pickup`）与安全挂起（`pause-safely`）**：接手已有运行总线时，信任既有 `done` 轨迹不重复施工，仅对终态产物做实证复验；若因预算/外部阻塞必须中断，先打 `wip:` commit 保护现场、更新 `--status handoff --resume-next <unitId>` 并在 `<busDir>/morning-report.md` 写明续跑入口。
 
 ## 主循环协议（并发/分单推进）
-1. **领取待办单元**：≥2 个互不重叠且依赖就绪的 `pending` unit 时，Pi 下用 `zee_subagent` + 声明式 `worktree`（省略 `timeoutMs`）派发 `coder`/`ui`，T3 Code 下用 `delegate_task`（`isolation: "worktree"`），勿手调 `worktree-create` 制造冲突。
-2. **施工 + 即时校验 + Verifier 实跑**：每次改码立刻跑语法检查与窄单测；单元收尾跑对应测试与 `.agents/verify-ctl.mjs`。
-3. **先落袋再加餐**：单单元跑绿后立即 `update-state`、`log-decision` 与 `git commit` 锁定成果；连续失败 **2 次即熔断标 `blocked`** 并记录前提假设复盘。
-4. **预算熔断与晨前对抗终审**：遇 `budget_warning`（70% 截断）或达时间边界停止开新单；跑 `gate-tamper-diff` 与跨家族 `reviewer`（必要时加 `judge` 终审把关），提交通过代码并将 `state.json` 置为 `completed` 或 `handoff`。
+1. **领取待办单元**：≥2 个互不重叠且依赖就绪的 `pending` unit 时，Pi 下用 `zee_subagent` + 声明式 `worktree`（省略 `timeoutMs`），T3 下用 `delegate_task(isolation:"worktree")`，AGY 下用 `invoke_subagent(Workspace:"share", Model:"inherit")`，勿手调 `worktree-create` 制造冲突。
+2. **施工 + 即时校验 + Verifier 实跑**：每次改码立刻跑语法检查与窄单测；单元收尾跑对应测试与 `.agents/verify-ctl.mjs`（UI/设计单元含真实渲染核验）。
+3. **先落袋再加餐**：单单元跑绿后立即 `update-state`（如 `--unit-upsert '{"id":"U1","status":"done"}'` 或 `--units-file`）、`log-decision` 与 `git commit` 锁定成果；连续失败 **2 次即熔断标 `blocked`** 并记录前提假设复盘；非阻断 P2 坏味道随手 `finding add` 入园艺队列。
+4. **预算熔断与晨前对抗终审**：遇 `budget_warning`（70% 截断）或达时间边界停止开新单；跑 `/zee-verify run --fuzz`、`gate-tamper-diff` 与跨家族 `reviewer`（传 `--author-family <fam>`，必要时加 `judge` 终审把关），提交通过代码并将 `state.json` 置为 `completed` 或 `handoff`。
 
 ## 中文晨报协议（`<busDir>/morning-report.md`，吸收 `ketchup` + `show-me-your-work`）
 1. **顶部状态简报（严格 <100 字人话）**：交付进度、核心指标/通过数、关键截图或产物路径。

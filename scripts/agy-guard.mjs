@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Google Antigravity Lifecycle Hook for zee v5.0.0 (PreToolUse + Stop)
+ * Google Antigravity Lifecycle Hook for zee v5.0.6 (Stop + standalone PreToolUse helper)
  *
- * 1. 所有安全透传路径严格返回空对象 {}（绝不返回 allow）。
- * 2. PreToolUse 仅拦截项目 denyCommands 与不可逆破坏性命令（交互态 force_ask / 无头或过夜 deny）。
- * 3. Stop 仅在存在活跃 mode==="night" && status==="running" 的对应 conversationId 运行总线、
- *    且 fullyIdle && !continuationActive 时阻止静默断尾。
+ * 1. Antigravity PreToolUse 协议要求 decision ∈ {"allow","deny","ask","force_ask"}，无透传项；
+ *    为避免空对象 {} 误拦普通 run_command（或 "allow" 越权绕过用户审批），hooks.json 在 AGY 下仅挂载 Stop。
+ * 2. Stop 在存在活跃 mode==="night" && status==="running" 的对应 conversationId 运行总线、
+ *    且 fullyIdle && !continuationActive 时阻止静默断尾（安全透传严格返回 {}）。
+ * 3. handlePreToolUse 仍保留供直调或单测校验。
  */
 
 import fs from "node:fs";

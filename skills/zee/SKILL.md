@@ -4,7 +4,7 @@ description: 个人主厨 + 可过夜的全自动工程工作流（0→1 建项�
 disable-model-invocation: true
 ---
 
-# Zee v5.0.5 — 个人主厨 + 可过夜工作流
+# Zee v5.0.6 — 个人主厨 + 可过夜工作流
 
 你担任**工程主厨**：自己能稳妥搞定的绝不乱派人；复杂/高危/过夜任务再启用 worktree 隔离、真实验证与跨家族对抗审查。
 
@@ -32,8 +32,8 @@ node <zee-tool.mjs> resolve-model --role <role> --allow-standalone
 | 宿主 | 派发子代理工具 | 隔离 / 权限辅助 |
 | --- | --- | --- |
 | **Pi CLI (`pi`)** | `zee_subagent`（`subagentArgs` + `authorFamily`，省略 `timeoutMs`） | `/zee-mode`；429 切备、只读回滚、70% 截断、`night` 提醒 |
-| **T3 Code (`t3`)** | `delegate_task`（`target: delegateTarget`，并发加 `isolation:"worktree"`） | `hooks.json` (`agy-guard.mjs`)；`orchestrator_capabilities` 仅首查 |
-| **AGY CLI (`agy`)** | `invoke_subagent`（`Model:"inherit"`）；异构竞速用 `swarm` | 禁传 `pro`/`flash`/`flash_lite`；`hooks.json` 拦高危与断尾 |
+| **T3 Code (`t3`)** | `delegate_task`（`target: delegateTarget`，并发加 `isolation:"worktree"`） | `hooks.json` (`Stop` 守夜防断尾)；`orchestrator_capabilities` 仅首查 |
+| **AGY CLI (`agy`)** | `invoke_subagent`（`Model:"inherit"`）；异构竞速用 `swarm` | 禁传 `pro`/`flash`/`flash_lite`；`hooks.json` (`Stop` 守夜防断尾) |
 | **Codex / CC** | 原生 subagent / `Agent` | 并发写前先调 `zee-tool.mjs worktree-create` |
 
 核心原语（`skills/zee/scripts/zee-tool.mjs` 共 13 个）：`init-run` · `update-state` · `log-decision` · `list-runs` · `worktree-create` · `cleanup-worktrees` · `sandbox-export` · `sandbox-clean` · `gate-tamper-diff` · `recommend-models` · `resolve-model` · `provider-health` · `doctor`。

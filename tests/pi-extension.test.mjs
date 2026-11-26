@@ -1029,3 +1029,239 @@ process.exit(0);
     }
   }
 });
+
+test("v4.2.2 回归 [P0/P1/P2]：Pi 4×429 重试熔断免扣预算、正常推进零假 /tree 漂移、VERDICT **PASS** 识别与辅助命令归零 IDLE", async () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-pi-"));
+  const metaDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v422-meta-"));
+  const healthPath = path.join(metaDir, "provider-health.json");
+  const cfgPath = path.join(metaDir, "zee-config.json");
+  const busDir = path.join(metaDir, "bus");
+  const fakeBin = path.join(metaDir, "fake-pi-v422.mjs");
+
+  const prevBin = process.env.ZEE_PI_BIN;
+  const prevHealth = process.env.ZEE_PROVIDER_HEALTH_PATH;
+  const prevCfg = process.env.ZEE_CONFIG_PATH;
+
+  try {
+    process.env.ZEE_PROVIDER_HEALTH_PATH = healthPath;
+    process.env.ZEE_CONFIG_PATH = cfgPath;
+
+    execFileSync("git", ["-C", tmpRepo, "init", "-b", "main"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.email", "t@zee.dev"], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "config", "user.name", "zee"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(tmpRepo, "index.ts"), "export const v = 1;\n");
+    execFileSync("git", ["-C", tmpRepo, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", tmpRepo, "commit", "-m", "init"], { stdio: "ignore" });
+    const headSha = execFileSync("git", ["-C", tmpRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        version: 2,
+        budget: "balanced",
+        roles: {
+          reviewers: [
+            {
+              prefer: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "fast", effort: "medium" },
+              backup: { family: "openai", modelHint: "gpt-6.1-sol", tier: "pro", effort: "medium" },
+              bindings: {
+                pi: {
+                  prefer: { providerInstanceId: "magpie", model: "remote-magpie/devin/gemini-4-hydrogen" },
+                  backup: { providerInstanceId: "magpie", model: "remote-magpie/codex/gpt-6.1-sol" },
+                },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    // 模拟真实 Pi CLI 行为：429 内部退避重试 4 次发出 4 个 stopReason="error" 空 message_end；
+    // Verifier 输出 Markdown 加粗 VERDICT: **PASS**；健康 Reviewer 输出 VERDICT: `PASS`
+    fs.writeFileSync(
+      fakeBin,
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const mIdx = args.indexOf("--model");
+const model = mIdx >= 0 ? args[mIdx + 1] : "";
+const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+
+if (model.includes("gemini-4-hydrogen")) {
+  for (let i = 0; i < 4; i++) {
+    emit({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: "",
+        stopReason: "error",
+        errorMessage: "429: Remote magpie: Devin: weekly usage quota has been exhausted (HTTP 429)",
+      },
+    });
+  }
+  process.exit(1);
+}
+if (process.env.ZEE_ROLE === "verifier") {
+  emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: "VERDICT: **PASS**\\nPINNED_SHA: ${headSha}\\nAll tests green.",
+      stopReason: "stop",
+      usage: { input: 80, output: 15, cost: { total: 0.02 } },
+    },
+  });
+  process.exit(0);
+}
+emit({
+  type: "message_end",
+  message: {
+    role: "assistant",
+    content: "**VERDICT**: \`PASS\`\\nFAMILY: openai\\nCLEAN_ALT_REVIEW",
+    stopReason: "stop",
+    usage: { input: 90, output: 18, cost: { total: 0.03 } },
+  },
+});
+process.exit(0);
+`,
+      { mode: 0o755 },
+    );
+    process.env.ZEE_PI_BIN = fakeBin;
+
+    const mock = createMockPi();
+    zeeExtension(mock.pi);
+    const tuiCtx = mock.makeCtx(tmpRepo, true, "tui");
+    mock.emit("session_start", {}, tuiCtx);
+
+    // 1. P2: 无总线的 /zee-setup 结算后自动回归 IDLE（不滞留 PREFLIGHT）
+    await mock.commands.get("zee-setup").handler("doctor", tuiCtx);
+    mock.emit("agent_settled", {}, tuiCtx);
+    const afterSetup = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data;
+    assert.equal(afterSetup.phase, "IDLE", "/zee-setup 结束后应回归 IDLE 保持 HUD 零噪音");
+
+    // 2. P1: 正常 tool_result update-state 推进超过 5s 绝不误报 busAheadOfBranch (/tree rollback drift)
+    fs.mkdirSync(busDir, { recursive: true });
+    const statePath = path.join(busDir, "state.json");
+    const futureTs = new Date(Date.now() + 60_000).toISOString();
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify({
+        slug: "v422-bus",
+        mode: "night",
+        level: "L2",
+        status: "running",
+        updatedAt: futureTs,
+        delegatesDispatched: 0,
+        budget: { maxDelegates: 4, cutoffRatio: 0.7 },
+      }),
+    );
+    mock.emit(
+      "tool_result",
+      {
+        toolName: "bash",
+        input: { command: `node zee-tool.mjs init-run "${tmpRepo}" v422-bus` },
+        content: [{ type: "text", text: JSON.stringify({ ok: true, busDir, statePath }) }],
+      },
+      tuiCtx,
+    );
+    mock.emit(
+      "tool_result",
+      {
+        toolName: "bash",
+        input: { command: `node zee-tool.mjs update-state "${busDir}" --status running` },
+        content: [{ type: "text", text: JSON.stringify({ ok: true, statePath }) }],
+      },
+      tuiCtx,
+    );
+    const statusBadge = tuiCtx.ui.statuses.get("zee-mode") || "";
+    assert.equal(statusBadge.includes("!"), false, `正常 update-state 推进不得触发 ! 漂移告警，实际: ${statusBadge}`);
+
+    // 但真正的 /tree 分支回退（分支时间戳落后磁盘 >5s）仍必须触发警告
+    const oldEntry = mock.entries.findLast((e) => e.customType === "zee-fsm");
+    if (oldEntry) oldEntry.timestamp = Date.now() - 120_000;
+    mock.emit("session_tree", {}, tuiCtx);
+    assert.ok(
+      tuiCtx.ui.notices.some((n) => String(n.msg || "").includes("busAheadOfBranch")),
+      "真实 /tree 回退仍必须检测并告警 busAheadOfBranch",
+    );
+
+    // 重新通过 init-run 绑定清漂移，继续验证 P1 VERDICT **PASS** 与 P0 4×429 熔断
+    mock.emit(
+      "tool_result",
+      {
+        toolName: "bash",
+        input: { command: `node zee-tool.mjs init-run "${tmpRepo}" v422-bus` },
+        content: [{ type: "text", text: JSON.stringify({ ok: true, busDir, statePath }) }],
+      },
+      tuiCtx,
+    );
+
+    const subTool = mock.tools.get("zee_subagent");
+    // 3. P1: Verifier 输出 VERDICT: **PASS** 必须正确落账 gate1=PASS，后续派发 Reviewer 零 G-02 误报
+    const verRes = await subTool.execute(
+      "call-v422-ver",
+      { role: "verifier", model: "remote-magpie/devin/swe-2", busDir, cwd: tmpRepo, task: "[zee-worker] verify" },
+      undefined,
+      undefined,
+      tuiCtx,
+    );
+    assert.equal(verRes.details.status, "completed");
+    const fsmAfterVer = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data;
+    assert.equal(fsmAfterVer.gate1?.verdict, "PASS", "VERDICT: **PASS** 必须被正确识别为 gate1 PASS");
+
+    // 4. P0: 真实 Pi 4×429 空 error 重试（发出 4 条 message_end）必须触发熔断、免扣预算，且二次呼叫 0ms 切到 gpt-6.1-sol
+    await assert.rejects(
+      () =>
+        subTool.execute(
+          "call-v422-429-4x",
+          {
+            role: "reviewer",
+            provider: "magpie",
+            model: "remote-magpie/devin/gemini-4-hydrogen",
+            authorFamily: "claude",
+            busDir,
+            cwd: tmpRepo,
+            task: "[zee-worker] review",
+          },
+          undefined,
+          undefined,
+          tuiCtx,
+        ),
+      /\[BUDGET_EXEMPT:/,
+    );
+
+    const stAfter4x429 = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(stAfter4x429.delegatesDispatched, 1, "仅 Verifier 计 1 次，4×429 重试绝不得扣减预算");
+    assert.equal(getModelCooldown("magpie", "remote-magpie/devin/gemini-4-hydrogen").active, true, "4×429 必须写入 provider-health.json 冷却");
+
+    const altRev = await subTool.execute(
+      "call-v422-rev-alt",
+      {
+        role: "reviewer",
+        provider: "magpie",
+        model: "remote-magpie/devin/gemini-4-hydrogen",
+        authorFamily: "claude",
+        busDir,
+        cwd: tmpRepo,
+        task: "[zee-worker] review",
+      },
+      undefined,
+      undefined,
+      tuiCtx,
+    );
+    assert.equal(altRev.details.model, "remote-magpie/codex/gpt-6.1-sol");
+    assert.ok(altRev.content[0].text.includes("CLEAN_ALT_REVIEW"));
+    assert.equal(altRev.content[0].text.includes("[G-02]"), false, "Gate 1 **PASS** 已落账，不应触发 G-02 假告警");
+
+    const fsmAfterRev = [...mock.entries].reverse().find((e) => e.customType === "zee-fsm")?.data;
+    assert.equal(fsmAfterRev.gate2?.verdict, "PASS", "**VERDICT**: `PASS` 必须被正确识别为 gate2 PASS");
+  } finally {
+    if (prevBin === undefined) delete process.env.ZEE_PI_BIN;
+    else process.env.ZEE_PI_BIN = prevBin;
+    if (prevHealth === undefined) delete process.env.ZEE_PROVIDER_HEALTH_PATH;
+    else process.env.ZEE_PROVIDER_HEALTH_PATH = prevHealth;
+    if (prevCfg === undefined) delete process.env.ZEE_CONFIG_PATH;
+    else process.env.ZEE_CONFIG_PATH = prevCfg;
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(metaDir, { recursive: true, force: true });
+  }
+});

@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.2.2] - 2026-11-26
+
+> 专项修复 `v4.2.1` 真实程序员 7 场景复测（`8.8 / 10`）中通过真机 Pi CLI + PTY 冒烟抓出的 4 项 P0/P1 现网缺陷与 P2 体验细节。
+
+### Fixed
+- **[P0] 修复真实 Pi CLI 中 `429/5xx` 熔断器与预算免扣 0% 生效的现网缺陷（`pi-extension/index.ts`, `skills/zee/scripts/lib/provider-health.mjs`）**：
+  - Pi CLI 遇 HTTP 429 自动内部退避重试 4 次、每次发出 `message_end(stopReason="error")` 空消息；此前 `index.ts` 无条件 `details.usage.turns += 1` 将 `turns` 推成 `4`，导致 `provider-health.mjs` 的 `turnCount > 1` 误判为非瞬态失败。
+  - 修复后，零产出/零工具调用/零输出 token 的 `stopReason="error"` 重试不再递增 `turns`，且 `classifyTransientProviderFailure` 同步校验 `hasToolCalls` 与 `outputTokens`，真正兑现 429 跨会话 30m 冷却、0ms 切备与预算免扣。
+- **[P1] 修复正常任务推进 >5s 永久误报 `⚠ /tree rollback drift` 与 `!` 徽章（`pi-extension/index.ts`）**：
+  - `busAheadOfBranch` 漂移检测收敛为仅在 `restoreState()`（`session_start` / `session_tree`）分支恢复时校验；当前会话自身执行 `init-run`、`update-state`、`log-decision`、`/zee-review --strict` 与 `zee_subagent` 写盘时不再触发假漂移告警，并同步刷新 `branchEntryTs`。
+- **[P1] 修复 Markdown 加粗 `VERDICT: **PASS**` 触发 `G-02` 假告警（`pi-extension/index.ts`）**：
+  - 放宽 `VERDICT` 正则为 `/\bVERDICT\*{0,2}\s*:\s*[*`_\s]*(PASS|FAIL|REVISE|INCONCLUSIVE)\b/i`，兼容加粗与反引号格式，杜绝 Verifier 已 PASS 却误报 `gate1=missing`。
+- **[P1] 修复 `sandbox-clean` 在 `cwd === sandboxDir` 自拒与 `review🔒` 沙盒 `cp ... 2>&1` / `patch` 误拦（`skills/zee/scripts/zee-tool.mjs`, `skills/zee/scripts/lib/guard-core.mjs`）**：
+  - `cmdSandboxClean` 校验不再将 `process.cwd()` 误当受保护仓库（仍严禁删 `.git` 或 `.agents/zee.project.json` 目录，且删除前若身处沙盒则先切出至 `os.tmpdir()`）；
+  - `guard-core.mjs` 新增 `stripShellRedirectionTokens` 剥离 `2>&1`、`2>/dev/null` 等重定向 token，彻底修复 `cp -R node_modules $S/node_modules 2>&1` 被误判目标为 `2>&1` 的问题；仅在严格位于 `/tmp/zee-*` / `os.tmpdir()/zee-*` 沙盒内且无逃逸参数时放行 `patch`（仓库内 `patch` 仍硬拦截）。
+
+### Improved
+- **[P2] TUI Hub 80 列与换行加固（`pi-extension/hub-ui.ts`）**：`fitToWidth` 与 Tab 4 `inv.error` 清洗嵌入 `\r\n` 彻底防裂框；宽度 `<94` 列时 Hub Tab 栏自动切换短标签（`1总览 2车道 3门禁 4树/费 5控制`），80 列下全部 5 个标签完整可见。
+- **[P2] FSM 生命周期收敛（`pi-extension/fsm.ts`, `pi-extension/index.ts`）**：`init-design` 在 M0 落盘自动解锁且存在活跃总线时平滑进入 `EXECUTING`（不再跌回 `IDLE`）；无总线的单轮辅助命令（`/zee-setup`、`/zee recall`、`/zee-retro`）在 `agent_settled` 后自动回归 `IDLE` 保持 HUD 零噪音。
+- **[P2] 花园队列关闭闭环与 `mine-transcripts` 降噪（`skills/zee/scripts/zee-tool.mjs`, `skills/zee-retro/SKILL.md`）**：新增 **`zee-tool.mjs resolve-finding --repo <repo> --pattern <slug> [--note <text>]`**（追加审计关闭已固化 `systemic` 簇，`list-findings` 默认仅显示未关闭项并支持 `--include-resolved`，若日后复发自动重新计数）；`mine-transcripts --mode retro` 过滤 ADR/文档与 `<skill ...>` 展开块，大幅降低 `human_correction` 误报。
+- **[P2] 文档防误导修正（`greenfield.md`, `zee-review/SKILL.md`, `overnight.md`）**：明确 Pi 端禁止手传 `--inc-delegates`/`--delegate-id`，并明确 `reviewers[0]` 429 或备胎同家族时继续顺位尝试 `reviewers[1..N]`。
+
 ## [4.2.1] - 2026-11-26
 
 > 专项响应 Mac mini 端 7 场景真实程序员实战体验评测反馈（`8.1 / 10` 报告中的 8 大体感痛点与 5 条高杠杆建议）。

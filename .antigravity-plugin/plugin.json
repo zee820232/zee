@@ -2,8 +2,8 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "zee",
   "displayName": "zee Workflow",
-  "version": "4.2.1",
-  "description": "通用多模型全自动工程工作流 v4.2.1：支持 429/5xx 跨会话熔断切备、只读锁沙盒/忽略产物清理、L1.5 快轨、零配置单兵兜底（Own Set of Knives）、0→1 建项、T1/T2/T3 信任梯度编排、Grill+领域建模规划、/zee-verify 实机验证、/zee recall 与 /zee triage 外环分诊、跨家族三轴审查（--strict/--quick）与过夜自治，原生适配 Antigravity CLI 与子代理体系。",
+  "version": "4.2.2",
+  "description": "通用多模型全自动工程工作流 v4.2.2：支持 429/5xx 跨会话熔断切备、只读锁沙盒/忽略产物清理、L1.5 快轨、零配置单兵兜底（Own Set of Knives）、0→1 建项、T1/T2/T3 信任梯度编排、Grill+领域建模规划、/zee-verify 实机验证、/zee recall 与 /zee triage 外环分诊、跨家族三轴审查（--strict/--quick）与过夜自治，原生适配 Antigravity CLI 与子代理体系。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "/zee-plan 先做需求访谈与领域建模并沉淀计划文档，不改业务代码",

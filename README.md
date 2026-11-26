@@ -1,4 +1,4 @@
-# zee — 通用多模型全自动工程工作流（v4.2.1）
+# zee — 通用多模型全自动工程工作流（v4.2.2）
 
 `zee` 是一套按标准 [Agent Skills](https://agentskills.io) 编写的**通用多模型全自动研发工作流**，采用 **Pi Package + Google Antigravity Native Plugin + 标准 Agent Skills 三形态单仓封装**。
 
@@ -30,7 +30,7 @@ npx github:zee820232/zee --target both --doctor
 pi install git:github.com/zee820232/zee
 ```
 
-安装即得（v4.2.1）：
+安装即得（v4.2.2）：
 - **11 个干净命令（零 `/skill:zee*` 重影）**：`/zee`、`/zee-init`、`/zee-plan`、`/zee-review`（`--strict` / `--quick`）、`/zee-verify`、`/zee-arch`、`/zee-retro`、`/zee-night`、`/zee-setup` + `/zee-mode` + `/zee-hub`（`Ctrl+Alt+H` / `F2`）+ **6 份按需工程纪律**（`package.json` 移除了 `pi.skills`，由扩展直接内置展开，彻底消除 Pi 菜单 19 项重影）
 - **Pi v1.6.1 双轴 FSM 与零冲突 Layer 0/1/2 HUD/Hub（`fsm.ts` + `bus-sync.ts` + `hub-ui.ts`）**：
   - **14 个工作流阶段 × 9 个子代理车道状态** + **G-01..G-06 运行期守卫**（跨回合 `zee-fsm` 分支持久化与 `zee-mode`/`zee-gate` 向下兼容，`/tree` 切回时自动标出 `busAheadOfBranch` 绝不覆写磁盘较新 `state.json`）。
@@ -46,7 +46,7 @@ pi install git:github.com/zee820232/zee
 agy plugin install https://github.com/zee820232/zee
 ```
 
-安装即得（v4.2.1）：
+安装即得（v4.2.2）：
 - **专属主控代理 `zee`（零劫持闲聊）**：终端运行 **`agy --agent zee`**（或在 CLI `/agents` / Antigravity App 切换 `zee`），绝不内置劫持普通对话的 `rules/AGENTS.md`
 - **6 个硬权限隔离角色子代理**（`zee-scout` / `zee-architect` / `zee-ui` / `zee-coder` / `zee-verifier` / `zee-reviewer`）：全部内置 `inheritCustomizations: false` 与精确 OneHarness `tools:` 白名单
 - **9 个原生斜杠命令 + 三事件生命周期 Hook（`PreInvocation` + `PreToolUse` + `Stop`）**：`$PLUGIN_DATA` 跨回合保持锁状态、共用 `guard-core.mjs` 词法安全核、支持 Brain Artifacts（「Proceed」按钮 / `walkthrough.md` / `carousel` / `decisions.tsv`）、`run_workflow` 宽扇出与 `Stop` 过夜防断尾

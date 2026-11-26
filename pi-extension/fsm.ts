@@ -602,7 +602,9 @@ export function reduceFsm(
 				targetPhase = evt.nextPhase;
 			} else if (evt.gate !== "none") {
 				targetPhase = phaseForGate(evt.gate);
-			} else if (prev.phase === "PLANNING" || prev.phase === "INIT_DESIGN" || prev.phase === "REVIEWING") {
+			} else if (prev.phase === "INIT_DESIGN") {
+				targetPhase = prev.activeWorkers.length > 0 || Boolean(prev.busDir) ? "EXECUTING" : "IDLE";
+			} else if (prev.phase === "PLANNING" || prev.phase === "REVIEWING") {
 				targetPhase = prev.activeWorkers.length > 0 ? "EXECUTING" : "IDLE";
 			}
 			return withTransition(prev, next, targetPhase, evt.type, now, evt.reason ?? `gate=${evt.gate}`);

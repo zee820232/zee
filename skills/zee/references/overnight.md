@@ -17,7 +17,7 @@ Do not start unattended execution until all 5 invariants are locked (confirm wit
 
 ## 3. Execution Loop, Trust Ladder (`T1`/`T2`/`T3`), 70% Cutoff & Idempotency
 - **Gate Progression by Effective `trustLevel`** (`readiness` clamped):
-  - **`T1` (default)**: strict serial **Gate 1 (`Verifier`) `PASS` -> Gate 2 (`Reviewer`)** per unit onto `zee/<slug>`.
+  - **`T1` (default)**: strict serial **Gate 1 (`Verifier`) `PASS` -> Gate 2 (`Reviewer`)** per unit onto `zee/<slug>` (if `reviewers[0]` hits 429/5xx or its `backup` matches `authorFamily`, continue down `reviewers[1..N]` to preserve cross-family coverage).
   - **`T2`**: non-`riskPaths`, non-UI two-way-door units merge onto `zee/<slug>` after Gate 1 (`verify-<app>` `PASS`), with cross-family `Reviewer` running batch sampling at milestone close (`riskPaths`, UI, or `GATE_CHANGE_RATIONALE` stays strict Gate 1 -> Gate 2).
   - **`T3`**: high-trust autopilot on `zee/<slug>` with Gate 1 + `--fuzz` + post-merge morning sampling + zero-code cross-family `Audit Judge` (`riskPaths` / `GATE_CHANGE_RATIONALE` still stays strict).
 - **Mandatory `uiGlobs` Visual Screenshot Gate (Non-Negotiable)**: whenever a unit diff touches `uiGlobs` (or UI/HUD/render code), Gate 1 `Verifier` MUST capture fresh PNGs into `<busDir>/screenshots/` (never repo scratch), and Gate 2 `Reviewer` / `Audit Judge` MUST open and visually inspect every new PNG.

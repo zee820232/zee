@@ -263,17 +263,23 @@ export function findHealthyPiFallback({
   const r = String(role || "").trim().toLowerCase();
   const candidates = [];
 
-  // Schema v3: cfg.slots { fast, workhorse, adversary }
+  // Schema v3: 优先读取 harnesses.pi.slots，再兼容 legacy cfg.slots { fast, workhorse, adversary }
+  const piSlotSources = [];
+  if (cfg?.harnesses?.pi?.slots && typeof cfg.harnesses.pi.slots === "object") {
+    piSlotSources.push({ prefix: "harnesses.pi.slots", slots: cfg.harnesses.pi.slots });
+  }
   if (cfg?.slots && typeof cfg.slots === "object") {
-    const slots = cfg.slots;
+    piSlotSources.push({ prefix: "slots", slots: cfg.slots });
+  }
+  for (const { prefix, slots } of piSlotSources) {
     const targetSlot = mapRoleToSlotName(r);
-    if (slots[targetSlot]) collectSlotPiCandidates(slots[targetSlot], `slots.${targetSlot}`, candidates);
+    if (slots[targetSlot]) collectSlotPiCandidates(slots[targetSlot], `${prefix}.${targetSlot}`, candidates);
     if (targetSlot === "adversary") {
       // 若主审槽位不可用或与 authorFamily 冲突，顺位考虑其他槽位中的异构模型
-      if (slots.workhorse) collectSlotPiCandidates(slots.workhorse, "slots.workhorse", candidates);
-      if (slots.fast) collectSlotPiCandidates(slots.fast, "slots.fast", candidates);
+      if (slots.workhorse) collectSlotPiCandidates(slots.workhorse, `${prefix}.workhorse`, candidates);
+      if (slots.fast) collectSlotPiCandidates(slots.fast, `${prefix}.fast`, candidates);
     } else if (targetSlot === "workhorse") {
-      if (slots.adversary) collectSlotPiCandidates(slots.adversary, "slots.adversary", candidates);
+      if (slots.adversary) collectSlotPiCandidates(slots.adversary, `${prefix}.adversary`, candidates);
     }
   }
 

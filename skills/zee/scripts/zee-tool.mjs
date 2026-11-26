@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v5.0.1 — 精简高杠杆确定性 CLI 原语（12 核心子命令）
+ * zee-tool.mjs v5.0.4 — 精简高杠杆确定性 CLI 原语（12 核心子命令）
  *
  * 子命令：
  *   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
@@ -12,9 +12,9 @@
  *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
  *   sandbox-clean <sandboxDir>
  *   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
- *   resolve-model [--harness pi|agy|t3] [--surface invoke_subagent|swarm] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
+ *   resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
  *   provider-health [--clear [modelKey]]
- *   doctor [--repo <path>]
+ *   doctor [--repo <path>] [--harness <h>]
  */
 
 import fs from "node:fs";
@@ -59,11 +59,31 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "all", "prune-safe", "working-tree", "allow-standalone", "clear", "ignore-cooldown", "help",
 ]);
 
+function normalizeHarnessName(raw) {
+  const low = String(raw || "").trim().toLowerCase();
+  if (!low) return "local";
+  if (low === "agy" || low === "antigravity") return "antigravity";
+  if (low === "t3" || low === "t3code" || low === "t3-code") return "t3";
+  if (low === "pi") return "pi";
+  if (low === "codex") return "codex";
+  if (low === "claude" || low === "claudecode" || low === "claude-code") return "claude";
+  if (low === "cursor") return "cursor";
+  return low;
+}
+
+function getHarnessKeys(harness) {
+  const h = normalizeHarnessName(harness);
+  return h === "antigravity" ? ["agy", "antigravity"] : [h];
+}
+
 function detectActiveHarness() {
   if (process.env.PI_CODING_AGENT === "true" || process.env.AI_AGENT === "pi") return "pi";
+  if (process.env.T3CODE_THREAD_ID || process.env.T3_ACP_MCP_ENDPOINT || process.env.T3_ACP_MCP_NODE) return "t3";
   if (process.env.ANTIGRAVITY_CLI || process.env.ANTIGRAVITY_AGENT || process.env.PLUGIN_ROOT?.includes(`${path.sep}.gemini${path.sep}`)) {
     return "antigravity";
   }
+  if (process.env.CLAUDECODE || process.env.CLAUDE_CODE) return "claude";
+  if (process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX) return "codex";
   const norm = path.resolve(SOURCE_SKILLS_DIR);
   if (norm.includes(`${path.sep}.pi${path.sep}`)) return "pi";
   if (norm.includes(`${path.sep}.claude${path.sep}`)) return "claude";
@@ -71,6 +91,13 @@ function detectActiveHarness() {
   if (norm.includes(`${path.sep}.codex${path.sep}`)) return "codex";
   if (norm.includes(`${path.sep}.cursor${path.sep}`)) return "cursor";
   return "local";
+}
+
+function detectRuntimeProvider() {
+  if (process.env.ANTIGRAVITY_AGENT || process.env.ANTIGRAVITY_CLI) return "antigravity";
+  if (process.env.CLAUDECODE || process.env.CLAUDE_CODE) return "claude";
+  if (process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX) return "codex";
+  return null;
 }
 
 function parseFlags(args) {
@@ -129,7 +156,7 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v5.0.1 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v5.0.4 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
 
 可用命令：
   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
@@ -141,9 +168,9 @@ function usage() {
   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut]
   sandbox-clean <sandboxDir>
   gate-tamper-diff --repo <repoRoot> [--base <ref>] [--head <ref> | --working-tree]
-  resolve-model [--harness pi|agy|t3] [--surface invoke_subagent|swarm] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
+  resolve-model [--harness pi|t3|agy|codex|claude] [--surface delegate_task|invoke_subagent|swarm|zee_subagent] --role <role> [--config <path>] [--allow-standalone] [--ignore-cooldown]
   provider-health [--clear [modelKey]]
-  doctor [--repo <path>]`);
+  doctor [--repo <path>] [--harness <h>]`);
 }
 
 function sanitizeSlug(s) {
@@ -873,60 +900,148 @@ function cmdGateTamperDiff(args) {
   }, null, 2));
 }
 
-function normalizeModelForAgy(modelHint, tier, effort, surface) {
+function normalizeModelForAgy(modelHint, tier, effort, surface, explicitSpec) {
   const low = String(modelHint || "").trim().toLowerCase();
   const eff = effort && effort !== "max" ? effort : "high";
   if (surface === "swarm") {
+    if (typeof explicitSpec?.swarmModel === "string" && explicitSpec.swarmModel.trim()) {
+      return explicitSpec.swarmModel.trim();
+    }
     if (low && /-(low|medium|high|xhigh)$/.test(low)) return low;
     if (low.includes("argon")) return `${low}-${eff === "xhigh" ? "high" : eff}`;
     if (low && low !== "inherit" && low !== "auto") return `${low}-${eff}`;
     return "inherit";
   }
-  if (low === "inherit" || low === "auto" || low.includes("argon") || low.includes("orchestrator")) return "inherit";
-  if (low.includes("flash-lite") || low.includes("flash_lite") || tier === "lite") return "flash_lite";
-  if (low.includes("hydrogen") || low.includes("flash") || low.includes("haiku") || low.includes("swe-") || tier === "fast") return "flash";
-  if (low.includes("neon") || low.includes("pro") || low.includes("opus") || tier === "pro") return "pro";
+  if (explicitSpec?.model === "inherit") return "inherit";
+  if (
+    low === "inherit" ||
+    low === "auto" ||
+    low.includes("gemini-4") ||
+    low.includes("neon") ||
+    low.includes("hydrogen") ||
+    low.includes("carbon") ||
+    low.includes("argon") ||
+    low.includes("orchestrator")
+  ) {
+    return "inherit";
+  }
+  if (low === "flash_lite" || low === "flash-lite" || tier === "lite") return "flash_lite";
+  if (low === "flash" || low.includes("gemini-3.8")) return "flash";
+  if (low === "pro") return "pro";
   return "inherit";
 }
 
-function getSlotFromConfig(cfg, rawRole) {
-  const r = String(rawRole || "workhorse").trim().toLowerCase();
-  // Schema v3: cfg.slots { fast, workhorse, adversary }
+function getHarnessSection(cfg, harness) {
+  if (!cfg?.harnesses || typeof cfg.harnesses !== "object") return null;
+  for (const k of getHarnessKeys(harness)) {
+    if (cfg.harnesses[k] && typeof cfg.harnesses[k] === "object") {
+      return { key: k, section: cfg.harnesses[k] };
+    }
+  }
+  return null;
+}
+
+function specHasExplicitBindings(spec) {
+  return Boolean(spec?.bindings && typeof spec.bindings === "object" && Object.keys(spec.bindings).length > 0);
+}
+
+function canonicalDisplayHarness(raw) {
+  const norm = normalizeHarnessName(raw);
+  return norm === "antigravity" ? "agy" : norm;
+}
+
+function listConfiguredHarnesses(cfg) {
+  const out = new Set();
+  if (cfg?.harnesses && typeof cfg.harnesses === "object") {
+    for (const [k, v] of Object.entries(cfg.harnesses)) {
+      if (v && typeof v === "object" && v.slots && typeof v.slots === "object" && Object.keys(v.slots).length > 0) {
+        out.add(canonicalDisplayHarness(k));
+      }
+    }
+  }
   if (cfg?.slots && typeof cfg.slots === "object") {
-    const mapped = mapRoleToSlotName(r);
-    if (cfg.slots[mapped]) return { slotName: mapped, slot: cfg.slots[mapped] };
+    for (const slot of Object.values(cfg.slots)) {
+      const pref = slot?.prefer || slot;
+      if (pref?.bindings && typeof pref.bindings === "object") {
+        for (const k of Object.keys(pref.bindings)) out.add(canonicalDisplayHarness(k));
+      }
+    }
+  }
+  return [...out].sort();
+}
+
+function getSlotFromConfig(cfg, rawRole, harness) {
+  const r = String(rawRole || "workhorse").trim().toLowerCase();
+  const mapped = mapRoleToSlotName(r);
+  const hs = harness ? getHarnessSection(cfg, harness) : null;
+  if (hs?.section?.slots && typeof hs.section.slots === "object") {
+    if (hs.section.slots[mapped]) {
+      return { slotName: mapped, slot: hs.section.slots[mapped], source: "harnesses", harnessSectionKey: hs.key };
+    }
+  }
+  // Legacy Schema v3: cfg.slots { fast, workhorse, adversary }
+  if (cfg?.slots && typeof cfg.slots === "object") {
+    if (cfg.slots[mapped]) {
+      const pref = cfg.slots[mapped]?.prefer || cfg.slots[mapped];
+      if (harness && specHasExplicitBindings(pref) && !getHarnessKeys(harness).some((k) => Boolean(pref.bindings[k]))) {
+        return { slotName: mapped, slot: null, missingForHarness: true, source: "slots" };
+      }
+      return { slotName: mapped, slot: cfg.slots[mapped], source: "slots" };
+    }
   }
   // Legacy Schema v2: cfg.roles
   const roles = cfg?.roles || {};
-  if (r === "scout" || r === "fast") return { slotName: "scout", slot: roles.scout };
-  if (r === "architect" || r === "architect.primary") return { slotName: "architect.primary", slot: roles.architect?.primary };
-  if (r === "judge") return { slotName: "judge", slot: roles.judge || (Array.isArray(roles.reviewers) ? roles.reviewers[0] : null) };
-  if (r === "ui" || r === "ui.standard") return { slotName: "ui.standard", slot: roles.ui?.standard };
-  if (r === "ui.heavy") return { slotName: "ui.heavy", slot: roles.ui?.heavy };
-  if (r === "coder" || r === "coder.standard" || r === "workhorse") return { slotName: "coder.standard", slot: roles.coder?.standard };
-  if (r === "coder.heavy") return { slotName: "coder.heavy", slot: roles.coder?.heavy };
-  if (r === "verifier") return { slotName: "verifier", slot: roles.verifier };
-  if (r === "reviewer" || r === "reviewer.0" || r === "adversary") return { slotName: "reviewer.0", slot: Array.isArray(roles.reviewers) ? roles.reviewers[0] : null };
+  if (r === "scout" || r === "fast") return { slotName: "scout", slot: roles.scout, source: "roles" };
+  if (r === "architect" || r === "architect.primary") return { slotName: "architect.primary", slot: roles.architect?.primary, source: "roles" };
+  if (r === "judge") return { slotName: "judge", slot: roles.judge || (Array.isArray(roles.reviewers) ? roles.reviewers[0] : null), source: "roles" };
+  if (r === "ui" || r === "ui.standard") return { slotName: "ui.standard", slot: roles.ui?.standard, source: "roles" };
+  if (r === "ui.heavy") return { slotName: "ui.heavy", slot: roles.ui?.heavy, source: "roles" };
+  if (r === "coder" || r === "coder.standard" || r === "workhorse") return { slotName: "coder.standard", slot: roles.coder?.standard, source: "roles" };
+  if (r === "coder.heavy") return { slotName: "coder.heavy", slot: roles.coder?.heavy, source: "roles" };
+  if (r === "verifier") return { slotName: "verifier", slot: roles.verifier, source: "roles" };
+  if (r === "reviewer" || r === "reviewer.0" || r === "adversary") return { slotName: "reviewer.0", slot: Array.isArray(roles.reviewers) ? roles.reviewers[0] : null, source: "roles" };
   if (r.startsWith("reviewer.")) {
     const idx = Number(r.split(".")[1]);
-    return { slotName: r, slot: Array.isArray(roles.reviewers) ? roles.reviewers[idx] || null : null };
+    return { slotName: r, slot: Array.isArray(roles.reviewers) ? roles.reviewers[idx] || null : null, source: "roles" };
+  }
+  if (!hs && !cfg?.slots && !cfg?.roles && cfg?.harnesses && Object.keys(cfg.harnesses).length > 0) {
+    return { slotName: mapped, slot: null, missingForHarness: true, source: "harnesses" };
   }
   return { slotName: r, slot: null };
 }
 
 function extractBindingPair(spec, harness) {
   if (!spec || typeof spec !== "object") return null;
-  const h = harness === "antigravity" ? "agy" : harness;
-  if (spec.bindings?.[harness]) return spec.bindings[harness];
-  if (spec.bindings?.[h]) return spec.bindings[h];
-  if (spec.providerInstanceId && spec.model) return { providerInstanceId: spec.providerInstanceId, model: spec.model };
+  for (const k of getHarnessKeys(harness)) {
+    if (spec.bindings?.[k] && typeof spec.bindings[k] === "object") {
+      return { ...spec.bindings[k] };
+    }
+  }
+  if (specHasExplicitBindings(spec)) return null;
+  if (spec.providerInstanceId || spec.model || spec.swarmModel) {
+    return {
+      ...(spec.providerInstanceId ? { providerInstanceId: spec.providerInstanceId } : {}),
+      ...(spec.model ? { model: spec.model } : {}),
+      ...(spec.swarmModel ? { swarmModel: spec.swarmModel } : {}),
+      ...(spec.options && typeof spec.options === "object" ? { options: spec.options } : {}),
+      ...(spec.family ? { family: spec.family } : {}),
+    };
+  }
   return null;
 }
 
 function cmdResolveModel(args) {
   const { flags } = parseFlags(args);
-  const harness = String(flags.harness || detectActiveHarness()).toLowerCase();
-  const surface = String(flags.surface || "invoke_subagent").toLowerCase();
+  const harness = normalizeHarnessName(flags.harness || detectActiveHarness());
+  const defaultSurface =
+    harness === "t3"
+      ? "delegate_task"
+      : harness === "antigravity"
+        ? "invoke_subagent"
+        : harness === "pi"
+          ? "zee_subagent"
+          : "native";
+  const surface = String(flags.surface || defaultSurface).toLowerCase();
   const role = String(flags.role || "workhorse").toLowerCase();
   const configPath = typeof flags.config === "string" ? flags.config : process.env.ZEE_CONFIG_PATH?.trim() || DEFAULT_CONFIG;
   const allowStandalone = Boolean(flags["allow-standalone"]);
@@ -934,7 +1049,7 @@ function cmdResolveModel(args) {
 
   if (!fs.existsSync(configPath)) {
     if (allowStandalone) {
-      const isAgy = harness === "agy" || harness === "antigravity";
+      const isAgy = harness === "antigravity";
       console.log(JSON.stringify({ ok: true, standalone: true, configPath, resolved: { harness, surface, role, model: isAgy ? "inherit" : null, standalone: true } }, null, 2));
       return;
     }
@@ -946,8 +1061,28 @@ function cmdResolveModel(args) {
   try { cfg = JSON.parse(fs.readFileSync(configPath, "utf8")); }
   catch (e) { console.log(JSON.stringify({ ok: false, error: `配置文件解析失败：${e.message}`, configPath }, null, 2)); process.exit(1); }
 
-  const { slotName, slot } = getSlotFromConfig(cfg, role);
+  const { slotName, slot, missingForHarness, source } = getSlotFromConfig(cfg, role, harness);
   if (!slot) {
+    if (missingForHarness && allowStandalone) {
+      console.log(JSON.stringify({
+        ok: true,
+        standalone: true,
+        configPath,
+        reason: `配置中未定义当前宿主 (${harness}) 的模型绑定，已降级为单兵模式`,
+        resolved: { harness, surface, role, model: harness === "antigravity" ? "inherit" : null, standalone: true },
+      }, null, 2));
+      return;
+    }
+    if (missingForHarness) {
+      console.log(JSON.stringify({
+        ok: false,
+        error: `配置中未找到当前宿主 (${harness}) 的模型槽位（已有宿主：${listConfiguredHarnesses(cfg).join(", ") || "无"}），请运行 /zee-setup 或附加 --allow-standalone`,
+        configPath,
+        harness,
+        role,
+      }, null, 2));
+      process.exit(1);
+    }
     console.log(JSON.stringify({ ok: false, error: `配置中未定义角色槽位 "${role}"`, configPath, role }, null, 2));
     process.exit(1);
   }
@@ -958,12 +1093,13 @@ function cmdResolveModel(args) {
 
   if (!ignoreCooldown) {
     const pId = activeBinding?.providerInstanceId;
-    const mId = activeBinding?.model || activeSpec?.modelHint;
+    const mId = activeBinding?.model || activeSpec?.modelHint || activeSpec?.swarmModel;
     const cd = mId ? getModelCooldown(pId, mId) : { active: false };
     if (cd.active && slot?.backup) {
       const bSpec = slot.backup;
       const bBind = extractBindingPair(bSpec, harness) || extractBindingPair(slot, harness)?.backup;
-      const bCd = (bBind?.model || bSpec?.modelHint) ? getModelCooldown(bBind?.providerInstanceId, bBind?.model || bSpec?.modelHint) : { active: false };
+      const bModelId = bBind?.model || bSpec?.modelHint || bSpec?.swarmModel;
+      const bCd = bModelId ? getModelCooldown(bBind?.providerInstanceId, bModelId) : { active: false };
       if (!bCd.active) {
         cooldownFallback = { skippedKey: cd.key, reason: cd.entry?.reason || "cooldown", remainingSec: cd.remainingSec };
         activeSpec = bSpec;
@@ -973,36 +1109,64 @@ function cmdResolveModel(args) {
   }
 
   const effort = activeSpec?.effort || "medium";
-  const resolved =
-    harness === "agy" || harness === "antigravity"
-      ? {
-          harness: "antigravity",
-          surface,
-          role,
-          slot: slotName,
-          model: normalizeModelForAgy(activeBinding?.model || activeSpec?.modelHint, activeSpec?.tier, effort, surface),
-          effectiveEffort: effort,
-          binding: activeBinding,
-          fallbackOn429: "inherit",
-          ...(cooldownFallback ? { cooldownFallback } : {}),
-        }
-      : {
-          harness,
-          surface,
-          role,
-          slot: slotName,
-          modelHint: activeSpec?.modelHint || activeBinding?.model || null,
-          family: activeSpec?.family || extractModelFamily(activeBinding?.model || activeSpec?.modelHint || ""),
-          effort,
-          binding: activeBinding,
-          subagentArgs: {
-            ...(activeBinding?.providerInstanceId ? { provider: activeBinding.providerInstanceId } : {}),
-            ...(activeBinding?.model ? { model: activeBinding.model } : {}),
-            thinkingLevel: effort,
-          },
-          backup: slot?.backup || null,
-          ...(cooldownFallback ? { cooldownFallback } : {}),
-        };
+  const resolvedFamily =
+    source === "harnesses"
+      ? activeBinding?.family || activeSpec?.family || extractModelFamily(activeBinding?.model || activeSpec?.swarmModel || activeSpec?.modelHint || "")
+      : activeBinding?.family || extractModelFamily(activeBinding?.model || "") || activeSpec?.family || extractModelFamily(activeSpec?.modelHint || "");
+
+  let resolved;
+  if (harness === "antigravity") {
+    resolved = {
+      harness: "antigravity",
+      surface,
+      role,
+      slot: slotName,
+      model: normalizeModelForAgy(activeBinding?.model || activeSpec?.modelHint || activeSpec?.model, activeSpec?.tier, effort, surface, { ...activeSpec, ...(activeBinding || {}) }),
+      swarmModel: activeBinding?.swarmModel || activeSpec?.swarmModel || null,
+      family: resolvedFamily,
+      effectiveEffort: effort,
+      binding: activeBinding,
+      fallbackOn429: "inherit",
+      ...(cooldownFallback ? { cooldownFallback } : {}),
+    };
+  } else if (harness === "t3") {
+    const delegateTarget = {
+      ...(activeBinding?.providerInstanceId ? { providerInstanceId: activeBinding.providerInstanceId } : {}),
+      ...(activeBinding?.model ? { model: activeBinding.model } : {}),
+      ...(activeBinding?.options && typeof activeBinding.options === "object" ? { options: activeBinding.options } : {}),
+    };
+    resolved = {
+      harness: "t3",
+      surface,
+      role,
+      slot: slotName,
+      modelHint: activeSpec?.modelHint || activeBinding?.model || null,
+      family: resolvedFamily,
+      effort,
+      binding: activeBinding,
+      delegateTarget,
+      backup: slot?.backup || null,
+      ...(cooldownFallback ? { cooldownFallback } : {}),
+    };
+  } else {
+    resolved = {
+      harness,
+      surface,
+      role,
+      slot: slotName,
+      modelHint: activeSpec?.modelHint || activeBinding?.model || null,
+      family: resolvedFamily,
+      effort,
+      binding: activeBinding,
+      subagentArgs: {
+        ...(activeBinding?.providerInstanceId ? { provider: activeBinding.providerInstanceId } : {}),
+        ...(activeBinding?.model ? { model: activeBinding.model } : {}),
+        thinkingLevel: effort,
+      },
+      backup: slot?.backup || null,
+      ...(cooldownFallback ? { cooldownFallback } : {}),
+    };
+  }
 
   console.log(JSON.stringify({ ok: true, resolved }, null, 2));
 }
@@ -1018,31 +1182,98 @@ function cmdProviderHealth(args) {
   console.log(JSON.stringify({ ok: true, healthPath: resolveProviderHealthPath(), activeCount: cooldowns.length, cooldowns }, null, 2));
 }
 
+function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings) {
+  for (const sName of ["fast", "workhorse", "adversary"]) {
+    const s = slotsObj?.[sName];
+    const pref = s?.prefer;
+    const hasAnyBindingModel = Boolean(
+      pref?.bindings &&
+        typeof pref.bindings === "object" &&
+        Object.values(pref.bindings).some((b) => b && typeof b === "object" && (b.model || b.swarmModel)),
+    );
+    if (!pref?.modelHint && !pref?.model && !pref?.swarmModel && !hasAnyBindingModel) {
+      errors.push(`${label}.${sName}.prefer 缺失`);
+    }
+  }
+  const wf =
+    slotsObj?.workhorse?.prefer?.family ||
+    extractModelFamily(
+      slotsObj?.workhorse?.prefer?.model || slotsObj?.workhorse?.prefer?.modelHint || slotsObj?.workhorse?.prefer?.swarmModel || "",
+    );
+  const af =
+    slotsObj?.adversary?.prefer?.family ||
+    extractModelFamily(
+      slotsObj?.adversary?.prefer?.model || slotsObj?.adversary?.prefer?.modelHint || slotsObj?.adversary?.prefer?.swarmModel || "",
+    );
+  if (wf && af && wf === af) {
+    const msg = `${label}: workhorse (${wf}) 与 adversary (${af}) 属于同一模型家族`;
+    if (allowSingleFamily) warnings.push(`${msg}（已启用 singleFamily 单家族豁免）`);
+    else errors.push(`${msg}（非 singleFamily 模式必须为不同模型家族）`);
+  }
+}
+
 function cmdDoctor(args) {
   const { flags } = parseFlags(args);
+  const activeHarness = normalizeHarnessName(flags.harness || detectActiveHarness());
+  const runtimeProvider = detectRuntimeProvider();
   const configPath = typeof flags.config === "string" ? flags.config : process.env.ZEE_CONFIG_PATH?.trim() || DEFAULT_CONFIG;
   const targetRepo = typeof flags.repo === "string" && flags.repo.trim() ? path.resolve(flags.repo.trim()) : null;
 
   const errors = [];
   const warnings = [];
   let cfg = null;
+  let configuredHarnesses = [];
+  let activeHarnessConfigured = false;
+
   if (!fs.existsSync(configPath)) {
-    warnings.push(`未配置 ${configPath}（单兵模式可用 --allow-standalone；完整多模型请配置 fast/workhorse/adversary 3 槽位）`);
+    warnings.push(`未配置 ${configPath}（单兵模式可用 --allow-standalone；完整多模型请运行 /zee-setup 为 ${activeHarness} 配置 fast/workhorse/adversary 3 槽位）`);
   } else {
     try {
       cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      if (cfg.slots && typeof cfg.slots === "object") {
-        for (const sName of ["fast", "workhorse", "adversary"]) {
-          const s = cfg.slots[sName];
-          if (!s?.prefer?.modelHint && !s?.prefer?.bindings?.pi?.model) errors.push(`slots.${sName}.prefer 缺失`);
+      configuredHarnesses = listConfiguredHarnesses(cfg);
+      const hasHarnessesSlots = Boolean(
+        cfg.harnesses &&
+          typeof cfg.harnesses === "object" &&
+          Object.values(cfg.harnesses).some((h) => h && typeof h === "object" && h.slots && typeof h.slots === "object"),
+      );
+      if (hasHarnessesSlots) {
+        for (const [hKey, hCfg] of Object.entries(cfg.harnesses)) {
+          if (!hCfg || typeof hCfg !== "object" || !hCfg.slots || typeof hCfg.slots !== "object") continue;
+          const allowSingle = Boolean(hCfg.singleFamily) || hKey === "agy" || hKey === "antigravity";
+          validateSlotTable(hCfg.slots, `harnesses.${hKey}.slots`, allowSingle, errors, warnings);
         }
-        const wf = cfg.slots.workhorse?.prefer?.family || extractModelFamily(cfg.slots.workhorse?.prefer?.modelHint || "");
-        const af = cfg.slots.adversary?.prefer?.family || extractModelFamily(cfg.slots.adversary?.prefer?.modelHint || "");
-        if (wf && af && wf === af) errors.push(`workhorse (${wf}) 与 adversary (${af}) 必须属于不同模型家族`);
-      } else if (cfg.roles && typeof cfg.roles === "object") {
-        warnings.push("当前为 legacy v2 roles 配置，建议升级为 3 槽位 schema v3 (slots.fast / workhorse / adversary)");
-      } else {
-        errors.push("zee-config.json 缺少 slots (v3) 或 roles (v2)");
+      }
+      if (cfg.slots && typeof cfg.slots === "object") {
+        validateSlotTable(cfg.slots, "slots", Boolean(cfg.singleFamily), errors, warnings);
+      }
+      if (!hasHarnessesSlots && !(cfg.slots && typeof cfg.slots === "object")) {
+        if (cfg.roles && typeof cfg.roles === "object") {
+          warnings.push("当前为 legacy v2 roles 配置，建议升级为按宿主隔离的 3 槽位 schema v3 (harnesses.<h>.slots)");
+        } else {
+          errors.push("zee-config.json 缺少 harnesses / slots (v3) 或 roles (v2)");
+        }
+      }
+
+      const hs = getHarnessSection(cfg, activeHarness);
+      activeHarnessConfigured = Boolean(hs?.section?.slots && typeof hs.section.slots === "object" && Object.keys(hs.section.slots).length > 0);
+      if (!activeHarnessConfigured && cfg.slots && typeof cfg.slots === "object") {
+        const hKeys = getHarnessKeys(activeHarness);
+        const slotEntries = ["fast", "workhorse", "adversary"].map((k) => cfg.slots[k]).filter(Boolean);
+        if (slotEntries.length > 0) {
+          activeHarnessConfigured = slotEntries.every((s) => {
+            const pref = s?.prefer || s;
+            if (specHasExplicitBindings(pref)) return hKeys.some((k) => Boolean(pref.bindings[k]));
+            return Boolean(pref?.modelHint || pref?.model || pref?.providerInstanceId);
+          });
+        }
+      }
+      if (!activeHarnessConfigured && cfg.roles && typeof cfg.roles === "object") {
+        activeHarnessConfigured = true;
+      }
+      if (!activeHarnessConfigured) {
+        warnings.push(
+          `当前宿主 (${activeHarness}) 尚未配置专属模型槽位（已有宿主：${configuredHarnesses.join(", ") || "无"}），请运行 /zee-setup 为当前宿主分配模型，或使用 --allow-standalone 单兵模式。`,
+        );
       }
     } catch (e) {
       errors.push(`配置文件解析失败: ${e.message}`);
@@ -1101,9 +1332,12 @@ function cmdDoctor(args) {
   const ok = errors.length === 0 && busWritable;
   console.log(JSON.stringify({
     ok,
-    activeHarness: detectActiveHarness(),
+    activeHarness,
+    runtimeProvider,
     configPath,
     configExists: Boolean(cfg),
+    configuredHarnesses,
+    activeHarnessConfigured,
     busWritable,
     runsRoot: RUNS_ROOT,
     errors,

@@ -1,11 +1,11 @@
-# Zee v5.0.3
+# Zee v5.0.4
 
 **个人主厨 + 可过夜（Personal Head Chef + Overnight Ready）** — 面向 Pi CLI、Antigravity (AGY) 与 Codex / Claude Code 的极简多模型工程工作流。
 
 ## 核心理念
 
 1. **三档路由，绝不为了派人而派人**：小改直做（0 子代理）；常规开发按需拆单并实时实测；0→1 与过夜任务才启用多线 `worktree` 隔离、跨家族对抗与自动熔断。
-2. **三槽位配置，支持单兵兜底**：在 `~/.agents/zee-config.json` 配置 `fast`、`workhorse`、`adversary`（不同模型家族）三槽位；未配文件时带 `--allow-standalone` 自动单模型降级。
+2. **三槽位配置，单宿主严格隔离**：在 `~/.agents/zee-config.json` 按宿主分区 `harnesses.<h>.slots` 配置 `fast`、`workhorse`、`adversary`（不同模型家族）；各宿主互不串读，未配当前宿主时带 `--allow-standalone` 自动单模型降级。
 3. **不撒谎的物理门禁**：保留并发安全状态锁、`log-decision` 决策账本、破坏性命令拦截、只读角色越权回滚、`.agents/verify-ctl.mjs` 实跑闭环，以及 `gate-tamper-diff`（监控 `test/`/`tests/`/`.agents/verify-ctl*`/`.agents/zee.project.json`、抑制注解、硬编码密钥与 `\uFFFD` 乱码）。
 
 ## 快捷命令

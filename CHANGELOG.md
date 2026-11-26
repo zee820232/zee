@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.0.4] - 2026-11-26
+
+### Fixed & Improved
+- **彻底修复 `/zee-setup` 与 `zee-tool.mjs` 跨宿主串台，实现严格单宿主隔离**：
+  - `detectActiveHarness()` 优先识别 `T3CODE_THREAD_ID` / `T3_ACP_MCP_*` 返回 `"t3"`（不再与独立 AGY CLI 混淆），并新增 `runtimeProvider` 标识当前宿主内的运行提供方；
+  - `skills/zee-setup/SKILL.md` 先查 `doctor.activeHarness` 再按宿主单线分支：`t3` 仅调一次 `orchestrator_capabilities`（0 条 shell 探活、0 次跑去 `pi --list-models`），`antigravity` 直接按 Gemini 4 代际锁设 `inherit` + `swarmModel`，`pi` 仅探活自身头部候选并只写入 `harnesses.<activeHarness>.slots`（完整保留其他宿主分区）；
+  - `zee-tool.mjs` 新增 `harnesses.<h>.slots` 多宿主共存Schema，并修复 legacy 仅含 `bindings.pi` 的 `slots` 串读到 `t3`/`agy` 的漏洞；为 `t3` 输出 `delegateTarget`（含 `providerInstanceId` / `model` / `options`），同时修复 `normalizeModelForAgy` 将 `gemini-4-hydrogen` 等误映射为 `flash`/`pro` 的代际锁隐患；
+  - `provider-health.mjs` 与 `pi-extension/index.ts` 优先支持 `harnesses.pi.slots` 且不串读 `harnesses.t3` / `harnesses.agy`。
+
 ## [5.0.3] - 2026-11-26
 
 ### Added

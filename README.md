@@ -1,4 +1,4 @@
-# Zee v5.0.2
+# Zee v5.0.3
 
 **个人主厨 + 可过夜（Personal Head Chef + Overnight Ready）** — 面向 Pi CLI、Antigravity (AGY) 与 Codex / Claude Code 的极简多模型工程工作流。
 
@@ -16,6 +16,7 @@
 - `/zee-review` — 隔离沙盒 + 跨家族 `adversary` 只读对抗审查
 - `/zee-night` — 过夜无人值守循环（两败停损 + `decisions.tsv` + 晨报）
 - `/zee-retro` — 读取总线与 Git 历史输出真实运行复盘
+- `/zee-setup` — 一键枚举并探活可用模型，分配 `fast` / `workhorse` / `adversary` 三槽位写入 `zee-config.json`
 - `/zee-mode`（Pi）— 手动切换 `auto | strict | off | status` 状态栏模式
 
 ## 安装与自检

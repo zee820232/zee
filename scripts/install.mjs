@@ -14,7 +14,7 @@ const HOME = os.homedir();
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GITHUB_HTTPS = "https://github.com/zee820232/zee";
 const PI_GIT_SOURCE = "git:github.com/zee820232/zee";
-const SKILL_NAMES = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro"];
+const SKILL_NAMES = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro", "zee-setup"];
 
 function isEphemeralSource(forceRemote) {
   if (forceRemote) return true;
@@ -58,7 +58,7 @@ function cleanDups(roots, dryRun) {
 }
 
 function installPi(dryRun, useRemote) {
-  console.log("\n=== 安装目标：Pi 个人主厨扩展包（6 技能 + /zee-mode + 写保护锁 + zee_subagent） ===");
+  console.log("\n=== 安装目标：Pi 个人主厨扩展包（7 技能 + /zee-mode + 写保护锁 + zee_subagent） ===");
   if (!hasBinary("pi")) {
     console.error(`未检测到 pi 命令。请手动执行：pi install ${PI_GIT_SOURCE}`);
     process.exitCode = 1;
@@ -66,7 +66,7 @@ function installPi(dryRun, useRemote) {
   }
   cleanDups([path.join(HOME, ".pi", "agent", "skills"), path.join(HOME, ".agents", "skills")], dryRun);
   runCmd("pi", ["install", useRemote ? PI_GIT_SOURCE : REPO_ROOT], dryRun);
-  console.log("✅ Pi 安装完成！可用命令：/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-mode");
+  console.log("✅ Pi 安装完成！可用命令：/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup、/zee-mode");
 }
 
 function installAgy(dryRun, useRemote) {
@@ -88,7 +88,7 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee v5.0.2 个人主厨工作流安装器
+  console.log(`zee v5.0.3 个人主厨工作流安装器
 
 用法：
   npx github:zee820232/zee --target <pi|agy|skills|both> [--dry-run] [--remote] [--doctor]`);

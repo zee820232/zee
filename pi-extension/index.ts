@@ -422,7 +422,7 @@ function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string 
 		mode === "strict"
 			? `- Mode: **STRICT**（非闲聊工程任务须先加载 \`${ZEE_SKILL_DIR}/SKILL.md\`）`
 			: `- Mode: **AUTO**（简单问答直答；非平凡开发/修 Bug/重构/过夜加载 \`${ZEE_SKILL_DIR}/SKILL.md\`）`,
-		`- **Skills Root**: \`${SKILLS_ROOT}\`（6 个核心技能：\`zee\`, \`zee-plan\`, \`zee-verify\`, \`zee-review\`, \`zee-night\`, \`zee-retro\`）`,
+		`- **Skills Root**: \`${SKILLS_ROOT}\`（7 个核心技能：\`zee\`, \`zee-plan\`, \`zee-verify\`, \`zee-review\`, \`zee-night\`, \`zee-retro\`, \`zee-setup\`）`,
 		"- **Subagents**: 并发/隔离工作树派发统一调用 `zee_subagent`（传递 `role`, `provider`, `model`, `thinkingLevel`, `worktree`, `authorFamily`）。",
 	];
 	if (gate === "plan") lines.push("- **ACTIVE WRITE LOCK (`plan`)**: 禁止写业务源码，仅允许写计划文档/总线/沙盒。");
@@ -643,7 +643,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			} else if (/^\/(?:skill:)?zee-review\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee\s+review\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee-verify\s+run\b/i.test(promptTrimmed)) {
 				setGate("review", ctx);
 			} else if (
-				/^\/(?:skill:)?zee(?:-(?:night|retro|verify))?\b/i.test(promptTrimmed) ||
+				/^\/(?:skill:)?zee(?:-(?:night|retro|verify|setup))?\b/i.test(promptTrimmed) ||
 				/^(解锁|解除锁定|开始写代码|开始实现|执行计划)\b/.test(promptTrimmed)
 			) {
 				const subMatch = promptTrimmed.match(/^\/(?:skill:)?zee\s+(.+)$/i);
@@ -765,6 +765,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 	]);
 	registerSkillCmd("zee-night", "个人主厨无人值守过夜模式（本地隔离分支 + 3 分钟中文晨报）", "none");
 	registerSkillCmd("zee-retro", "复盘并固化进环境（架构/Lint/测试/删死规则 + Bite Proof）", "none");
+	registerSkillCmd("zee-setup", "探活可用模型并配置 fast / workhorse / adversary 三槽位（Schema v3）", "none");
 
 	// 3. zee_subagent 工具
 	pi.registerTool({

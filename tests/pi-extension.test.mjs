@@ -144,10 +144,10 @@ function createMockPi({ cwd = REPO_ROOT, hasUI = true, mode = "interactive" } = 
   return { pi, ctx, commands, shortcuts, tools, entries, messages, flags, statuses, notifications, emit, getFooterCalls: () => footerCalls };
 }
 
-test("扩展仅注册 7 个干净命令、1 个工具、0 快捷键且不接管 footer", () => {
+test("扩展仅注册 8 个干净命令、1 个工具、0 快捷键且不接管 footer", () => {
   const m = createMockPi();
   zeeExtension(m.pi);
-  assert.deepEqual([...m.commands.keys()].sort(), ["zee", "zee-mode", "zee-night", "zee-plan", "zee-retro", "zee-review", "zee-verify"]);
+  assert.deepEqual([...m.commands.keys()].sort(), ["zee", "zee-mode", "zee-night", "zee-plan", "zee-retro", "zee-review", "zee-setup", "zee-verify"]);
   assert.equal(m.shortcuts.size, 0);
   assert.deepEqual([...m.tools.keys()], ["zee_subagent"]);
   assert.equal(m.getFooterCalls(), 0);

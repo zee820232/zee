@@ -1,9 +1,9 @@
 {
   "name": "zee-workflow",
-  "version": "5.0.2",
+  "version": "5.0.3",
   "private": true,
   "type": "module",
-  "description": "zee v5.0.2 个人主厨 + 可过夜工程工作流（Pi Package + Antigravity Plugin + Agent Skills 三形态；6 把核心尖刀、7 份按需剧本、3 槽位模型配置、429 熔断切备、隔离分支过夜与实机验证闭环）",
+  "description": "zee v5.0.3 个人主厨 + 可过夜工程工作流（Pi Package + Antigravity Plugin + Agent Skills 三形态；7 把核心尖刀含 /zee-setup、7 份按需剧本、3 槽位模型配置、429 熔断切备、隔离分支过夜与实机验证闭环）",
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   },

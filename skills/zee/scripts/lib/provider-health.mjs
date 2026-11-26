@@ -1,7 +1,7 @@
 /**
- * zee 跨会话上游故障（HTTP 429 配额 / 5xx 断连）熔断缓存与健康切备（v5.0.0）
+ * zee 跨会话上游故障（HTTP 429 配额 / 5xx 断连）熔断缓存与健康切备（v5.2.0）
  *
- * 兼容 schema v3 (cfg.slots: fast / workhorse / adversary) 与 legacy schema v2 (cfg.roles)。
+ * 兼容 schema v3 (harnesses.pi.slots / cfg.slots: fast / workhorse / adversary) 与 legacy schema v2 (cfg.roles)。
  */
 
 import fs from "node:fs";
@@ -163,6 +163,11 @@ export function recordModelCooldown(provider, model, meta = {}, filePath, now = 
   });
 }
 
+function globToRegex(pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
 export function clearModelCooldown(targetKey, filePath) {
   const healthPath = resolveProviderHealthPath(filePath);
   if (!fs.existsSync(healthPath)) return { clearedCount: 0, remainingCount: 0, healthPath };
@@ -173,16 +178,20 @@ export function clearModelCooldown(targetKey, filePath) {
     if (keys.length === 0) return { clearedCount: 0, remainingCount: 0, healthPath };
 
     const query = typeof targetKey === "string" ? targetKey.trim().toLowerCase() : "";
-    if (!query) {
+    if (!query || query === "*") {
       writeHealthAtomic(healthPath, { version: 1, models: {} });
       return { clearedCount: keys.length, remainingCount: 0, healthPath };
     }
 
+    const wildcardRe = query.includes("*") ? globToRegex(query) : null;
     let clearedCount = 0;
     const nextModels = {};
     for (const k of keys) {
       const kLow = k.toLowerCase();
-      if (kLow === query || kLow.endsWith(`/${query}`) || kLow.includes(query)) clearedCount += 1;
+      const matched = wildcardRe
+        ? wildcardRe.test(kLow)
+        : kLow === query || kLow.endsWith(`/${query}`);
+      if (matched) clearedCount += 1;
       else nextModels[k] = raw.models[k];
     }
     if (clearedCount > 0) writeHealthAtomic(healthPath, { version: 1, models: nextModels });
@@ -212,22 +221,47 @@ export function listActiveCooldowns(now = Date.now(), filePath) {
     .sort((a, b) => b.cooldownUntil - a.cooldownUntil);
 }
 
+function hasExplicitNonPiBindingsOnly(obj) {
+  return Boolean(
+    obj?.bindings &&
+      typeof obj.bindings === "object" &&
+      Object.keys(obj.bindings).length > 0 &&
+      !obj.bindings.pi,
+  );
+}
+
 function collectSlotPiCandidates(slotObj, slotLabel, out) {
   if (!slotObj || typeof slotObj !== "object") return;
-  const pushPair = (b, label) => {
+  const pushPair = (b, label, fallbackFamily = "") => {
     if (!b || typeof b !== "object") return;
-    const p = typeof b.providerInstanceId === "string" ? b.providerInstanceId.trim() : typeof b.provider === "string" ? b.provider.trim() : "";
+    if (hasExplicitNonPiBindingsOnly(b)) return;
+    const fam = typeof b.family === "string" && b.family.trim() ? b.family.trim().toLowerCase() : fallbackFamily;
+    if (b.bindings?.pi) {
+      pushPair(b.bindings.pi, label, fam);
+      return;
+    }
+    const p =
+      typeof b.providerInstanceId === "string"
+        ? b.providerInstanceId.trim()
+        : typeof b.provider === "string"
+          ? b.provider.trim()
+          : "";
     const m = typeof b.model === "string" ? b.model.trim() : "";
-    if (p && m) out.push({ provider: p, model: m, slotLabel: label });
-    if (b.prefer) pushPair(b.prefer, `${label}.prefer`);
-    if (b.backup) pushPair(b.backup, `${label}.backup`);
+    if (p && m) out.push({ provider: p, model: m, family: fam || "", slotLabel: label });
+    if (b.prefer) pushPair(b.prefer, `${label}.prefer`, fam);
+    if (b.backup) pushPair(b.backup, `${label}.backup`, fam);
   };
 
-  if (slotObj.bindings?.pi) pushPair(slotObj.bindings.pi, slotLabel);
-  if (slotObj.prefer?.bindings?.pi) pushPair(slotObj.prefer.bindings.pi, `${slotLabel}.prefer`);
-  if (slotObj.prefer?.providerInstanceId && slotObj.prefer?.model) pushPair(slotObj.prefer, `${slotLabel}.prefer`);
-  if (slotObj.backup?.bindings?.pi) pushPair(slotObj.backup.bindings.pi, `${slotLabel}.backup`);
-  if (slotObj.backup?.providerInstanceId && slotObj.backup?.model) pushPair(slotObj.backup, `${slotLabel}.backup`);
+  if (slotObj.bindings?.pi) {
+    pushPair(slotObj.bindings.pi, slotLabel, typeof slotObj.family === "string" ? slotObj.family.trim().toLowerCase() : "");
+  } else if (!hasExplicitNonPiBindingsOnly(slotObj)) {
+    const slotFam = typeof slotObj.family === "string" ? slotObj.family.trim().toLowerCase() : "";
+    if (slotObj.prefer) pushPair(slotObj.prefer, `${slotLabel}.prefer`, slotFam);
+    if (slotObj.backup) pushPair(slotObj.backup, `${slotLabel}.backup`, slotFam);
+    if (!slotObj.prefer && !slotObj.backup && (slotObj.providerInstanceId || slotObj.provider) && slotObj.model) {
+      pushPair(slotObj, slotLabel, slotFam);
+    }
+  }
 }
 
 export function mapRoleToSlotName(role) {
@@ -235,6 +269,22 @@ export function mapRoleToSlotName(role) {
   if (r === "fast" || r === "scout") return "fast";
   if (r === "adversary" || r === "reviewer" || r === "judge" || r.startsWith("reviewer.")) return "adversary";
   return "workhorse";
+}
+
+export function isPiSingleFamilyConfig(configPath) {
+  const cfgPath =
+    typeof configPath === "string" && configPath.trim()
+      ? path.resolve(configPath.trim())
+      : process.env.ZEE_CONFIG_PATH?.trim()
+        ? path.resolve(process.env.ZEE_CONFIG_PATH.trim())
+        : path.join(os.homedir(), ".agents", "zee-config.json");
+  if (!fs.existsSync(cfgPath)) return false;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    return Boolean(cfg?.harnesses?.pi?.singleFamily || cfg?.singleFamily);
+  } catch {
+    return false;
+  }
 }
 
 export function findHealthyPiFallback({
@@ -262,6 +312,8 @@ export function findHealthyPiFallback({
   }
 
   const r = String(role || "").trim().toLowerCase();
+  const targetSlot = mapRoleToSlotName(r);
+  const allowSingleFamily = Boolean(cfg?.harnesses?.pi?.singleFamily || cfg?.singleFamily);
   const candidates = [];
 
   // Schema v3: 优先读取 harnesses.pi.slots，再兼容 legacy cfg.slots { fast, workhorse, adversary }
@@ -273,21 +325,21 @@ export function findHealthyPiFallback({
     piSlotSources.push({ prefix: "slots", slots: cfg.slots });
   }
   for (const { prefix, slots } of piSlotSources) {
-    const targetSlot = mapRoleToSlotName(r);
     if (slots[targetSlot]) collectSlotPiCandidates(slots[targetSlot], `${prefix}.${targetSlot}`, candidates);
     if (targetSlot === "adversary") {
-      // 若主审槽位不可用或与 authorFamily 冲突，顺位考虑其他槽位中的异构模型
       if (slots.workhorse) collectSlotPiCandidates(slots.workhorse, `${prefix}.workhorse`, candidates);
       if (slots.fast) collectSlotPiCandidates(slots.fast, `${prefix}.fast`, candidates);
     } else if (targetSlot === "workhorse") {
       if (slots.adversary) collectSlotPiCandidates(slots.adversary, `${prefix}.adversary`, candidates);
+    } else if (targetSlot === "fast") {
+      if (slots.workhorse) collectSlotPiCandidates(slots.workhorse, `${prefix}.workhorse`, candidates);
     }
   }
 
   // Legacy Schema v2 compat: cfg.roles
   const roles = cfg?.roles;
   if (roles && typeof roles === "object") {
-    if (r === "reviewer") {
+    if (r === "reviewer" || r === "adversary" || r.startsWith("reviewer.")) {
       if (Array.isArray(roles.reviewers)) roles.reviewers.forEach((rev, i) => collectSlotPiCandidates(rev, `reviewers[${i}]`, candidates));
     } else if (r === "judge") {
       if (Array.isArray(roles.judge)) roles.judge.forEach((j, i) => collectSlotPiCandidates(j, `judge[${i}]`, candidates));
@@ -308,6 +360,7 @@ export function findHealthyPiFallback({
   const failedKey = makeModelHealthKey(failedProvider, failedModel);
   const failedModelKey = makeModelHealthKey(undefined, failedModel);
   const authFam = authorFamily ? extractModelFamily(authorFamily) : "";
+  const needsCrossFamily = targetSlot === "adversary";
   const seen = new Set();
 
   for (const cand of candidates) {
@@ -318,8 +371,8 @@ export function findHealthyPiFallback({
     if (candKey === failedKey) continue;
     if (!failedProvider && failedModelKey && cand.model.trim().toLowerCase() === failedModelKey) continue;
 
-    const fam = extractModelFamily(cand.model);
-    if ((r === "reviewer" || r === "judge") && authFam && fam && fam === authFam) continue;
+    const fam = cand.family ? extractModelFamily(cand.family) || cand.family : extractModelFamily(cand.model);
+    if (needsCrossFamily && !allowSingleFamily && authFam && fam && fam === authFam) continue;
 
     if (getModelCooldown(cand.provider, cand.model, now, healthPath).active) continue;
     return { provider: cand.provider, model: cand.model, family: fam, slotLabel: cand.slotLabel };

@@ -88,7 +88,7 @@ function installUniversalSkills(dryRun) {
 }
 
 function printHelp() {
-  console.log(`zee v5.0.3 个人主厨工作流安装器
+  console.log(`zee v5.0.4 个人主厨工作流安装器
 
 用法：
   npx github:zee820232/zee --target <pi|agy|skills|both> [--dry-run] [--remote] [--doctor]`);

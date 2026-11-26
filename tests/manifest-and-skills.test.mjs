@@ -10,16 +10,16 @@ const EXPECTED_SKILLS = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-nig
 const EXPECTED_PLAYBOOKS = ["understand.md", "plan.md", "feature.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md"];
 const EXPECTED_ROLES = ["scout.md", "architect.md", "ui.md", "coder.md", "verifier.md", "reviewer.md"];
 
-test("v5.0.3 清单文件与包元数据符合精简规范", () => {
+test("v5.0.4 清单文件与包元数据符合精简规范", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.version, "5.0.3");
+  assert.equal(pkg.version, "5.0.4");
   assert.deepEqual(pkg.pi?.extensions, ["./pi-extension/index.ts"]);
   assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills 以免与 /skill:zee* 冲突");
   assert.equal(pkg.peerDependencies?.["@earendil-works/pi-tui"], undefined, "不应保留 pi-tui 依赖");
 
   const plugin = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, ".antigravity-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.name, "zee");
-  assert.equal(plugin.version, "5.0.3");
+  assert.equal(plugin.version, "5.0.4");
 
   const hooks = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "hooks.json"), "utf8"));
   const cfg = hooks["zee-lifecycle-guard"];
@@ -77,6 +77,11 @@ test("skills/zee 体积控制在 <= 4KB，剧本/原则/角色卡契约干净无
   assert.ok(mainSkillStat.size <= 4096, `skills/zee/SKILL.md 体积应 <= 4096B，实际 ${mainSkillStat.size}B`);
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "skills", "zee", "principles.md")), true);
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "skills", "zee", "worker.md")), true);
+
+  const setupSkill = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee-setup", "SKILL.md"), "utf8");
+  assert.match(setupSkill, /activeHarness/);
+  assert.match(setupSkill, /harnesses\./);
+  assert.match(setupSkill, /activeHarness !== "pi"[\s\S]*严禁[\s\S]*pi --list-models/);
 
   const playbooksDir = path.join(REPO_ROOT, "skills", "zee", "playbooks");
   const actualPlaybooks = fs.readdirSync(playbooksDir).sort();

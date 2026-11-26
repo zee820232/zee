@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { RUNS_ROOT } from "../skills/zee/scripts/lib/guard-core.mjs";
-import { clearModelCooldown, recordModelCooldown } from "../skills/zee/scripts/lib/provider-health.mjs";
+import { clearModelCooldown, findHealthyPiFallback, recordModelCooldown } from "../skills/zee/scripts/lib/provider-health.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -386,6 +386,59 @@ test("zee_subagent 拦截同家族自审并在无备胎时直接拒发冷却模�
   } finally {
     if (prevCfg === undefined) delete process.env.ZEE_CONFIG_PATH; else process.env.ZEE_CONFIG_PATH = prevCfg;
     if (prevHealth === undefined) delete process.env.ZEE_PROVIDER_HEALTH_PATH; else process.env.ZEE_PROVIDER_HEALTH_PATH = prevHealth;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("resolvePiProviderModel 与 findHealthyPiFallback 支持 harnesses.pi.slots 且隔离 harnesses.t3.slots", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "zee-pi-harnesses-"));
+  const cfgPath = path.join(tmp, "zee-config.json");
+  const healthPath = path.join(tmp, "provider-health.json");
+  try {
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        version: 3,
+        authorizedFallback: true,
+        harnesses: {
+          pi: {
+            slots: {
+              fast: { prefer: { family: "deepseek", providerInstanceId: "magpie", model: "auto/deepseek-v4.1-flash" } },
+              workhorse: {
+                prefer: { family: "openai", providerInstanceId: "magpie", model: "auto/gpt-6.2-astra" },
+                backup: { family: "gemini", providerInstanceId: "magpie", model: "auto/gemini-4-hydrogen" },
+              },
+              adversary: { prefer: { family: "claude", providerInstanceId: "magpie", model: "magpie-2/vm/claude-sonnet-5-5" } },
+            },
+          },
+          t3: {
+            slots: {
+              fast: { prefer: { family: "gemini", providerInstanceId: "antigravity", model: "gemini-4-hydrogen" } },
+              workhorse: { prefer: { family: "gemini", providerInstanceId: "antigravity", model: "gemini-4-neon" } },
+              adversary: { prefer: { family: "openai", providerInstanceId: "codex", model: "gpt-6.2-astra" } },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const n1 = resolvePiProviderModel("vm", "claude-sonnet-5-5", cfgPath);
+    assert.equal(n1.provider, "magpie");
+    assert.equal(n1.model, "magpie-2/vm/claude-sonnet-5-5");
+
+    assert.throws(() => resolvePiProviderModel("antigravity", "gemini-4-neon", cfgPath), /不是有效的 Pi provider ID/);
+
+    const fb = findHealthyPiFallback({
+      role: "coder",
+      failedProvider: "magpie",
+      failedModel: "auto/gpt-6.2-astra",
+      configPath: cfgPath,
+      healthPath,
+    });
+    assert.equal(fb?.provider, "magpie");
+    assert.equal(fb?.model, "auto/gemini-4-hydrogen");
+  } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

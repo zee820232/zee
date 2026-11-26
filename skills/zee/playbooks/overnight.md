@@ -10,7 +10,7 @@
    ```
 
 ## 主循环协议（并发/分单推进）
-1. **领取待办单元**：≥2 个互不重叠且依赖就绪的 `pending` unit 时，Pi 下用 `zee_subagent` + 声明式 `worktree`（透传 `resolve-model` 的 `subagentArgs`，**省略 `timeoutMs` 沿用角色默认值**）派发 `coder`/`ui`，勿手调 `worktree-create` 制造冲突。
+1. **领取待办单元**：≥2 个互不重叠且依赖就绪的 `pending` unit 时，Pi 下用 `zee_subagent` + 声明式 `worktree`（透传 `resolve-model --role <role> --allow-standalone` 的 `subagentArgs`，**省略 `timeoutMs` 沿用角色默认值**）派发 `coder`/`ui`，T3 Code 下用 `delegate_task`（`isolation: "worktree"` + `resolved.delegateTarget`），勿手调 `worktree-create` 制造冲突。
 2. **施工 + 即时校验**：每次改动后立即跑 `node --check` 与最窄单测，绝不留语法破损给下一轮。
 3. **Verifier 实跑验收**：跑通对应测试与 `.agents/verify-ctl.mjs`。
 4. **先落袋再加餐（状态与提交优先）**：单单元一经实测通过，**立即执行 `update-state`、`log-decision` 与 `git commit` 锁定阶段成果**；禁止在未提交落盘前顺手拉起重型浏览器工具加餐。

@@ -7,7 +7,7 @@
 2. **契约先行**：跨前后端改动先在 `plan.md` 敲定数据结构与公开函数名，避免互踩。
 3. **默认按域拆分，禁止重复建 worktree**：
    - 单模块小改：主厨直接施工 + 立刻 `node --check`/窄单测。
-   - **多互不重叠单元（≥2 个 unit）**：Pi 下直接调用 `zee_subagent` 传入声明式 `worktree` 参数并行派发 `coder` / `ui`（用 `resolve-model --harness pi --role <role>` 取回 `resolved.subagentArgs` 直接透传），**不要提前手调 `worktree-create` 以免路径冲突**；仅 Codex/CC 无内置 worktree 时才先手调 `worktree-create`。
+   - **多互不重叠单元（≥2 个 unit）**：Pi 下直接调用 `zee_subagent` 传入声明式 `worktree` 参数并行派发 `coder` / `ui`（用 `resolve-model --role <role> --allow-standalone` 取回 `resolved.subagentArgs` 直接透传），T3 Code 下调用 `delegate_task`（传入 `isolation: "worktree"` 与 `resolved.delegateTarget` 作为 `target`），**不要提前手调 `worktree-create` 以免路径冲突**；仅 Codex/CC 无内置 worktree 时才先手调 `worktree-create`。
 4. **合并与集成验证**：
    - 将分支合入主工作区并补齐回归单测；
    - 运行完整语法校验、单元测试与 `.agents/verify-ctl.mjs`。

@@ -222,6 +222,7 @@ function collectPiBindingsFromConfig(
 				if (k !== "bindings" && val && typeof val === "object") walk(val);
 			}
 		};
+		if (cfg?.harnesses?.pi?.slots) walk(cfg.harnesses.pi.slots);
 		if (cfg?.slots) walk(cfg.slots);
 		if (cfg?.roles) walk(cfg.roles);
 		return out;
@@ -268,7 +269,7 @@ export function resolvePiProviderModel(
 				};
 			}
 		}
-		if (/^(vm|devin|codex|remote-[a-z0-9_-]+)$/i.test(provider) && !knownProviders.has(provider.toLowerCase())) {
+		if (/^(vm|devin|codex|antigravity|claudeagent|remote-[a-z0-9_-]+)$/i.test(provider) && !knownProviders.has(provider.toLowerCase())) {
 			const validHint = knownProviders.size > 0 ? `可用 providerInstanceId：${[...knownProviders].join(", ")}` : "请查看 pi --list-models 第一列";
 			throw new Error(`参数错误：provider="${provider}" 不是有效的 Pi provider ID（${validHint}）。`);
 		}

@@ -229,6 +229,150 @@ test("resolve-model 与 doctor 支持 Schema v3 3 槽位、跨家族校验、--a
   }
 });
 
+test("多宿主严格隔离：宿主环境变量检测、legacy slots 不串读、harnesses.<h> 共存与 AGY inherit 锁", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "zee-multi-harness-"));
+  const cfgPath = path.join(tmp, "zee-config.json");
+  const cleanHarnessEnv = {
+    ZEE_CONFIG_PATH: cfgPath,
+    PI_CODING_AGENT: "",
+    AI_AGENT: "",
+    T3CODE_THREAD_ID: "",
+    T3_ACP_MCP_ENDPOINT: "",
+    T3_ACP_MCP_NODE: "",
+    ANTIGRAVITY_AGENT: "",
+    ANTIGRAVITY_CLI: "",
+    CLAUDECODE: "",
+    CLAUDE_CODE: "",
+    CODEX_THREAD_ID: "",
+    CODEX_SANDBOX: "",
+    PLUGIN_ROOT: "",
+  };
+
+  try {
+    // 1. 宿主检测优先级验证
+    const piDoc = JSON.parse(runTool(["doctor"], { env: { ...cleanHarnessEnv, PI_CODING_AGENT: "true" } }).stdout);
+    assert.equal(piDoc.activeHarness, "pi");
+
+    const t3Doc = JSON.parse(
+      runTool(["doctor"], { env: { ...cleanHarnessEnv, T3CODE_THREAD_ID: "th-1", ANTIGRAVITY_AGENT: "1" } }).stdout,
+    );
+    assert.equal(t3Doc.activeHarness, "t3");
+    assert.equal(t3Doc.runtimeProvider, "antigravity");
+
+    const agyDoc = JSON.parse(runTool(["doctor"], { env: { ...cleanHarnessEnv, ANTIGRAVITY_AGENT: "1" } }).stdout);
+    assert.equal(agyDoc.activeHarness, "antigravity");
+
+    // 2. legacy Pi-only slots 不得串读进 t3 / agy
+    const legacyPiOnly = {
+      version: 3,
+      authorizedFallback: true,
+      slots: {
+        fast: { prefer: { family: "deepseek", bindings: { pi: { providerInstanceId: "magpie", model: "auto/deepseek-v4.1-flash" } } } },
+        workhorse: { prefer: { family: "openai", bindings: { pi: { providerInstanceId: "magpie", model: "auto/gpt-6.2-astra" } } } },
+        adversary: { prefer: { family: "gemini", modelHint: "gemini-4-hydrogen", tier: "pro", bindings: { pi: { providerInstanceId: "magpie", model: "auto/gemini-4-hydrogen" } } } },
+      },
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(legacyPiOnly, null, 2), "utf8");
+
+    const t3Blocked = runTool(["resolve-model", "--harness", "t3", "--role", "coder"], { env: cleanHarnessEnv, allowFail: true });
+    assert.notEqual(t3Blocked.status, 0);
+    assert.doesNotMatch(t3Blocked.stdout + t3Blocked.stderr, /magpie/);
+
+    const t3Standalone = JSON.parse(
+      runTool(["resolve-model", "--harness", "t3", "--role", "coder", "--allow-standalone"], { env: cleanHarnessEnv }).stdout,
+    );
+    assert.equal(t3Standalone.ok, true);
+    assert.equal(t3Standalone.standalone, true);
+
+    const agyStandalone = JSON.parse(
+      runTool(["resolve-model", "--harness", "agy", "--role", "reviewer", "--allow-standalone"], { env: cleanHarnessEnv }).stdout,
+    );
+    assert.equal(agyStandalone.ok, true);
+    assert.equal(agyStandalone.resolved.model, "inherit");
+
+    const docT3Legacy = JSON.parse(runTool(["doctor", "--harness", "t3"], { env: cleanHarnessEnv }).stdout);
+    assert.equal(docT3Legacy.ok, true);
+    assert.equal(docT3Legacy.activeHarnessConfigured, false);
+    assert.ok(docT3Legacy.warnings.some((w) => /t3/.test(w)));
+
+    // 3. harnesses.pi / harnesses.t3 / harnesses.agy 共存互不串台
+    const multiCfg = {
+      version: 3,
+      authorizedFallback: true,
+      harnesses: {
+        pi: {
+          slots: {
+            fast: { prefer: { family: "deepseek", effort: "low", providerInstanceId: "magpie", model: "auto/deepseek-v4.1-flash" } },
+            workhorse: { prefer: { family: "openai", effort: "medium", providerInstanceId: "magpie", model: "auto/gpt-6.2-astra" } },
+            adversary: { prefer: { family: "claude", effort: "medium", providerInstanceId: "magpie", model: "magpie-2/vm/claude-sonnet-5-5" } },
+          },
+        },
+        t3: {
+          slots: {
+            fast: {
+              prefer: { family: "gemini", effort: "low", providerInstanceId: "antigravity", model: "gemini-4-hydrogen", options: { thought_level: "low" } },
+            },
+            workhorse: {
+              prefer: { family: "gemini", effort: "medium", providerInstanceId: "antigravity", model: "gemini-4-neon", options: { thought_level: "high" } },
+            },
+            adversary: {
+              prefer: { family: "openai", effort: "medium", providerInstanceId: "codex", model: "gpt-6.2-astra", options: { reasoningEffort: "medium" } },
+            },
+          },
+        },
+        agy: {
+          singleFamily: true,
+          slots: {
+            fast: { prefer: { family: "gemini", effort: "low", model: "inherit", swarmModel: "gemini-4-hydrogen-low" } },
+            workhorse: { prefer: { family: "gemini", effort: "high", model: "inherit", swarmModel: "gemini-4-neon-high" } },
+            adversary: { prefer: { family: "gemini", effort: "medium", model: "inherit", swarmModel: "gemini-4-carbon-medium" } },
+          },
+        },
+      },
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(multiCfg, null, 2), "utf8");
+
+    const t3Rev = JSON.parse(runTool(["resolve-model", "--harness", "t3", "--role", "reviewer"], { env: cleanHarnessEnv }).stdout);
+    assert.equal(t3Rev.resolved.harness, "t3");
+    assert.equal(t3Rev.resolved.surface, "delegate_task");
+    assert.equal(t3Rev.resolved.family, "openai");
+    assert.deepEqual(t3Rev.resolved.delegateTarget, {
+      providerInstanceId: "codex",
+      model: "gpt-6.2-astra",
+      options: { reasoningEffort: "medium" },
+    });
+
+    const agySub = JSON.parse(runTool(["resolve-model", "--harness", "agy", "--role", "reviewer"], { env: cleanHarnessEnv }).stdout);
+    assert.equal(agySub.resolved.harness, "antigravity");
+    assert.equal(agySub.resolved.model, "inherit");
+
+    const agySwarm = JSON.parse(
+      runTool(["resolve-model", "--harness", "agy", "--surface", "swarm", "--role", "reviewer"], { env: cleanHarnessEnv }).stdout,
+    );
+    assert.equal(agySwarm.resolved.model, "gemini-4-carbon-medium");
+
+    const agyDocPass = JSON.parse(runTool(["doctor", "--harness", "agy"], { env: cleanHarnessEnv }).stdout);
+    assert.equal(agyDocPass.ok, true);
+    assert.equal(agyDocPass.activeHarnessConfigured, true);
+    assert.ok(agyDocPass.warnings.some((w) => /singleFamily/.test(w)));
+
+    const piCoder = JSON.parse(runTool(["resolve-model", "--harness", "pi", "--role", "coder"], { env: cleanHarnessEnv }).stdout);
+    assert.deepEqual(piCoder.resolved.subagentArgs, {
+      provider: "magpie",
+      model: "auto/gpt-6.2-astra",
+      thinkingLevel: "medium",
+    });
+
+    // t3 未开启 singleFamily 且同家族 -> doctor 报错
+    multiCfg.harnesses.t3.slots.adversary.prefer = { family: "gemini", effort: "medium", providerInstanceId: "antigravity", model: "gemini-4-carbon" };
+    fs.writeFileSync(cfgPath, JSON.stringify(multiCfg, null, 2), "utf8");
+    const t3BadDoc = runTool(["doctor", "--harness", "t3"], { env: cleanHarnessEnv, allowFail: true });
+    assert.notEqual(t3BadDoc.status, 0);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("update-state 支持多 --unit-upsert/--units/6 并发子进程无锁冲突零孤儿 + log-decision + doctor --repo 基线警告", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "zee-empty-repo-"));
   let busDir = "";

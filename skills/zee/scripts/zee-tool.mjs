@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * zee-tool.mjs v5.1.0 — 精简高杠杆确定性 CLI 原语（13 核心子命令）
+ * zee-tool.mjs v5.2.0 — 精简高杠杆确定性 CLI 原语（14 核心子命令）
  *
  * 子命令：
- *   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
- *   update-state <busDir> [--status ...] [--mode ...] [--resume-next ...] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--units-file <path|->] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
+ *   init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>] [--ensure-git]
+ *   update-state <busDir> [--status ...] [--mode ...] [--predicate ...] [--resume-next ...] [--conversation-id <cid>] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--units-file <path|->] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
  *   log-decision <busDir> --unit <id> --phase <p> --decision <d> [--why <w>] [--evidence <e>] [--result <r>]
- *   list-runs [repoRoot | --all]
+ *   list-runs [repoRoot | --repo <path> | --all] [--decisions] [--limit <N>]
+ *   finding <add|list|resolve> --repo <path> [--pattern <slug>] [--summary <text>] [--file <path>] [--severity P2|P1] [--note <text>] [--include-resolved]
  *   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
  *   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
  *   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut|probe|sim|retro|verify]
@@ -36,18 +37,20 @@ import {
 import {
   ensureNodeModulesMount,
   repoKeyCandidates,
+  resolveGitRoot,
   resolveRepoRunDir,
   resolveSafeWorktreeBranch,
   sanitizeSlug,
   stripAnsiAndControl,
+  unmountNodeModulesLink,
 } from "./lib/repo-utils.mjs";
 
 const HOME = os.homedir();
 const DEFAULT_CONFIG = path.join(HOME, ".agents", "zee-config.json");
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE_SKILLS_DIR = path.resolve(SCRIPT_DIR, "..", "..");
-const REPO_ROOT = path.resolve(SOURCE_SKILLS_DIR, "..");
 const RUNS_ROOT = path.join(HOME, ".local", "state", "zee", "runs");
+const SANDBOX_MARKER_FILE = ".zee-sandbox-marker";
 const PROJECT_SKILLS_SUBDIRS = [
   path.join(".agents", "skills"),
   path.join(".pi", "skills"),
@@ -62,12 +65,14 @@ const KNOWN_VALUE_FLAGS = new Set([
   "config", "dir", "unit", "phase", "why", "evidence", "result",
   "models", "models-file", "prefer-provider",
   "record", "provider", "kind", "reason", "ttl-ms",
+  "limit", "pattern", "summary", "file", "severity", "note",
 ]);
 
 const MULTI_VALUE_FLAGS = new Set(["unit-upsert", "fallback"]);
 
 const KNOWN_BOOLEAN_FLAGS = new Set([
-  "all", "prune-safe", "working-tree", "allow-standalone", "clear", "ignore-cooldown", "help",
+  "all", "prune-safe", "working-tree", "allow-standalone", "clear", "ignore-cooldown",
+  "help", "ensure-git", "decisions", "include-resolved",
 ]);
 
 function normalizeHarnessName(raw) {
@@ -127,6 +132,7 @@ function parseFlags(args) {
     const token = args[i];
     if (endOfFlags) { positional.push(token); continue; }
     if (token === "--") { endOfFlags = true; continue; }
+    if (token === "-h") { flags.help = true; continue; }
     if (token.startsWith("--")) {
       const eqIdx = token.indexOf("=");
       if (eqIdx > 2) {
@@ -140,10 +146,11 @@ function parseFlags(args) {
       } else {
         const key = token.slice(2);
         const next = args[i + 1];
+        const nextIsFlag = typeof next === "string" && next.startsWith("--") && next.length > 2;
         if (KNOWN_BOOLEAN_FLAGS.has(key)) {
           flags[key] = true;
         } else if (KNOWN_VALUE_FLAGS.has(key)) {
-          if (next !== undefined) { assignValueFlag(key, next); i += 1; }
+          if (next !== undefined && !nextIsFlag) { assignValueFlag(key, next); i += 1; }
           else assignValueFlag(key, true);
         } else if (key === "inc-delegates" || key === "inc-aborted") {
           if (next !== undefined && /^\d+$/.test(next)) {
@@ -152,7 +159,7 @@ function parseFlags(args) {
           } else {
             flags[key] = (Number(flags[key]) || 0) + 1;
           }
-        } else if (next !== undefined && !next.startsWith("--")) {
+        } else if (next !== undefined && !nextIsFlag) {
           assignValueFlag(key, next);
           i += 1;
         } else {
@@ -167,13 +174,14 @@ function parseFlags(args) {
 }
 
 function usage() {
-  console.log(`zee-tool.mjs v5.1.0 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
+  console.log(`zee-tool.mjs v5.2.0 — zee 核心确定性原语（宿主: ${detectActiveHarness()}）
 
 可用命令：
-  init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>]
-  update-state <busDir> [--status <s>] [--mode <m>] [--resume-next <r>] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--units-file <path|->] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
+  init-run <repoRoot> <slug> [--mode night|standard] [--conversation-id <cid>] [--ensure-git]
+  update-state <busDir> [--status <s>] [--mode <m>] [--predicate <p>] [--resume-next <r>] [--conversation-id <cid>] [--budget '<json>'] [--unit-upsert '<json>'] [--units '<json-array>'] [--units-file <path|->] [--decision '<json>'] [--inc-delegates [N]] [--delegate-id <id>] [--inc-aborted [N]]
   log-decision <busDir> --unit <id> --phase <p> --decision <d> [--why <w>] [--evidence <e>] [--result <r>]
-  list-runs [repoRoot | --all]
+  list-runs [repoRoot | --repo <path> | --all] [--decisions] [--limit <N>]
+  finding <add|list|resolve> --repo <path> [--pattern <slug>] [--summary <text>] [--file <path>] [--severity P2|P1] [--note <text>] [--include-resolved]
   worktree-create <repoRoot> <slug> <lane> <baseRef> [--branch <name>]
   cleanup-worktrees [repoRoot] [--base <ref>] [--prune-safe]
   sandbox-export --repo <repoRoot> [--sha <sha> | --working-tree] [--prefix rev|mut|probe|sim|retro|verify]
@@ -213,14 +221,48 @@ function appendDecisionRow(busDir, entry) {
   });
 }
 
+function ensureGitBaseline(absRepo) {
+  fs.mkdirSync(absRepo, { recursive: true });
+  let initializedGit = false;
+  let createdBaselineCommit = false;
+  let isGit = false;
+  try {
+    execFileSync("git", ["-C", absRepo, "rev-parse", "--git-dir"], { stdio: ["ignore", "pipe", "pipe"] });
+    isGit = true;
+  } catch {}
+  if (!isGit) {
+    execFileSync("git", ["-C", absRepo, "init", "-q"], { stdio: ["ignore", "pipe", "pipe"] });
+    initializedGit = true;
+  }
+  let hasHead = false;
+  try {
+    execFileSync("git", ["-C", absRepo, "rev-parse", "--verify", "--quiet", "HEAD"], { stdio: ["ignore", "pipe", "pipe"] });
+    hasHead = true;
+  } catch {}
+  if (!hasHead) {
+    execFileSync(
+      "git",
+      ["-C", absRepo, "-c", "user.name=zee", "-c", "user.email=zee@local", "commit", "--allow-empty", "-qm", "chore: bootstrap zee baseline"],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    createdBaselineCommit = true;
+  }
+  return { initializedGit, createdBaselineCommit };
+}
+
 function cmdInitRun(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const [repoPath, slug] = positional;
   if (!repoPath || !slug) {
-    console.error("用法：init-run <仓库路径> <任务名> [--mode night|standard] [--conversation-id <cid>]");
+    console.error("用法：init-run <仓库路径> <任务名> [--mode night|standard] [--conversation-id <cid>] [--ensure-git]");
     process.exit(1);
   }
   const absRepo = path.resolve(repoPath);
+  let gitBootstrap = null;
+  if (flags["ensure-git"]) {
+    gitBootstrap = ensureGitBaseline(absRepo);
+  }
   const busDir = path.join(resolveRepoRunDir(RUNS_ROOT, absRepo), sanitizeSlug(slug));
   fs.mkdirSync(path.join(busDir, "artifacts"), { recursive: true });
   fs.mkdirSync(path.join(busDir, "screenshots"), { recursive: true });
@@ -253,11 +295,19 @@ function cmdInitRun(args) {
   withFileLock(tsvPath, () => {
     if (!fs.existsSync(tsvPath)) fs.writeFileSync(tsvPath, TSV_HEADER, "utf8");
   });
-  console.log(JSON.stringify({ ok: true, activeHarness: detectActiveHarness(), busDir, statePath, tsvPath }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    activeHarness: detectActiveHarness(),
+    busDir,
+    statePath,
+    tsvPath,
+    ...(gitBootstrap ? { gitBootstrap } : {}),
+  }, null, 2));
 }
 
 async function cmdUpdateState(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const busDir = flags.bus || positional[0];
   if (!busDir) {
     console.error("用法：update-state <总线目录> [--status <s>] [--mode <m>] [--resume-next <r>] ...");
@@ -269,6 +319,7 @@ async function cmdUpdateState(args) {
     process.exit(1);
   }
 
+  // 所有 JSON 解析与 Schema 校验前置到 withFileLock 之外，杜绝异常退出泄漏 .lock 或部分写
   let unitsFromFile = null;
   if (typeof flags["units-file"] === "string" && flags["units-file"].trim()) {
     const fileArg = flags["units-file"].trim();
@@ -279,6 +330,51 @@ async function cmdUpdateState(args) {
       process.exit(1);
     }
     unitsFromFile = parsedUnits;
+  }
+
+  let budgetObj = null;
+  if (typeof flags.budget === "string") {
+    budgetObj = JSON.parse(flags.budget);
+    if (!budgetObj || typeof budgetObj !== "object" || Array.isArray(budgetObj)) {
+      console.error("--budget 必须是 JSON 对象");
+      process.exit(1);
+    }
+  }
+
+  const parsedUnitsToUpsert = [];
+  const validateUnit = (u) => {
+    if (!u || typeof u !== "object" || Array.isArray(u) || !u.id) {
+      console.error("--unit-upsert / --units 对象必须包含 id 字段");
+      process.exit(1);
+    }
+    parsedUnitsToUpsert.push(u);
+  };
+
+  if (Array.isArray(unitsFromFile)) unitsFromFile.forEach(validateUnit);
+  if (typeof flags.units === "string") {
+    const arr = JSON.parse(flags.units);
+    if (!Array.isArray(arr)) {
+      console.error("--units 必须是 JSON 数组");
+      process.exit(1);
+    }
+    arr.forEach(validateUnit);
+  }
+  const singleUpserts = Array.isArray(flags["unit-upsert"])
+    ? flags["unit-upsert"]
+    : typeof flags["unit-upsert"] === "string"
+      ? [flags["unit-upsert"]]
+      : [];
+  for (const rawUnit of singleUpserts) {
+    if (typeof rawUnit === "string") validateUnit(JSON.parse(rawUnit));
+  }
+
+  let parsedDecision = null;
+  if (typeof flags.decision === "string") {
+    parsedDecision = JSON.parse(flags.decision);
+    if (!parsedDecision || typeof parsedDecision !== "object" || Array.isArray(parsedDecision) || !parsedDecision.decision) {
+      console.error("--decision 必须是包含 decision 字段的 JSON 对象");
+      process.exit(1);
+    }
   }
 
   const st = withFileLock(statePath, () => {
@@ -304,12 +400,7 @@ async function cmdUpdateState(args) {
       }
     }
     if (flags["inc-aborted"]) next.abortedDelegates = (Number(next.abortedDelegates) || 0) + (Number(flags["inc-aborted"]) || 1);
-    if (typeof flags.budget === "string") {
-      const budgetObj = JSON.parse(flags.budget);
-      if (!budgetObj || typeof budgetObj !== "object" || Array.isArray(budgetObj)) {
-        console.error("--budget 必须是 JSON 对象");
-        process.exit(1);
-      }
+    if (budgetObj) {
       next.budget = { ...(next.budget && typeof next.budget === "object" ? next.budget : {}), ...budgetObj };
     }
 
@@ -321,37 +412,11 @@ async function cmdUpdateState(args) {
       }
     }
 
-    const upsertUnit = (unitObj) => {
-      if (!unitObj || typeof unitObj !== "object" || !unitObj.id) {
-        console.error("--unit-upsert / --units 对象必须包含 id 字段");
-        process.exit(1);
-      }
+    for (const unitObj of parsedUnitsToUpsert) {
       if (!Array.isArray(next.units)) next.units = [];
       const idx = next.units.findIndex((u) => u && u.id === unitObj.id);
       if (idx >= 0) next.units[idx] = { ...next.units[idx], ...unitObj, updatedAt: new Date().toISOString() };
       else next.units.push({ ...unitObj, updatedAt: new Date().toISOString() });
-    };
-
-    if (Array.isArray(unitsFromFile)) {
-      for (const item of unitsFromFile) upsertUnit(item);
-    }
-
-    if (typeof flags.units === "string") {
-      const arr = JSON.parse(flags.units);
-      if (!Array.isArray(arr)) {
-        console.error("--units 必须是 JSON 数组");
-        process.exit(1);
-      }
-      for (const item of arr) upsertUnit(item);
-    }
-
-    const singleUpserts = Array.isArray(flags["unit-upsert"])
-      ? flags["unit-upsert"]
-      : typeof flags["unit-upsert"] === "string"
-        ? [flags["unit-upsert"]]
-        : [];
-    for (const rawUnit of singleUpserts) {
-      if (typeof rawUnit === "string") upsertUnit(JSON.parse(rawUnit));
     }
 
     next.updatedAt = new Date().toISOString();
@@ -359,20 +424,14 @@ async function cmdUpdateState(args) {
     return next;
   });
 
-  if (typeof flags.decision === "string") {
-    const decObj = JSON.parse(flags.decision);
-    if (!decObj || typeof decObj !== "object" || Array.isArray(decObj) || !decObj.decision) {
-      console.error("--decision 必须是包含 decision 字段的 JSON 对象");
-      process.exit(1);
-    }
-    appendDecisionRow(busDir, decObj);
-  }
+  if (parsedDecision) appendDecisionRow(busDir, parsedDecision);
 
   console.log(JSON.stringify({ ok: true, statePath, state: st }, null, 2));
 }
 
 function cmdLogDecision(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const busDir = flags.bus || positional[0];
   const decision = typeof flags.decision === "string" ? flags.decision : positional[1];
   if (!busDir || !decision) {
@@ -390,22 +449,68 @@ function cmdLogDecision(args) {
   console.log(JSON.stringify({ ok: true, ...res }, null, 2));
 }
 
-function cmdListRuns(repoPath) {
+function readDecisionsFromRun(runDir, slug) {
+  const tsvPath = path.join(runDir, "decisions.tsv");
+  if (!fs.existsSync(tsvPath)) return [];
+  try {
+    const lines = fs.readFileSync(tsvPath, "utf8").split(/\r?\n/).filter((l) => l.trim());
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split("\t");
+      if (cols.length < 4) continue;
+      rows.push({
+        slug,
+        ts: cols[0] || "",
+        unit: cols[1] || "-",
+        phase: cols[2] || "-",
+        decision: cols[3] || "",
+        why: cols[4] || "-",
+        evidence: cols[5] || "-",
+        result: cols[6] || "-",
+      });
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+function cmdListRuns(args) {
+  const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
+  const includeAll = Boolean(flags.all);
+  const rawRepo = typeof flags.repo === "string" && flags.repo.trim() ? flags.repo.trim() : positional[0];
+  const includeDecisions = Boolean(flags.decisions);
+  const limit = Math.max(1, Math.min(200, Number(flags.limit) || 40));
+
   if (!fs.existsSync(RUNS_ROOT)) {
-    console.log(JSON.stringify({ ok: true, count: 0, runs: [] }, null, 2));
+    console.log(JSON.stringify({ ok: true, count: 0, runs: [], ...(includeDecisions ? { decisions: [] } : {}) }, null, 2));
     return;
   }
-  const repoDirs =
-    repoPath && repoPath !== "--all"
-      ? repoKeyCandidates(repoPath).map((k) => path.join(RUNS_ROOT, k))
-      : fs.readdirSync(RUNS_ROOT).map((d) => path.join(RUNS_ROOT, d));
+
+  let repoDirs;
+  if (!includeAll && rawRepo) {
+    const resolved = path.resolve(rawRepo);
+    const gitTop = resolveGitRoot(resolved);
+    const keySet = new Set(repoKeyCandidates(resolved));
+    if (gitTop) repoKeyCandidates(gitTop).forEach((k) => keySet.add(k));
+    repoDirs = [...keySet].map((k) => path.join(RUNS_ROOT, k));
+  } else {
+    repoDirs = fs.readdirSync(RUNS_ROOT).map((d) => path.join(RUNS_ROOT, d));
+  }
 
   const runs = [];
+  const allDecisions = [];
+  const seenBusDirs = new Set();
+
   for (const rDir of repoDirs) {
     if (!fs.existsSync(rDir) || !fs.statSync(rDir).isDirectory()) continue;
     for (const slug of fs.readdirSync(rDir)) {
-      const statePath = path.join(rDir, slug, "state.json");
+      const runDir = path.join(rDir, slug);
+      if (seenBusDirs.has(runDir)) continue;
+      const statePath = path.join(runDir, "state.json");
       if (!fs.existsSync(statePath)) continue;
+      seenBusDirs.add(runDir);
       try {
         const st = JSON.parse(fs.readFileSync(statePath, "utf8"));
         runs.push({
@@ -413,49 +518,217 @@ function cmdListRuns(repoPath) {
           status: st.status || "unknown",
           mode: st.mode || "standard",
           level: st.level ?? null,
+          predicate: st.predicate ?? null,
           repoRoot: st.repoRoot || null,
-          busDir: st.busDir || path.join(rDir, slug),
+          busDir: st.busDir || runDir,
           updatedAt: st.updatedAt || st.createdAt || null,
           resumeNext: st.resumeNext ?? null,
           unitsCount: Array.isArray(st.units) ? st.units.length : 0,
         });
+        if (includeDecisions) {
+          allDecisions.push(...readDecisionsFromRun(runDir, st.slug || slug));
+        }
       } catch {}
     }
   }
   runs.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-  console.log(JSON.stringify({ ok: true, count: runs.length, runs }, null, 2));
+
+  const out = { ok: true, count: runs.length, runs };
+  if (includeDecisions) {
+    allDecisions.sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
+    out.decisions = allDecisions.slice(0, limit);
+  }
+  console.log(JSON.stringify(out, null, 2));
+}
+
+function cmdFinding(args) {
+  const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
+  const action = String(positional[0] || "list").trim().toLowerCase();
+  const repoRoot = path.resolve(typeof flags.repo === "string" && flags.repo.trim() ? flags.repo.trim() : process.cwd());
+  if (!fs.existsSync(repoRoot)) {
+    console.error(JSON.stringify({ ok: false, error: `仓库路径不存在：${repoRoot}` }));
+    process.exit(1);
+  }
+  const queuePath = path.join(repoRoot, ".agents", "gardening-queue.jsonl");
+
+  const readEntries = () => {
+    if (!fs.existsSync(queuePath)) return [];
+    const lines = fs.readFileSync(queuePath, "utf8").split(/\r?\n/).filter((l) => l.trim());
+    const items = [];
+    for (const line of lines) {
+      try { items.push(JSON.parse(line)); } catch {}
+    }
+    return items;
+  };
+
+  if (action === "add") {
+    const pattern = sanitizeSlug(flags.pattern || "");
+    const summary = stripAnsiAndControl(typeof flags.summary === "string" ? flags.summary : "").trim();
+    if (!flags.pattern || !summary) {
+      console.error("用法：finding add --repo <path> --pattern <slug> --summary <text> [--file <path>] [--severity P2|P1]");
+      process.exit(1);
+    }
+    const entry = {
+      type: "finding",
+      ts: new Date().toISOString(),
+      pattern,
+      summary: summary.slice(0, 400),
+      file: typeof flags.file === "string" && flags.file.trim() ? stripAnsiAndControl(flags.file.trim()) : null,
+      severity: String(flags.severity || "P2").toUpperCase() === "P1" ? "P1" : "P2",
+    };
+    withFileLock(queuePath, () => {
+      fs.mkdirSync(path.dirname(queuePath), { recursive: true });
+      fs.appendFileSync(queuePath, JSON.stringify(entry) + "\n", "utf8");
+    });
+    console.log(JSON.stringify({ ok: true, queuePath, added: entry }, null, 2));
+    return;
+  }
+
+  if (action === "resolve") {
+    const pattern = sanitizeSlug(flags.pattern || "");
+    if (!flags.pattern) {
+      console.error("用法：finding resolve --repo <path> --pattern <slug> [--note <text>]");
+      process.exit(1);
+    }
+    const entry = {
+      type: "resolved",
+      ts: new Date().toISOString(),
+      pattern,
+      note: typeof flags.note === "string" ? stripAnsiAndControl(flags.note).trim().slice(0, 300) : "resolved",
+    };
+    withFileLock(queuePath, () => {
+      fs.mkdirSync(path.dirname(queuePath), { recursive: true });
+      fs.appendFileSync(queuePath, JSON.stringify(entry) + "\n", "utf8");
+    });
+    console.log(JSON.stringify({ ok: true, queuePath, resolved: entry }, null, 2));
+    return;
+  }
+
+  if (action === "list") {
+    const includeResolved = Boolean(flags["include-resolved"]);
+    const entries = readEntries();
+    const groups = new Map();
+    for (const item of entries) {
+      const pat = item?.pattern;
+      if (!pat) continue;
+      if (!groups.has(pat)) {
+        groups.set(pat, { pattern: pat, openCount: 0, totalCount: 0, resolvedAt: null, lastNote: null, samples: [] });
+      }
+      const g = groups.get(pat);
+      if (item.type === "resolved") {
+        g.openCount = 0;
+        g.resolvedAt = item.ts || null;
+        g.lastNote = item.note || null;
+      } else {
+        g.openCount += 1;
+        g.totalCount += 1;
+        g.resolvedAt = null;
+        g.samples.push({ ts: item.ts, summary: item.summary, file: item.file || null, severity: item.severity || "P2" });
+        if (g.samples.length > 5) g.samples.shift();
+      }
+    }
+    const clusters = [...groups.values()]
+      .filter((g) => includeResolved || g.openCount > 0)
+      .map((g) => ({ ...g, systemic: g.openCount >= 3 }))
+      .sort((a, b) => Number(b.systemic) - Number(a.systemic) || b.openCount - a.openCount || a.pattern.localeCompare(b.pattern));
+
+    console.log(JSON.stringify({
+      ok: true,
+      queuePath,
+      openClusters: clusters.filter((c) => c.openCount > 0).length,
+      systemicCount: clusters.filter((c) => c.systemic).length,
+      clusters,
+    }, null, 2));
+    return;
+  }
+
+  console.error(`未知 finding 操作 "${action}"，支持：add | list | resolve`);
+  process.exit(1);
+}
+
+const DEFAULT_WORKTREE_LOCK_TTL_MS = 12 * 60 * 60 * 1000;
+
+function getWorktreeLockMaxTtlMs() {
+  const n = Number(process.env.ZEE_WORKTREE_LOCK_TTL_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKTREE_LOCK_TTL_MS;
+}
+
+function isWorktreeActiveLocked(wtPath) {
+  const lockPath = `${wtPath}.zee-lock.json`;
+  if (!fs.existsSync(lockPath)) return false;
+  try {
+    const data = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const createdMs = Date.parse(data?.createdAt || "");
+    const ageMs = Number.isFinite(createdMs) ? Date.now() - createdMs : NaN;
+    const maxTtlMs = getWorktreeLockMaxTtlMs();
+    if (Number.isFinite(ageMs) && ageMs > maxTtlMs) return false;
+    const pid = Number(data?.pid);
+    if (Number.isInteger(pid) && pid > 0) {
+      try { process.kill(pid, 0); return true; }
+      catch (e) { return Boolean(e && e.code === "EPERM"); }
+    }
+    return Number.isFinite(ageMs) && ageMs < Math.min(2 * 60 * 60 * 1000, maxTtlMs);
+  } catch {
+    return false;
+  }
 }
 
 function cmdWorktreeCreate(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const [repoPath, slug, lane, baseRef] = positional;
   if (!repoPath || !slug || !lane || !baseRef) {
     console.error("用法：worktree-create <仓库路径> <slug> <lane> <baseRef> [--branch <分支名>]");
     process.exit(1);
   }
   const absRepo = path.resolve(repoPath);
+  try {
+    execFileSync("git", ["-C", absRepo, "rev-parse", "--verify", "--quiet", baseRef], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    console.error(`创建 worktree 失败：基准引用 "${baseRef}" 不存在（0→1 空仓请先执行 init-run --ensure-git 或创建首次 git commit）`);
+    process.exit(1);
+  }
+
   const wtRoot = path.join(resolveRepoRunDir(RUNS_ROOT, absRepo), sanitizeSlug(slug), "worktrees");
   const wtPath = path.join(wtRoot, sanitizeSlug(lane));
   fs.mkdirSync(wtRoot, { recursive: true });
 
   if (fs.existsSync(wtPath)) {
-    const st = execFileSync("git", ["-C", wtPath, "status", "--porcelain"], { encoding: "utf8" }).trim();
+    if (isWorktreeActiveLocked(wtPath)) {
+      console.error(`拒绝覆盖：目标 worktree 正被活跃子代理锁定：${wtPath}`);
+      process.exit(1);
+    }
+    let st = "";
+    try { st = execFileSync("git", ["-C", wtPath, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch {}
     if (st) {
       console.error(`拒绝覆盖：目标 worktree 存在未提交改动：${wtPath}`);
       process.exit(1);
     }
-    execFileSync("git", ["-C", absRepo, "worktree", "remove", "--force", wtPath], { stdio: "ignore" });
+    unmountNodeModulesLink(wtPath);
+    try {
+      execFileSync("git", ["-C", absRepo, "worktree", "remove", "--force", wtPath], { stdio: "ignore" });
+    } catch {}
+    if (fs.existsSync(wtPath)) {
+      fs.rmSync(wtPath, { recursive: true, force: true });
+      try { execFileSync("git", ["-C", absRepo, "worktree", "prune"], { stdio: "ignore" }); } catch {}
+    }
   }
 
   const gitArgs = ["-C", absRepo, "worktree", "add"];
   const rawBranch = typeof flags.branch === "string" && flags.branch.trim() ? flags.branch.trim() : null;
   const resolvedBranch = rawBranch ? resolveSafeWorktreeBranch(absRepo, rawBranch) : null;
   const branch = resolvedBranch ? resolvedBranch.branch : null;
+  let reusedExistingBranch = false;
   if (branch) {
     let exists = false;
     try { execFileSync("git", ["-C", absRepo, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]); exists = true; } catch {}
-    if (exists) gitArgs.push(wtPath, branch);
-    else gitArgs.push("-b", branch, wtPath, baseRef);
+    if (exists) {
+      reusedExistingBranch = true;
+      gitArgs.push(wtPath, branch);
+    } else {
+      gitArgs.push("-b", branch, wtPath, baseRef);
+    }
   } else {
     gitArgs.push("--detach", wtPath, baseRef);
   }
@@ -468,6 +741,7 @@ function cmdWorktreeCreate(args) {
     repoRoot: absRepo,
     worktreePath: wtPath,
     branch: branch || "(detached)",
+    reusedExistingBranch,
     flattened: Boolean(resolvedBranch?.flattened),
     mountedNodeModules,
     head,
@@ -504,35 +778,9 @@ function detectDefaultBaseRef(absRepo) {
   return "HEAD";
 }
 
-const DEFAULT_WORKTREE_LOCK_TTL_MS = 12 * 60 * 60 * 1000;
-
-function getWorktreeLockMaxTtlMs() {
-  const n = Number(process.env.ZEE_WORKTREE_LOCK_TTL_MS);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKTREE_LOCK_TTL_MS;
-}
-
-function isWorktreeActiveLocked(wtPath) {
-  const lockPath = `${wtPath}.zee-lock.json`;
-  if (!fs.existsSync(lockPath)) return false;
-  try {
-    const data = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-    const createdMs = Date.parse(data?.createdAt || "");
-    const ageMs = Number.isFinite(createdMs) ? Date.now() - createdMs : NaN;
-    const maxTtlMs = getWorktreeLockMaxTtlMs();
-    if (Number.isFinite(ageMs) && ageMs > maxTtlMs) return false;
-    const pid = Number(data?.pid);
-    if (Number.isInteger(pid) && pid > 0) {
-      try { process.kill(pid, 0); return true; }
-      catch (e) { return Boolean(e && e.code === "EPERM"); }
-    }
-    return Number.isFinite(ageMs) && ageMs < Math.min(2 * 60 * 60 * 1000, maxTtlMs);
-  } catch {
-    return false;
-  }
-}
-
 function cmdCleanupWorktrees(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const absRepo = path.resolve(positional[0] || process.cwd());
   const pruneSafe = Boolean(flags["prune-safe"]);
   const explicitBase = typeof flags.base === "string" && flags.base.trim() ? flags.base.trim() : null;
@@ -584,7 +832,7 @@ function cmdCleanupWorktrees(args) {
           execFileSync("git", ["-C", absRepo, "merge-base", "--is-ancestor", head, ref], { stdio: "ignore" });
           isMerged = true; mergeMethod = "ancestor"; mergedInto = ref; break;
         } catch {
-          if (!isDetached && isSquashMergedByPatchId(absRepo, ref, branch)) {
+          if (isSquashMergedByPatchId(absRepo, ref, isDetached ? head : branch)) {
             isMerged = true; mergeMethod = "squash-patch-id"; mergedInto = ref; break;
           }
         }
@@ -593,24 +841,18 @@ function cmdCleanupWorktrees(args) {
 
     const isPrimary = idx === 0;
     const isActiveLocked = !isPrimary && isWorktreeActiveLocked(wtPath);
-    const isZeeRunDetached = isDetached && wtPath.includes(`${path.sep}zee${path.sep}runs${path.sep}`);
     let bucket = "primary";
     if (!isPrimary) {
       if (isActiveLocked) bucket = "active_hold";
       else if (dirtyFiles > 0) bucket = "keep_dirty";
-      else if (isMerged || isZeeRunDetached) bucket = "safe_to_prune";
-      else if (isDetached) bucket = "safe_to_prune_detached";
+      else if (isMerged) bucket = "safe_to_prune";
+      else if (isDetached) bucket = "review_unmerged_detached";
       else bucket = "review_unmerged";
     }
 
     let prunedNow = false;
-    if (pruneSafe && (bucket === "safe_to_prune" || bucket === "safe_to_prune_detached")) {
-      try {
-        const nmLink = path.join(wtPath, "node_modules");
-        if (fs.existsSync(nmLink) && fs.lstatSync(nmLink).isSymbolicLink()) {
-          try { fs.unlinkSync(nmLink); } catch { fs.rmdirSync(nmLink); }
-        }
-      } catch {}
+    if (pruneSafe && bucket === "safe_to_prune") {
+      unmountNodeModulesLink(wtPath);
       try {
         execFileSync("git", ["-C", absRepo, "worktree", "remove", "--force", wtPath], { stdio: "ignore" });
         try { fs.rmSync(`${wtPath}.zee-lock.json`, { force: true }); } catch {}
@@ -631,21 +873,103 @@ function cmdCleanupWorktrees(args) {
   console.log(JSON.stringify({ ok: true, readOnly: !pruneSafe, repoRoot: absRepo, baseRef: explicitBase || defaultBase, checkedBaseRefs: baseRefs, prunedCount: pruned.length, pruned, worktrees }, null, 2));
 }
 
+function copyDirectoryTreeSkippingHeavy(srcDir, dstDir) {
+  const SKIP_DIRS = new Set([".git", "node_modules", ".next", ".nuxt", "dist", "build", ".venv", "__pycache__", "target"]);
+  for (const ent of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (SKIP_DIRS.has(ent.name)) continue;
+    const src = path.join(srcDir, ent.name);
+    const dst = path.join(dstDir, ent.name);
+    try {
+      if (ent.isSymbolicLink()) {
+        const linkTarget = fs.readlinkSync(src);
+        let isDirLink = false;
+        try { isDirLink = fs.statSync(src).isDirectory(); } catch {}
+        fs.symlinkSync(linkTarget, dst, process.platform === "win32" && isDirLink ? "junction" : undefined);
+      } else if (ent.isDirectory()) {
+        fs.mkdirSync(dst, { recursive: true });
+        copyDirectoryTreeSkippingHeavy(src, dst);
+      } else if (ent.isFile()) {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+      }
+    } catch {}
+  }
+}
+
+function repoHasExportIgnore(repoRoot) {
+  const attrPath = path.join(repoRoot, ".gitattributes");
+  if (!fs.existsSync(attrPath)) return false;
+  try {
+    return /\bexport-ignore\b/i.test(fs.readFileSync(attrPath, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+function copyRelFileOrLink(repoRoot, sandboxDir, rel) {
+  const src = path.join(repoRoot, rel);
+  const dst = path.join(sandboxDir, rel);
+  try {
+    const st = fs.lstatSync(src);
+    if (st.isFile()) {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+    } else if (st.isSymbolicLink()) {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      let isDirLink = false;
+      try { isDirLink = fs.statSync(src).isDirectory(); } catch {}
+      fs.symlinkSync(fs.readlinkSync(src), dst, process.platform === "win32" && isDirLink ? "junction" : undefined);
+    }
+  } catch {}
+}
+
+function writeSandboxMarker(sandboxDir, repoRoot) {
+  fs.writeFileSync(
+    path.join(sandboxDir, SANDBOX_MARKER_FILE),
+    JSON.stringify({ createdBy: "zee-sandbox-export", repoRoot, createdAt: new Date().toISOString() }) + "\n",
+    "utf8",
+  );
+}
+
 function cmdSandboxExport(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
-  let gitDirRaw = "";
-  try {
-    gitDirRaw = execFileSync("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  } catch (e) {
-    console.error(JSON.stringify({ ok: false, error: `${repoRoot} 不是合法的 Git 仓库：${e.message}` }));
+  if (!fs.existsSync(repoRoot)) {
+    console.error(JSON.stringify({ ok: false, error: `目标目录不存在：${repoRoot}` }));
     process.exit(1);
   }
-  const gitDir = path.resolve(repoRoot, gitDirRaw);
   const workingTree = Boolean(flags["working-tree"]);
   const ALLOWED_PREFIXES = new Set(["rev", "mut", "probe", "sim", "retro", "verify"]);
   const rawPrefix = typeof flags.prefix === "string" ? flags.prefix.trim().toLowerCase() : "mut";
   const prefix = ALLOWED_PREFIXES.has(rawPrefix) ? rawPrefix : "mut";
+
+  let gitDirRaw = "";
+  let isGitRepo = false;
+  try {
+    gitDirRaw = execFileSync("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    isGitRepo = Boolean(gitDirRaw);
+  } catch {}
+
+  if (!isGitRepo) {
+    if (!workingTree) {
+      console.error(JSON.stringify({ ok: false, error: `${repoRoot} 不是合法的 Git 仓库（非 Git 目录请附加 --working-tree）` }));
+      process.exit(1);
+    }
+    const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), `zee-${prefix}-`));
+    try {
+      copyDirectoryTreeSkippingHeavy(repoRoot, sandboxDir);
+      writeSandboxMarker(sandboxDir, repoRoot);
+      console.log(JSON.stringify({ ok: true, sandboxDir, mode: "working-tree", nonGit: true, ref: "WORKING_TREE", sha: null }, null, 2));
+      return;
+    } catch (e) {
+      fs.rmSync(sandboxDir, { recursive: true, force: true });
+      console.error(JSON.stringify({ ok: false, error: `sandbox-export 失败：${e.message}` }));
+      process.exit(1);
+    }
+  }
+
+  const gitDir = path.resolve(repoRoot, gitDirRaw);
   const targetRef = workingTree ? "HEAD" : (typeof flags.sha === "string" && flags.sha.trim() ? flags.sha.trim() : "HEAD");
 
   let resolvedSha = null;
@@ -664,14 +988,16 @@ function cmdSandboxExport(args) {
   try {
     if (hasCommit) {
       let exported = false;
-      const archRes = spawnSync("git", ["-c", "core.autocrlf=false", "-C", repoRoot, "archive", "--format=tar", targetRef], { maxBuffer: 200 * 1024 * 1024 });
-      if (archRes.status === 0 && archRes.stdout) {
-        if (spawnSync("tar", ["-xf", "-", "-C", sandboxDir], { input: archRes.stdout, maxBuffer: 50 * 1024 * 1024 }).status === 0) exported = true;
+      if (!repoHasExportIgnore(repoRoot)) {
+        const archRes = spawnSync("git", ["-c", "core.autocrlf=false", "-C", repoRoot, "archive", "--format=tar", targetRef], { maxBuffer: 200 * 1024 * 1024 });
+        if (archRes.status === 0 && archRes.stdout) {
+          if (spawnSync("tar", ["-xf", "-", "-C", sandboxDir], { input: archRes.stdout, maxBuffer: 50 * 1024 * 1024 }).status === 0) exported = true;
+        }
       }
       if (!exported) {
         const treeEntries = execFileSync("git", ["-C", repoRoot, "ls-tree", "--name-only", targetRef], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
         if (treeEntries) {
-          const tmpIndex = path.join(os.tmpdir(), `zee-idx-${process.pid}-${Date.now()}`);
+          const tmpIndex = path.join(os.tmpdir(), `zee-idx-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
           try {
             execFileSync("git", ["-c", "core.autocrlf=false", `--git-dir=${gitDir}`, `--work-tree=${sandboxDir}`, "checkout", "-f", targetRef, "--", "."], { env: { ...process.env, GIT_INDEX_FILE: tmpIndex }, stdio: ["ignore", "pipe", "pipe"] });
           } finally { fs.rmSync(tmpIndex, { force: true }); }
@@ -694,37 +1020,31 @@ function cmdSandboxExport(args) {
                 if (stCode.startsWith("R") || stCode.startsWith("C")) {
                   const oldRel = parts[i + 1]; const newRel = parts[i + 2]; i += 2;
                   if (stCode.startsWith("R") && oldRel) fs.rmSync(path.join(sandboxDir, oldRel), { recursive: true, force: true });
-                  if (newRel && fs.existsSync(path.join(repoRoot, newRel)) && fs.statSync(path.join(repoRoot, newRel)).isFile()) {
-                    const dst = path.join(sandboxDir, newRel);
-                    fs.mkdirSync(path.dirname(dst), { recursive: true });
-                    fs.copyFileSync(path.join(repoRoot, newRel), dst);
-                  }
+                  if (newRel) copyRelFileOrLink(repoRoot, sandboxDir, newRel);
                 } else {
                   const relFile = parts[i + 1]; i += 1;
                   if (!relFile) continue;
                   const dst = path.join(sandboxDir, relFile);
                   if (stCode === "D") fs.rmSync(dst, { recursive: true, force: true });
-                  else if (fs.existsSync(path.join(repoRoot, relFile)) && fs.statSync(path.join(repoRoot, relFile)).isFile()) {
-                    fs.mkdirSync(path.dirname(dst), { recursive: true });
-                    fs.copyFileSync(path.join(repoRoot, relFile), dst);
-                  }
+                  else copyRelFileOrLink(repoRoot, sandboxDir, relFile);
                 }
               }
             }
           }
         }
+      } else {
+        // 无 HEAD 的 0→1 仓库：同时导出已暂存文件（staged）与未跟踪文件
+        const stagedRaw = execFileSync("git", ["-C", repoRoot, "ls-files", "-z"], { encoding: "utf8" });
+        for (const rel of stagedRaw.split("\0").filter(Boolean)) {
+          copyRelFileOrLink(repoRoot, sandboxDir, rel);
+        }
       }
       const untrackedRaw = execFileSync("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], { encoding: "utf8" });
       for (const rel of untrackedRaw.split("\0").filter(Boolean)) {
-        const src = path.join(repoRoot, rel);
-        const dst = path.join(sandboxDir, rel);
-        try {
-          const st = fs.lstatSync(src);
-          if (st.isFile()) { fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.copyFileSync(src, dst); }
-          else if (st.isSymbolicLink()) { fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.symlinkSync(fs.readlinkSync(src), dst); }
-        } catch {}
+        copyRelFileOrLink(repoRoot, sandboxDir, rel);
       }
     }
+    writeSandboxMarker(sandboxDir, repoRoot);
     console.log(JSON.stringify({ ok: true, sandboxDir, mode: workingTree ? "working-tree" : "sha", ref: workingTree ? "WORKING_TREE" : targetRef, sha: resolvedSha }, null, 2));
   } catch (e) {
     fs.rmSync(sandboxDir, { recursive: true, force: true });
@@ -735,6 +1055,7 @@ function cmdSandboxExport(args) {
 
 function cmdSandboxClean(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const rawDir = flags.dir || positional[0];
   if (!rawDir) {
     console.error(JSON.stringify({ ok: false, error: "用法：sandbox-clean <sandboxDir>" }));
@@ -742,11 +1063,12 @@ function cmdSandboxClean(args) {
   }
   const sandboxDir = path.resolve(rawDir);
   const baseName = path.basename(sandboxDir);
+  const hasMarker = fs.existsSync(path.join(sandboxDir, SANDBOX_MARKER_FILE));
+  const looksLikeRealRepo = fs.existsSync(path.join(sandboxDir, ".git")) || (!hasMarker && fs.existsSync(path.join(sandboxDir, ".agents", "zee.project.json")));
   if (
     !isAllowedZeeTmpPath(sandboxDir, "") ||
     !/^zee-(?:mut|rev|probe|sim|retro|verify)-[a-z0-9][a-z0-9_.-]*$/i.test(baseName) ||
-    fs.existsSync(path.join(sandboxDir, ".git")) ||
-    fs.existsSync(path.join(sandboxDir, ".agents", "zee.project.json"))
+    looksLikeRealRepo
   ) {
     console.error(JSON.stringify({ ok: false, error: `拒绝清理非法的沙盒目录 "${sandboxDir}"` }));
     process.exit(1);
@@ -759,13 +1081,25 @@ function cmdSandboxClean(args) {
   console.log(JSON.stringify({ ok: true, removed: true, sandboxDir }, null, 2));
 }
 
-function isGateFilePath(rawRelPath) {
+function isPureTestFilePath(rawRelPath) {
   const p = String(rawRelPath || "").replace(/\\/g, "/").replace(/^\.\//, "");
   if (!p) return false;
-  if (/(?:^|\/)(?:tests?|__snapshots__|\.github\/workflows|verify-[^/]+)\//i.test(p)) return true;
+  if (/(?:^|\/)(?:tests?|__tests__)\//i.test(p)) return true;
+  const base = path.posix.basename(p);
+  return (
+    /\.(?:test|spec)\.[^/]+$/i.test(base) ||
+    /_test\.(?:go|py|rs|rb|ts|tsx|js|jsx|mjs|cjs)$/i.test(base) ||
+    /^test_[^/]+\.py$/i.test(base)
+  );
+}
+
+function isHardGateConfigPath(rawRelPath) {
+  const p = String(rawRelPath || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!p) return false;
+  if (/(?:^|\/)(?:__snapshots__|\.github\/workflows|verify-[^/]+)\//i.test(p)) return true;
   if (/(?:^|\/)\.agents\/(?:verify-ctl[^/]*|zee\.project\.json)$/i.test(p)) return true;
   const base = path.posix.basename(p);
-  return /\.(?:test|spec)\.[^/]+$/i.test(base) || /^(?:\.eslintrc|eslint\.config\.|biome\.json$|tsconfig.*\.json$|ruff\.toml$|pyproject\.toml$|jest\.config\.|vitest\.config\.)/i.test(base);
+  return /^(?:\.eslintrc|eslint\.config\.|biome\.json$|tsconfig.*\.json$|ruff\.toml$|pyproject\.toml$|jest\.config\.|vitest\.config\.)/i.test(base);
 }
 
 const SUPPRESSION_PATTERNS = [
@@ -791,39 +1125,143 @@ function unquoteGitDiffPath(raw) {
   return s;
 }
 
+function parseNameStatusZ(raw) {
+  const entries = [];
+  const parts = String(raw || "").split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const code = parts[i];
+    if (!code) continue;
+    if (code.startsWith("R") || code.startsWith("C")) {
+      const oldPath = parts[i + 1] || "";
+      const newPath = parts[i + 2] || "";
+      i += 2;
+      if (oldPath) entries.push({ status: code[0], file: oldPath.replace(/\\/g, "/") });
+      if (newPath) entries.push({ status: code[0], file: newPath.replace(/\\/g, "/") });
+    } else {
+      const file = parts[i + 1] || "";
+      i += 1;
+      if (file) entries.push({ status: code[0], file: file.replace(/\\/g, "/") });
+    }
+  }
+  return entries;
+}
+
+function walkNonGitFiles(rootDir, curDir = rootDir, out = []) {
+  const SKIP = new Set([".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", "target"]);
+  for (const ent of fs.readdirSync(curDir, { withFileTypes: true })) {
+    if (SKIP.has(ent.name)) continue;
+    const full = path.join(curDir, ent.name);
+    if (ent.isDirectory()) walkNonGitFiles(rootDir, full, out);
+    else if (ent.isFile()) out.push(path.relative(rootDir, full).replace(/\\/g, "/"));
+  }
+  return out;
+}
+
 function cmdGateTamperDiff(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const repoRoot = path.resolve(flags.repo || positional[0] || process.cwd());
+  if (!fs.existsSync(repoRoot)) {
+    console.error(JSON.stringify({ ok: false, error: `目录不存在：${repoRoot}` }));
+    process.exit(1);
+  }
+
+  const suppressionsAdded = [];
+  const secretsAdded = [];
+  const encodingIssues = [];
+  const seenIssues = new Set();
+
+  const scanAddedLine = (file, line) => {
+    const cleanFile = file.replace(/\\/g, "/");
+    if (!/\.md$/i.test(cleanFile)) {
+      for (const pat of SUPPRESSION_PATTERNS) {
+        if (pat.re.test(line)) {
+          const k = `sup:${cleanFile}:${pat.name}:${line.trim().slice(0, 80)}`;
+          if (!seenIssues.has(k)) {
+            seenIssues.add(k);
+            suppressionsAdded.push({ file: cleanFile, pattern: pat.name, line: line.trim().slice(0, 200) });
+          }
+        }
+      }
+    }
+    if (!/<REDACTED>/.test(line)) {
+      for (const pat of SECRET_PATTERNS) {
+        if (pat.re.test(line)) {
+          const k = `sec:${cleanFile}:${pat.name}:${secretsAdded.length}`;
+          seenIssues.add(k);
+          secretsAdded.push({ file: cleanFile, pattern: pat.name, line: "<REDACTED>" });
+        }
+      }
+    }
+    if (line.includes("\uFFFD")) {
+      const k = `enc:${cleanFile}:${line.trim().slice(0, 80)}`;
+      if (!seenIssues.has(k)) {
+        seenIssues.add(k);
+        encodingIssues.push({ file: cleanFile, pattern: "utf8_replacement_char", line: line.trim().slice(0, 200) });
+      }
+    }
+  };
+
+  const scanTextFile = (rel) => {
+    const absFile = path.join(repoRoot, rel);
+    try {
+      const st = fs.statSync(absFile);
+      if (st.isFile() && st.size <= 512 * 1024) {
+        const text = fs.readFileSync(absFile, "utf8");
+        if (!text.includes("\0")) text.split(/\r?\n/).forEach((l) => scanAddedLine(rel, l));
+      }
+    } catch {}
+  };
+
+  let isGitRepo = false;
   try {
     execFileSync("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { stdio: ["ignore", "pipe", "pipe"] });
-  } catch (e) {
-    console.error(JSON.stringify({ ok: false, error: `${repoRoot} 不是合法的 Git 仓库：${e.message}` }));
-    process.exit(1);
+    isGitRepo = true;
+  } catch {}
+
+  if (!isGitRepo) {
+    const gateFilesTouched = [];
+    const testFilesAdded = [];
+    for (const rel of walkNonGitFiles(repoRoot)) {
+      if (isHardGateConfigPath(rel)) gateFilesTouched.push(rel);
+      else if (isPureTestFilePath(rel)) testFilesAdded.push(rel);
+      scanTextFile(rel);
+    }
+    gateFilesTouched.sort();
+    testFilesAdded.sort();
+    console.log(JSON.stringify({
+      ok: true,
+      nonGit: true,
+      repoRoot,
+      mode: "working-tree",
+      gateFilesTouched,
+      testFilesAdded,
+      suppressionsAdded,
+      secretsAdded,
+      encodingIssues,
+      requiresCountersign: gateFilesTouched.length > 0 || suppressionsAdded.length > 0 || secretsAdded.length > 0 || encodingIssues.length > 0,
+    }, null, 2));
+    return;
   }
 
   const hasBase = typeof flags.base === "string" && flags.base.trim().length > 0;
   const hasHead = typeof flags.head === "string" && flags.head.trim().length > 0;
   const useWorkingTree = Boolean(flags["working-tree"]) || (!hasBase && !hasHead);
 
-  const changedFiles = new Set();
-  const suppressionsAdded = [];
-  const secretsAdded = [];
-  const encodingIssues = [];
+  const gateFilesSet = new Set();
+  const testAddedSet = new Set();
 
-  const scanAddedLine = (file, line) => {
-    const cleanFile = file.replace(/\\/g, "/");
-    if (!/\.md$/i.test(cleanFile)) {
-      for (const pat of SUPPRESSION_PATTERNS) {
-        if (pat.re.test(line)) suppressionsAdded.push({ file: cleanFile, pattern: pat.name, line: line.trim().slice(0, 200) });
+  const classifyFileStatus = (file, status) => {
+    const norm = file.replace(/\\/g, "/");
+    if (isHardGateConfigPath(norm)) {
+      gateFilesSet.add(norm);
+    } else if (isPureTestFilePath(norm)) {
+      if (status === "A" || status === "?") {
+        if (!gateFilesSet.has(norm)) testAddedSet.add(norm);
+      } else {
+        testAddedSet.delete(norm);
+        gateFilesSet.add(norm);
       }
-    }
-    if (!/<REDACTED>/.test(line)) {
-      for (const pat of SECRET_PATTERNS) {
-        if (pat.re.test(line)) secretsAdded.push({ file: cleanFile, pattern: pat.name, line: "<REDACTED>" });
-      }
-    }
-    if (line.includes("\uFFFD")) {
-      encodingIssues.push({ file: cleanFile, pattern: "utf8_replacement_char", line: line.trim().slice(0, 200) });
     }
   };
 
@@ -847,21 +1285,25 @@ function cmdGateTamperDiff(args) {
   if (useWorkingTree) {
     let hasHeadCommit = false;
     try { execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", "HEAD"], { stdio: ["ignore", "pipe", "ignore"] }); hasHeadCommit = true; } catch {}
-    const nameArgs = hasHeadCommit ? ["diff", "--name-only", "-z", "HEAD"] : ["diff", "--name-only", "-z", "--cached"];
-    const diffArgs = hasHeadCommit ? ["diff", "-U0", "HEAD"] : ["diff", "-U0", "--cached"];
-    for (const f of execFileSync("git", ["-C", repoRoot, ...nameArgs], { encoding: "utf8" }).split("\0").filter(Boolean)) changedFiles.add(f);
-    scanDiffText(execFileSync("git", ["-C", repoRoot, ...diffArgs], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }));
 
-    for (const rel of execFileSync("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean)) {
-      changedFiles.add(rel);
-      const absFile = path.join(repoRoot, rel);
-      try {
-        const st = fs.statSync(absFile);
-        if (st.isFile() && st.size <= 512 * 1024) {
-          const text = fs.readFileSync(absFile, "utf8");
-          if (!text.includes("\0")) text.split(/\r?\n/).forEach((l) => scanAddedLine(rel, l));
-        }
-      } catch {}
+    if (hasHeadCommit) {
+      const statusOut = execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "diff", "--name-status", "-z", "HEAD"], { encoding: "utf8" });
+      for (const entry of parseNameStatusZ(statusOut)) classifyFileStatus(entry.file, entry.status);
+      scanDiffText(execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "diff", "-U0", "HEAD"], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }));
+    } else {
+      const cachedStatus = execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "diff", "--name-status", "-z", "--cached"], { encoding: "utf8" });
+      for (const entry of parseNameStatusZ(cachedStatus)) classifyFileStatus(entry.file, entry.status);
+      scanDiffText(execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "diff", "-U0", "--cached"], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }));
+
+      // 无 HEAD 时还要扫描已暂存文件在工作区继续修改但未再 stage 的内容
+      const unstagedStatus = execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "diff", "--name-status", "-z"], { encoding: "utf8" });
+      for (const entry of parseNameStatusZ(unstagedStatus)) classifyFileStatus(entry.file, entry.status === "A" ? "A" : "M");
+      scanDiffText(execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "diff", "-U0"], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }));
+    }
+
+    for (const rel of execFileSync("git", ["-C", repoRoot, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean)) {
+      classifyFileStatus(rel, "?");
+      scanTextFile(rel);
     }
   } else {
     const range = hasBase && hasHead ? `${flags.base.trim()}..${flags.head.trim()}` : hasBase ? `${flags.base.trim()}..HEAD` : `${flags.head.trim()}~1..${flags.head.trim()}`;
@@ -870,18 +1312,26 @@ function cmdGateTamperDiff(args) {
       try { execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", `${flags.head.trim()}~1`], { stdio: ["ignore", "pipe", "ignore"] }); }
       catch { useRootShow = true; }
     }
-    const nameArgs = useRootShow ? ["show", "--format=", "--name-only", "-z", flags.head.trim()] : ["diff", "--name-only", "-z", range];
-    const diffArgs = useRootShow ? ["show", "--format=", "-U0", flags.head.trim()] : ["diff", "-U0", range];
-    for (const f of execFileSync("git", ["-C", repoRoot, ...nameArgs], { encoding: "utf8" }).split("\0").filter(Boolean)) changedFiles.add(f);
+    const statusArgs = useRootShow
+      ? ["-c", "core.quotepath=false", "show", "--format=", "--name-status", "-z", flags.head.trim()]
+      : ["-c", "core.quotepath=false", "diff", "--name-status", "-z", range];
+    const diffArgs = useRootShow
+      ? ["-c", "core.quotepath=false", "show", "--format=", "-U0", flags.head.trim()]
+      : ["-c", "core.quotepath=false", "diff", "-U0", range];
+    for (const entry of parseNameStatusZ(execFileSync("git", ["-C", repoRoot, ...statusArgs], { encoding: "utf8" }))) {
+      classifyFileStatus(entry.file, entry.status);
+    }
     scanDiffText(execFileSync("git", ["-C", repoRoot, ...diffArgs], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }));
   }
 
-  const gateFilesTouched = [...changedFiles].map((f) => f.replace(/\\/g, "/")).filter((f) => isGateFilePath(f)).sort();
+  const gateFilesTouched = [...gateFilesSet].sort();
+  const testFilesAdded = [...testAddedSet].sort();
   console.log(JSON.stringify({
     ok: true,
     repoRoot,
     mode: useWorkingTree ? "working-tree" : "range",
     gateFilesTouched,
+    testFilesAdded,
     suppressionsAdded,
     secretsAdded,
     encodingIssues,
@@ -889,7 +1339,7 @@ function cmdGateTamperDiff(args) {
   }, null, 2));
 }
 
-function normalizeModelForAgy(modelHint, tier, effort, surface, explicitSpec) {
+function normalizeModelForAgy(modelHint, _tier, effort, surface, explicitSpec) {
   const low = String(modelHint || "").trim().toLowerCase();
   const eff = effort && effort !== "max" ? effort : "high";
   if (surface === "swarm") {
@@ -897,26 +1347,13 @@ function normalizeModelForAgy(modelHint, tier, effort, surface, explicitSpec) {
       return explicitSpec.swarmModel.trim();
     }
     if (low && /-(low|medium|high|xhigh)$/.test(low)) return low;
-    if (low.includes("argon")) return `${low}-${eff === "xhigh" ? "high" : eff}`;
+    if (low.includes("argon") || low.includes("carbon")) {
+      return `${low}-${eff === "xhigh" ? "high" : eff}`;
+    }
     if (low && low !== "inherit" && low !== "auto") return `${low}-${eff}`;
     return "inherit";
   }
-  if (explicitSpec?.model === "inherit") return "inherit";
-  if (
-    low === "inherit" ||
-    low === "auto" ||
-    low.includes("gemini-4") ||
-    low.includes("neon") ||
-    low.includes("hydrogen") ||
-    low.includes("carbon") ||
-    low.includes("argon") ||
-    low.includes("orchestrator")
-  ) {
-    return "inherit";
-  }
-  if (low === "flash_lite" || low === "flash-lite" || tier === "lite") return "flash_lite";
-  if (low === "flash" || low.includes("gemini-3.8")) return "flash";
-  if (low === "pro") return "pro";
+  // 严守 Gemini 4 代际锁：AGY invoke_subagent 永远返回 "inherit"，绝不映射到 3.8 系列的 pro/flash/flash_lite
   return "inherit";
 }
 
@@ -968,7 +1405,6 @@ function getSlotFromConfig(cfg, rawRole, harness) {
       return { slotName: mapped, slot: hs.section.slots[mapped], source: "harnesses", harnessSectionKey: hs.key };
     }
   }
-  // Legacy Schema v3: cfg.slots { fast, workhorse, adversary }
   if (cfg?.slots && typeof cfg.slots === "object") {
     if (cfg.slots[mapped]) {
       const pref = cfg.slots[mapped]?.prefer || cfg.slots[mapped];
@@ -978,7 +1414,6 @@ function getSlotFromConfig(cfg, rawRole, harness) {
       return { slotName: mapped, slot: cfg.slots[mapped], source: "slots" };
     }
   }
-  // Legacy Schema v2: cfg.roles
   const roles = cfg?.roles || {};
   if (r === "scout" || r === "fast") return { slotName: "scout", slot: roles.scout, source: "roles" };
   if (r === "architect" || r === "architect.primary") return { slotName: "architect.primary", slot: roles.architect?.primary, source: "roles" };
@@ -1039,8 +1474,33 @@ function extractSlotRawModel(pref) {
   return pref.model || pref.modelHint || pref.swarmModel || "";
 }
 
+function buildStandaloneResolved(harness, surface, role) {
+  return {
+    harness,
+    surface,
+    role,
+    effort: "medium",
+    model: harness === "antigravity" ? "inherit" : null,
+    standalone: true,
+    ...(harness === "pi" ? { subagentArgs: {} } : {}),
+    ...(harness === "t3" ? { delegateTarget: null } : {}),
+  };
+}
+
+function enforceOptionsEffortFloor(rawOptions) {
+  if (!rawOptions || typeof rawOptions !== "object") return undefined;
+  const out = { ...rawOptions };
+  for (const k of ["thought_level", "reasoningEffort", "effort", "thinking"]) {
+    if (typeof out[k] === "string" && out[k].trim()) {
+      out[k] = enforceEffortFloor(out[k]);
+    }
+  }
+  return out;
+}
+
 function cmdResolveModel(args) {
   const { flags } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const harness = normalizeHarnessName(flags.harness || detectActiveHarness());
   const defaultSurface =
     harness === "t3"
@@ -1057,12 +1517,12 @@ function cmdResolveModel(args) {
   const ignoreCooldown = Boolean(flags["ignore-cooldown"]);
   const authorFamilyRaw = typeof flags["author-family"] === "string" ? flags["author-family"].trim() : "";
   const authorFam = authorFamilyRaw ? extractModelFamily(authorFamilyRaw) : "";
-  const needsCrossFamily = Boolean(authorFam && (role === "reviewer" || role === "judge" || role === "adversary" || role.startsWith("reviewer.")));
+  const targetSlotName = mapRoleToSlotName(role);
+  const needsCrossFamily = Boolean(authorFam && targetSlotName === "adversary");
 
   if (!fs.existsSync(configPath)) {
     if (allowStandalone) {
-      const isAgy = harness === "antigravity";
-      console.log(JSON.stringify({ ok: true, standalone: true, configPath, resolved: { harness, surface, role, model: isAgy ? "inherit" : null, standalone: true } }, null, 2));
+      console.log(JSON.stringify({ ok: true, standalone: true, configPath, resolved: buildStandaloneResolved(harness, surface, role) }, null, 2));
       return;
     }
     console.log(JSON.stringify({ ok: false, error: `未找到配置文件：${configPath}`, configPath }, null, 2));
@@ -1081,7 +1541,7 @@ function cmdResolveModel(args) {
         standalone: true,
         configPath,
         reason: `配置中未定义当前宿主 (${harness}) 的模型绑定，已降级为单兵模式`,
-        resolved: { harness, surface, role, model: harness === "antigravity" ? "inherit" : null, standalone: true },
+        resolved: buildStandaloneResolved(harness, surface, role),
       }, null, 2));
       return;
     }
@@ -1103,6 +1563,7 @@ function cmdResolveModel(args) {
   let activeBinding = extractBindingPair(activeSpec, harness) || extractBindingPair(slot, harness)?.prefer || extractBindingPair(slot, harness);
   let cooldownFallback = null;
   let crossFamilyFallback = null;
+  let cooldownWarning = null;
 
   const hsForSingle = getHarnessSection(cfg, harness);
   const allowSingleFamily = Boolean(hsForSingle?.section?.singleFamily || cfg?.singleFamily || harness === "antigravity");
@@ -1127,17 +1588,24 @@ function cmdResolveModel(args) {
   if (initialCd.active || initialSameFamilyConflict) {
     const candidateSpecs = [];
     if (slot?.backup) candidateSpecs.push({ spec: slot.backup, bind: extractBindingPair(slot.backup, harness) || extractBindingPair(slot, harness)?.backup });
-    if (needsCrossFamily) {
-      const slotMap = hsForSingle?.section?.slots || cfg?.slots;
-      if (slotMap && typeof slotMap === "object") {
-        for (const extraName of ["workhorse", "fast"]) {
-          const extraSlot = slotMap[extraName];
-          if (!extraSlot) continue;
-          if (extraSlot.prefer) candidateSpecs.push({ spec: extraSlot.prefer, bind: extractBindingPair(extraSlot.prefer, harness) });
-          if (extraSlot.backup) candidateSpecs.push({ spec: extraSlot.backup, bind: extractBindingPair(extraSlot.backup, harness) });
-        }
+    const slotMap = hsForSingle?.section?.slots || cfg?.slots;
+    if (slotMap && typeof slotMap === "object") {
+      const borrowOrder =
+        targetSlotName === "adversary"
+          ? ["workhorse", "fast"]
+          : targetSlotName === "workhorse"
+            ? ["adversary"]
+            : targetSlotName === "fast"
+              ? ["workhorse"]
+              : [];
+      for (const extraName of borrowOrder) {
+        const extraSlot = slotMap[extraName];
+        if (!extraSlot) continue;
+        if (extraSlot.prefer) candidateSpecs.push({ spec: extraSlot.prefer, bind: extractBindingPair(extraSlot.prefer, harness) });
+        if (extraSlot.backup) candidateSpecs.push({ spec: extraSlot.backup, bind: extractBindingPair(extraSlot.backup, harness) });
       }
     }
+    let switched = false;
     for (const cand of candidateSpecs) {
       const bSpec = cand.spec;
       const bBind = cand.bind;
@@ -1154,7 +1622,16 @@ function cmdResolveModel(args) {
       }
       activeSpec = bSpec;
       activeBinding = bBind;
+      switched = true;
       break;
+    }
+    if (!switched && initialCd.active) {
+      cooldownWarning = {
+        allCooledDown: true,
+        key: initialCd.key,
+        remainingSec: initialCd.remainingSec,
+        reason: initialCd.entry?.reason || "cooldown",
+      };
     }
   }
 
@@ -1216,7 +1693,7 @@ function cmdResolveModel(args) {
         modelHint: effectiveRawModel,
         effort,
         binding: null,
-        subagentArgs: { thinkingLevel: effort },
+        ...(harness === "pi" ? { subagentArgs: { thinkingLevel: effort } } : {}),
         backup: slot?.backup || null,
       };
     }
@@ -1244,12 +1721,14 @@ function cmdResolveModel(args) {
       fallbackOn429: "inherit",
       ...(cooldownFallback ? { cooldownFallback } : {}),
       ...(crossFamilyFallback ? { crossFamilyFallback } : {}),
+      ...(cooldownWarning ? { cooldownWarning } : {}),
     };
   } else if (harness === "t3") {
+    const safeOptions = enforceOptionsEffortFloor(activeBinding?.options);
     const delegateTarget = {
       ...(activeBinding?.providerInstanceId ? { providerInstanceId: activeBinding.providerInstanceId } : {}),
       ...(activeBinding?.model ? { model: activeBinding.model } : {}),
-      ...(activeBinding?.options && typeof activeBinding.options === "object" ? { options: activeBinding.options } : {}),
+      ...(safeOptions ? { options: safeOptions } : {}),
     };
     resolved = {
       harness: "t3",
@@ -1264,6 +1743,7 @@ function cmdResolveModel(args) {
       backup: slot?.backup || null,
       ...(cooldownFallback ? { cooldownFallback } : {}),
       ...(crossFamilyFallback ? { crossFamilyFallback } : {}),
+      ...(cooldownWarning ? { cooldownWarning } : {}),
     };
   } else {
     resolved = {
@@ -1271,18 +1751,24 @@ function cmdResolveModel(args) {
       surface,
       role,
       slot: slotName,
+      model: activeBinding?.model || activeSpec?.modelHint || null,
       modelHint: activeSpec?.modelHint || activeBinding?.model || null,
       family: resolvedFamily,
       effort,
       binding: activeBinding,
-      subagentArgs: {
-        ...(activeBinding?.providerInstanceId ? { provider: activeBinding.providerInstanceId } : {}),
-        ...(activeBinding?.model ? { model: activeBinding.model } : {}),
-        thinkingLevel: effort,
-      },
+      ...(harness === "pi" || harness === "local"
+        ? {
+            subagentArgs: {
+              ...(activeBinding?.providerInstanceId ? { provider: activeBinding.providerInstanceId } : {}),
+              ...(activeBinding?.model ? { model: activeBinding.model } : {}),
+              thinkingLevel: effort,
+            },
+          }
+        : {}),
       backup: slot?.backup || null,
       ...(cooldownFallback ? { cooldownFallback } : {}),
       ...(crossFamilyFallback ? { crossFamilyFallback } : {}),
+      ...(cooldownWarning ? { cooldownWarning } : {}),
     };
   }
 
@@ -1291,6 +1777,7 @@ function cmdResolveModel(args) {
 
 function cmdProviderHealth(args) {
   const { flags, positional } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   if (flags.record !== undefined && flags.record !== false) {
     const rawTarget = typeof flags.record === "string" && flags.record.trim() ? flags.record.trim() : String(positional[0] || "").trim();
     if (!rawTarget) {
@@ -1332,7 +1819,8 @@ function isParentAliasSlot(pref) {
   return isParentAlias(extractSlotRawModel(pref));
 }
 
-function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings) {
+function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings, isActiveTarget = true) {
+  const pushErr = (msg) => (isActiveTarget ? errors.push(msg) : warnings.push(`[非当前宿主] ${msg}`));
   for (const sName of ["fast", "workhorse", "adversary"]) {
     const s = slotsObj?.[sName];
     const pref = s?.prefer;
@@ -1343,7 +1831,7 @@ function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings)
         Object.values(pref.bindings).some((b) => b && typeof b === "object" && (b.model || b.swarmModel)),
     );
     if (!rawModel && !hasAnyBindingModel) {
-      errors.push(`${label}.${sName}.prefer 缺失`);
+      pushErr(`${label}.${sName}.prefer 缺失`);
     }
     const prefEffort = String(pref?.effort || "").trim().toLowerCase();
     if (prefEffort && ["low", "minimal", "off", "none"].includes(prefEffort)) {
@@ -1363,7 +1851,7 @@ function validateSlotTable(slotsObj, label, allowSingleFamily, errors, warnings)
     if (wf && af && wf === af) {
       const msg = `${label}: workhorse (${wf}) 与 adversary (${af}) 属于同一模型家族`;
       if (allowSingleFamily) warnings.push(`${msg}（已启用 singleFamily 单家族豁免）`);
-      else errors.push(`${msg}（非 singleFamily 模式必须为不同模型家族）`);
+      else pushErr(`${msg}（非 singleFamily 模式必须为不同模型家族）`);
     }
   }
 }
@@ -1384,8 +1872,10 @@ function extractOptionFromT3Model(modelObj) {
   return { optionKey: null, supportedEfforts: null };
 }
 
+const NOISE_LINE_RE = /^(?:warning|warn|error|err|note|info|hint|total|deprecated|usage)\b\s*[:\-]/i;
+
 function parseCandidateModelsInput(rawText, harness) {
-  const trimmed = String(rawText || "").replace(/^\uFEFF/, "").trim();
+  const trimmed = stripAnsiAndControl(String(rawText || "")).replace(/^\uFEFF/, "").trim();
   if (!trimmed) return { items: [], inferredPreferProvider: null };
 
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
@@ -1440,10 +1930,14 @@ function parseCandidateModelsInput(rawText, harness) {
   const items = [];
   for (const rawLine of trimmed.split(/\r?\n/)) {
     const line = rawLine.trim();
-    if (!line || /^[-=]+$/.test(line) || /^provider\s+model\b/i.test(line)) continue;
+    if (!line || /^[-=─━]+$/.test(line) || /^provider\s+model\b/i.test(line) || NOISE_LINE_RE.test(line)) continue;
     const cols = line.split(/\s+/);
-    if (cols.length >= 2) items.push({ providerInstanceId: cols[0].trim(), model: cols[1].trim(), optionKey: null, supportedEfforts: null });
-    else if (cols.length === 1 && cols[0]) items.push({ providerInstanceId: "", model: cols[0].trim(), optionKey: null, supportedEfforts: null });
+    if (cols.length >= 2) {
+      if (/:$/.test(cols[0])) continue;
+      items.push({ providerInstanceId: cols[0].trim(), model: cols[1].trim(), optionKey: null, supportedEfforts: null });
+    } else if (cols.length === 1 && cols[0] && !/:$/.test(cols[0])) {
+      items.push({ providerInstanceId: "", model: cols[0].trim(), optionKey: null, supportedEfforts: null });
+    }
   }
   return { items, inferredPreferProvider: null };
 }
@@ -1501,12 +1995,13 @@ function formatRecommendedEntry(entry, roleSlot, harness, targetEffort, ladder) 
     };
   }
   if (harness === "antigravity") {
+    const cleanBase = entry.baseModel.replace(/-(?:low|medium|high|xhigh)$/i, "");
     return {
       family: entry.family,
-      modelHint: entry.baseModel,
+      modelHint: cleanBase,
       effort,
       model: "inherit",
-      swarmModel: `${entry.baseModel}-${effort}`,
+      swarmModel: `${cleanBase}-${effort}`,
     };
   }
   return {
@@ -1520,6 +2015,7 @@ function formatRecommendedEntry(entry, roleSlot, harness, targetEffort, ladder) 
 
 async function cmdRecommendModels(args) {
   const { flags } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const harness = normalizeHarnessName(flags.harness || detectActiveHarness());
   const catalog = loadModelsCatalog();
   const budgetKey = String(flags.budget || "medium").trim().toLowerCase();
@@ -1558,7 +2054,10 @@ async function cmdRecommendModels(args) {
   const enriched = [];
   for (const item of parsed.items) {
     const lowModel = item.model.toLowerCase();
-    const baseModel = (lowModel.split("/").pop() || lowModel).trim();
+    let baseModel = (lowModel.split("/").pop() || lowModel).trim();
+    if (harness === "antigravity") {
+      baseModel = baseModel.replace(/-(?:low|medium|high|xhigh)$/i, "");
+    }
     if (!baseModel || isParentAlias(baseModel) || excludeRes.some((re) => re.test(baseModel) || re.test(lowModel))) continue;
     let routePriority = 1;
     if (harness === "t3") {
@@ -1577,7 +2076,7 @@ async function cmdRecommendModels(args) {
     const family = extractModelFamily(baseModel);
     enriched.push({
       key: `${item.providerInstanceId}\0${item.model}`.toLowerCase(),
-      dedupKey: harness === "t3" ? baseModel : `${item.providerInstanceId.toLowerCase()}\0${baseModel}`,
+      dedupKey: harness === "t3" || harness === "antigravity" ? baseModel : `${item.providerInstanceId.toLowerCase()}\0${baseModel}`,
       providerInstanceId: item.providerInstanceId,
       model: item.model,
       baseModel,
@@ -1710,8 +2209,124 @@ async function cmdRecommendModels(args) {
   }, null, 2));
 }
 
+function detectProjectProfile(targetRepo, verifyCtlPath, verifySkillPath, projectJsonExists) {
+  let isGitRepo = false;
+  let hasHeadCommit = false;
+  let dirtyFilesCount = 0;
+  try {
+    execFileSync("git", ["-C", targetRepo, "rev-parse", "--git-dir"], { stdio: ["ignore", "pipe", "pipe"] });
+    isGitRepo = true;
+  } catch {}
+  if (isGitRepo) {
+    try {
+      execFileSync("git", ["-C", targetRepo, "rev-parse", "--verify", "--quiet", "HEAD"], { stdio: ["ignore", "pipe", "pipe"] });
+      hasHeadCommit = true;
+    } catch {}
+    try {
+      const st = execFileSync("git", ["-C", targetRepo, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      dirtyFilesCount = st ? st.split(/\r?\n/).length : 0;
+    } catch {}
+  }
+
+  let packageManager = null;
+  const detectedCmds = { test: null, lint: null, typecheck: null, build: null, dev: null };
+  let appShape = "empty";
+
+  const pkgPath = path.join(targetRepo, "package.json");
+  if (fs.existsSync(pkgPath)) {
+    if (fs.existsSync(path.join(targetRepo, "pnpm-lock.yaml"))) packageManager = "pnpm";
+    else if (fs.existsSync(path.join(targetRepo, "yarn.lock"))) packageManager = "yarn";
+    else if (fs.existsSync(path.join(targetRepo, "bun.lockb")) || fs.existsSync(path.join(targetRepo, "bun.lock"))) packageManager = "bun";
+    else packageManager = "npm";
+    const runPrefix = packageManager === "npm" ? "npm run" : packageManager;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      const scripts = pkg.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+      if (scripts.test) detectedCmds.test = packageManager === "npm" ? "npm test" : `${packageManager} test`;
+      if (scripts.lint) detectedCmds.lint = `${runPrefix} lint`;
+      if (scripts.typecheck) detectedCmds.typecheck = `${runPrefix} typecheck`;
+      else if (scripts["type-check"]) detectedCmds.typecheck = `${runPrefix} type-check`;
+      else if (fs.existsSync(path.join(targetRepo, "tsconfig.json"))) detectedCmds.typecheck = "npx tsc --noEmit";
+      if (scripts.build) detectedCmds.build = `${runPrefix} build`;
+      if (scripts.dev) detectedCmds.dev = `${runPrefix} dev`;
+      else if (scripts.start) detectedCmds.dev = `${runPrefix} start`;
+
+      const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      const depKeys = Object.keys(allDeps);
+      if (depKeys.some((d) => /^(react|next|vue|nuxt|svelte|vite|astro|solid-js|@angular\/core|tailwindcss|electron)$/i.test(d))) {
+        appShape = "web";
+      } else if (depKeys.some((d) => /^(express|fastify|koa|hono|@nestjs\/core|elysia)$/i.test(d))) {
+        appShape = "api";
+      } else if (pkg.bin) {
+        appShape = "cli";
+      } else {
+        appShape = "lib";
+      }
+    } catch {
+      appShape = "lib";
+    }
+  } else if (fs.existsSync(path.join(targetRepo, "pyproject.toml")) || fs.existsSync(path.join(targetRepo, "requirements.txt"))) {
+    packageManager = fs.existsSync(path.join(targetRepo, "uv.lock")) ? "uv" : fs.existsSync(path.join(targetRepo, "poetry.lock")) ? "poetry" : "pip";
+    detectedCmds.test = packageManager === "uv" ? "uv run pytest" : "pytest";
+    appShape = "lib";
+  } else if (fs.existsSync(path.join(targetRepo, "Cargo.toml"))) {
+    packageManager = "cargo";
+    detectedCmds.test = "cargo test";
+    detectedCmds.build = "cargo build";
+    detectedCmds.lint = "cargo clippy";
+    appShape = "cli";
+  } else if (fs.existsSync(path.join(targetRepo, "go.mod"))) {
+    packageManager = "go";
+    detectedCmds.test = "go test ./...";
+    detectedCmds.build = "go build ./...";
+    appShape = "api";
+  } else {
+    try {
+      const entries = fs.readdirSync(targetRepo).filter((n) => n !== ".git");
+      appShape = entries.length === 0 ? "empty" : "unknown";
+    } catch {
+      appShape = "empty";
+    }
+  }
+
+  let hasDenyCommands = false;
+  if (projectJsonExists) {
+    try {
+      const pcfg = JSON.parse(fs.readFileSync(path.join(targetRepo, ".agents", "zee.project.json"), "utf8"));
+      hasDenyCommands = Array.isArray(pcfg.denyCommands) && pcfg.denyCommands.length > 0;
+    } catch {}
+  }
+
+  const hasVerify = Boolean(verifyCtlPath || verifySkillPath);
+  const hasTest = Boolean(detectedCmds.test);
+  const hasStaticCheck = Boolean(detectedCmds.lint || detectedCmds.typecheck);
+
+  let verifiability = "minimal";
+  let recommendedTrust = "T1";
+  if (hasVerify && hasTest && (hasStaticCheck || hasDenyCommands)) {
+    verifiability = "ready";
+    recommendedTrust = "T2";
+  } else if (hasVerify || hasTest) {
+    verifiability = "partial";
+    recommendedTrust = "T1";
+  }
+
+  return {
+    isGitRepo,
+    hasHeadCommit,
+    dirtyFilesCount,
+    packageManager,
+    appShape,
+    detectedCmds,
+    verifyCtlPath,
+    verifiability,
+    recommendedTrust,
+  };
+}
+
 function cmdDoctor(args) {
   const { flags } = parseFlags(args);
+  if (flags.help) { usage(); return; }
   const activeHarness = normalizeHarnessName(flags.harness || detectActiveHarness());
   const runtimeProvider = detectRuntimeProvider();
   const configPath = typeof flags.config === "string" ? flags.config : process.env.ZEE_CONFIG_PATH?.trim() || DEFAULT_CONFIG;
@@ -1724,11 +2339,12 @@ function cmdDoctor(args) {
   let activeHarnessConfigured = false;
 
   if (!fs.existsSync(configPath)) {
-    warnings.push(`未配置 ${configPath}（单兵模式可用 --allow-standalone；完整多模型请运行 /zee-setup 为 ${activeHarness} 配置 fast/workhorse/adversary 3 槽位）`);
+    warnings.push(`未配置 ${configPath}（零配置单兵开箱可用；多模型异构请按需运行 /zee-setup 为 ${activeHarness} 配置 3 槽位）`);
   } else {
     try {
       cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
       configuredHarnesses = listConfiguredHarnesses(cfg);
+      const activeKeys = new Set(getHarnessKeys(activeHarness));
       const hasHarnessesSlots = Boolean(
         cfg.harnesses &&
           typeof cfg.harnesses === "object" &&
@@ -1738,11 +2354,12 @@ function cmdDoctor(args) {
         for (const [hKey, hCfg] of Object.entries(cfg.harnesses)) {
           if (!hCfg || typeof hCfg !== "object" || !hCfg.slots || typeof hCfg.slots !== "object") continue;
           const allowSingle = Boolean(hCfg.singleFamily) || hKey === "agy" || hKey === "antigravity";
-          validateSlotTable(hCfg.slots, `harnesses.${hKey}.slots`, allowSingle, errors, warnings);
+          const isActiveTarget = activeKeys.has(hKey) || activeHarness === "local";
+          validateSlotTable(hCfg.slots, `harnesses.${hKey}.slots`, allowSingle, errors, warnings, isActiveTarget);
         }
       }
       if (cfg.slots && typeof cfg.slots === "object") {
-        validateSlotTable(cfg.slots, "slots", Boolean(cfg.singleFamily), errors, warnings);
+        validateSlotTable(cfg.slots, "slots", Boolean(cfg.singleFamily), errors, warnings, !hasHarnessesSlots || activeHarness === "local");
       }
       if (!hasHarnessesSlots && !(cfg.slots && typeof cfg.slots === "object")) {
         if (cfg.roles && typeof cfg.roles === "object") {
@@ -1770,7 +2387,7 @@ function cmdDoctor(args) {
       }
       if (!activeHarnessConfigured) {
         warnings.push(
-          `当前宿主 (${activeHarness}) 尚未配置专属模型槽位（已有宿主：${configuredHarnesses.join(", ") || "无"}），请运行 /zee-setup 为当前宿主分配模型，或使用 --allow-standalone 单兵模式。`,
+          `当前宿主 (${activeHarness}) 尚未配置专属模型槽位（已有宿主：${configuredHarnesses.join(", ") || "无"}），可直接单兵开箱运行或按需跑 /zee-setup。`,
         );
       }
     } catch (e) {
@@ -1788,42 +2405,54 @@ function cmdDoctor(args) {
   } catch { busWritable = false; }
 
   let repoStatus = null;
+  let projectProfile = null;
   if (targetRepo) {
-    let verifySkill = null;
-    for (const sub of PROJECT_SKILLS_SUBDIRS) {
-      const dir = path.join(targetRepo, sub);
-      if (!fs.existsSync(dir)) continue;
-      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (ent.isDirectory() && /^verify-/i.test(ent.name) && fs.existsSync(path.join(dir, ent.name, "SKILL.md"))) {
-          verifySkill = path.join(dir, ent.name, "SKILL.md");
-          break;
+    if (!fs.existsSync(targetRepo)) {
+      errors.push(`目标仓库路径不存在：${targetRepo}`);
+    } else {
+      let verifySkill = null;
+      let verifyCtlPath = fs.existsSync(path.join(targetRepo, ".agents", "verify-ctl.mjs"))
+        ? path.join(targetRepo, ".agents", "verify-ctl.mjs")
+        : null;
+      for (const sub of PROJECT_SKILLS_SUBDIRS) {
+        const dir = path.join(targetRepo, sub);
+        if (!fs.existsSync(dir)) continue;
+        for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (ent.isDirectory() && /^verify-/i.test(ent.name)) {
+            const skillDir = path.join(dir, ent.name);
+            if (!verifySkill && fs.existsSync(path.join(skillDir, "SKILL.md"))) {
+              verifySkill = path.join(skillDir, "SKILL.md");
+            }
+            if (!verifyCtlPath) {
+              const scriptsDir = path.join(skillDir, "scripts");
+              if (fs.existsSync(scriptsDir)) {
+                const ctl = fs.readdirSync(scriptsDir).find((f) => /^verify-ctl\.(?:mjs|js|py|sh)$/i.test(f));
+                if (ctl) verifyCtlPath = path.join(scriptsDir, ctl);
+              }
+            }
+          }
         }
       }
-      if (verifySkill) break;
+      const projectJson = fs.existsSync(path.join(targetRepo, ".agents", "zee.project.json"));
+      projectProfile = detectProjectProfile(targetRepo, verifyCtlPath, verifySkill, projectJson);
+      if (!projectProfile.isGitRepo) {
+        warnings.push("目标目录尚非 Git 仓库，0→1 自动驾驶请使用 init-run --ensure-git 自动初始化基线。");
+      } else if (!projectProfile.hasHeadCommit) {
+        warnings.push("目标仓库尚无基线 commit（HEAD 不存在），启用 worktree 或 /zee-night 前请用 init-run --ensure-git 建基线提交。");
+      } else if (projectProfile.dirtyFilesCount > 0) {
+        warnings.push(`目标仓库存在 ${projectProfile.dirtyFilesCount} 项未提交改动，新建 worktree 仅基于 HEAD，未提交改动不会同步到子代理工作树。`);
+      }
+      repoStatus = {
+        repoRoot: targetRepo,
+        isGitRepo: projectProfile.isGitRepo,
+        projectJson,
+        verifyCtl: Boolean(verifyCtlPath),
+        verifyCtlPath,
+        verifySkill,
+        hasHeadCommit: projectProfile.hasHeadCommit,
+        dirtyFilesCount: projectProfile.dirtyFilesCount,
+      };
     }
-    let hasHeadCommit = false;
-    let dirtyFilesCount = 0;
-    try {
-      execFileSync("git", ["-C", targetRepo, "rev-parse", "--verify", "--quiet", "HEAD"], { stdio: ["ignore", "pipe", "pipe"] });
-      hasHeadCommit = true;
-    } catch {}
-    try {
-      const st = execFileSync("git", ["-C", targetRepo, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-      dirtyFilesCount = st ? st.split(/\r?\n/).length : 0;
-    } catch {}
-    if (!hasHeadCommit) {
-      warnings.push("目标仓库尚无基线 commit（HEAD 不存在），启用 worktree 或 /zee-night 前请先建一次基础 git commit。");
-    } else if (dirtyFilesCount > 0) {
-      warnings.push(`目标仓库存在 ${dirtyFilesCount} 项未提交改动，新建 worktree 仅基于 HEAD，未提交改动不会同步到子代理工作树。`);
-    }
-    repoStatus = {
-      repoRoot: targetRepo,
-      projectJson: fs.existsSync(path.join(targetRepo, ".agents", "zee.project.json")),
-      verifyCtl: fs.existsSync(path.join(targetRepo, ".agents", "verify-ctl.mjs")),
-      verifySkill,
-      hasHeadCommit,
-      dirtyFilesCount,
-    };
   }
 
   const cooldowns = listActiveCooldowns();
@@ -1841,27 +2470,40 @@ function cmdDoctor(args) {
     errors,
     warnings,
     repoStatus,
+    projectProfile,
     providerHealth: { activeCount: cooldowns.length, cooldowns },
   }, null, 2));
   process.exit(ok ? 0 : 1);
 }
 
-const [, , cmd, ...rest] = process.argv;
-switch (cmd) {
-  case "init-run": cmdInitRun(rest); break;
-  case "update-state": await cmdUpdateState(rest); break;
-  case "log-decision": cmdLogDecision(rest); break;
-  case "list-runs": cmdListRuns(rest[0]); break;
-  case "worktree-create": cmdWorktreeCreate(rest); break;
-  case "cleanup-worktrees": cmdCleanupWorktrees(rest); break;
-  case "sandbox-export": cmdSandboxExport(rest); break;
-  case "sandbox-clean": cmdSandboxClean(rest); break;
-  case "gate-tamper-diff": cmdGateTamperDiff(rest); break;
-  case "recommend-models": await cmdRecommendModels(rest); break;
-  case "resolve-model": cmdResolveModel(rest); break;
-  case "provider-health": cmdProviderHealth(rest); break;
-  case "doctor": cmdDoctor(rest); break;
-  default:
-    usage();
-    process.exit(cmd ? 1 : 0);
+try {
+  const [, , cmd, ...rest] = process.argv;
+  switch (cmd) {
+    case "init-run": cmdInitRun(rest); break;
+    case "update-state": await cmdUpdateState(rest); break;
+    case "log-decision": cmdLogDecision(rest); break;
+    case "list-runs": cmdListRuns(rest); break;
+    case "finding": cmdFinding(rest); break;
+    case "worktree-create": cmdWorktreeCreate(rest); break;
+    case "cleanup-worktrees": cmdCleanupWorktrees(rest); break;
+    case "sandbox-export": cmdSandboxExport(rest); break;
+    case "sandbox-clean": cmdSandboxClean(rest); break;
+    case "gate-tamper-diff": cmdGateTamperDiff(rest); break;
+    case "recommend-models": await cmdRecommendModels(rest); break;
+    case "resolve-model": cmdResolveModel(rest); break;
+    case "provider-health": cmdProviderHealth(rest); break;
+    case "doctor": cmdDoctor(rest); break;
+    case "--help":
+    case "-h":
+    case "help":
+    case undefined:
+      usage();
+      process.exit(0);
+    default:
+      usage();
+      process.exit(1);
+  }
+} catch (err) {
+  console.error(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+  process.exit(1);
 }

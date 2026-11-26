@@ -1,12 +1,12 @@
 /**
- * zee Pi Extension v5.1.0 — 极简个人主厨编排器 + zee_subagent 并行引擎
+ * zee Pi Extension v5.2.0 — 个人主厨自动驾驶编排器 + zee_subagent 并行引擎
  *
- * 保留硬核能力：
- * 1. 8 个干净命令（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup、/zee-mode），无 /skill:zee* 重影
- * 2. 1 行状态栏徽章（setStatus("zee-mode")，绝不调用 setFooter()，静默支持 Print/JSON/ZEE_WORKER=1）
- * 3. 工具级安全守卫：项目 denyCommands + 破坏性命令 + plan/review 写路径锁与增量脏树告警（不误拦 Bash 只读操作）
- * 4. zee_subagent：-ne -e worker-guard.ts、429/5xx 跨会话熔断 0ms 切备免扣预算、10s 心跳、Windows 进程树强杀、
- *    声明式原子 worktree + junction node_modules + 嵌套分支扁平化、>2KB 抢救落盘、70% 截断、只读事后脏区回滚
+ * 保留硬核能力并修复全层审计边界：
+ * 1. 8 个干净命令（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup、/zee-mode），默认 auto 开箱即用
+ * 2. 1 行状态栏徽章（setStatus("zee-mode")，绝不调用 setFooter()，静默支持 Print/JSON/ZEE_WORKER=1；非交互 pi -p 主会话仍注入路由）
+ * 3. 工具级安全守卫：项目 denyCommands + 跨平台破坏性命令 + plan/review 写路径锁与空仓兼容的增量脏树告警
+ * 4. zee_subagent：-ne -e worker-guard.ts、429/5xx 跨会话熔断 0ms 切备免扣预算、10s 心跳、Windows 进程树强杀 + 孙进程管道防挂死、
+ *    声明式原子 worktree（含活锁检查与安全 junction 卸载）、>2KB 抢救落盘、70% 截断、只读事后脏区回滚与全量 adversary 跨家族硬拦截
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -39,7 +39,9 @@ import {
 	clearModelCooldown,
 	findHealthyPiFallback,
 	getModelCooldown,
+	isPiSingleFamilyConfig,
 	makeModelHealthKey,
+	mapRoleToSlotName,
 	recordModelCooldown,
 } from "../skills/zee/scripts/lib/provider-health.mjs";
 import { atomicWriteJson, withFileLock } from "../skills/zee/scripts/lib/fs-atomic.mjs";
@@ -47,10 +49,12 @@ import {
 	ensureNodeModulesMount,
 	killProcessTree,
 	repoKeyCandidates,
+	resolveGitRoot,
 	resolveRepoRunDir,
 	resolveSafeWorktreeBranch,
 	sanitizeSlug,
 	stripAnsiAndControl,
+	unmountNodeModulesLink,
 } from "../skills/zee/scripts/lib/repo-utils.mjs";
 
 export { resolveSafeWorktreeBranch };
@@ -78,11 +82,14 @@ const ROLE_DEFAULT_IDLE_TIMEOUT_MS: Record<string, number> = { reviewer: 180_000
 const TOOL_EXEC_IDLE_TIMEOUT_MS = 180_000;
 const THINKING_STREAM_TIMEOUT_MS = 240_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const EXIT_CLOSE_GRACE_MS = 2_000;
+const MAX_STDERR_CHARS = 65_536;
 const DEFAULT_MAX_REPEAT_ERRORS = 4;
 const READ_ONLY_AUDIT_ROLES = new Set(["scout", "architect", "judge", "verifier", "reviewer"]);
 const MIN_ROLE_TIMEOUT_FLOOR_MS = 120_000;
 const SAFE_TIMEOUT_ROLES = new Set(["scout", "judge", "verifier", "reviewer", "coder", "ui", "architect"]);
 const DEFAULT_NIGHT_STALE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_WORKTREE_LOCK_TTL_MS = 12 * 60 * 60 * 1000;
 
 export function resolveEffectiveSubagentTimeout(role: string, requestedMs?: number): number {
 	const r = String(role || "").trim().toLowerCase();
@@ -120,9 +127,10 @@ function extractMessageText(content: unknown): string {
 }
 
 function isSubagentContext(event: BeforeAgentStartEvent, ctx: ExtensionContext): boolean {
-	if (process.env.ZEE_WORKER === "1" || !ctx.hasUI) return true;
+	if (process.env.ZEE_WORKER === "1") return true;
 	if (event.messageType === "user" && containsWorkerSentinel(event.prompt)) return true;
-	for (const entry of ctx.sessionManager.getBranch()) {
+	const branch = ctx.sessionManager?.getBranch?.() || [];
+	for (const entry of branch) {
 		if (entry.type === "message" && entry.message && entry.message.role === "user") {
 			if (containsWorkerSentinel(extractMessageText(entry.message.content))) return true;
 			break;
@@ -155,12 +163,15 @@ function collectPiBindingsFromConfig(
 			if (!node || typeof node !== "object") return;
 			if (Array.isArray(node)) { node.forEach(walk); return; }
 			const obj = node as Record<string, unknown>;
+			const bindingsObj = obj.bindings && typeof obj.bindings === "object" ? (obj.bindings as Record<string, unknown>) : null;
+			const hasNonPiBindingsOnly = Boolean(bindingsObj && Object.keys(bindingsObj).length > 0 && !bindingsObj.pi);
+			if (hasNonPiBindingsOnly) return;
+			if (bindingsObj?.pi) {
+				walk(bindingsObj.pi);
+				return;
+			}
 			if (typeof obj.providerInstanceId === "string" && typeof obj.model === "string") {
 				pushPair(obj.providerInstanceId, obj.model);
-			}
-			if (obj.bindings && typeof obj.bindings === "object") {
-				const piBind = (obj.bindings as Record<string, unknown>).pi;
-				if (piBind) walk(piBind);
 			}
 			for (const [k, val] of Object.entries(obj)) {
 				if (k !== "bindings" && val && typeof val === "object") walk(val);
@@ -280,7 +291,8 @@ function persistPartialSalvage(busDir: string, role: string, rescuedText: string
 	try {
 		const artDir = path.join(busDir, "artifacts");
 		fs.mkdirSync(artDir, { recursive: true });
-		const filePath = path.join(artDir, `partial-${sanitizeSlug(role)}-${Date.now()}.md`);
+		const rand = Math.random().toString(36).slice(2, 8);
+		const filePath = path.join(artDir, `partial-${sanitizeSlug(role)}-${Date.now()}-${rand}.md`);
 		fs.writeFileSync(filePath, rescuedText + "\n", "utf8");
 		return filePath;
 	} catch {
@@ -288,19 +300,52 @@ function persistPartialSalvage(busDir: string, role: string, rescuedText: string
 	}
 }
 
+function isWorktreeActiveLocked(wtPath: string): boolean {
+	const lockPath = `${wtPath}.zee-lock.json`;
+	if (!fs.existsSync(lockPath)) return false;
+	try {
+		const data = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: unknown; createdAt?: string };
+		const createdMs = Date.parse(data?.createdAt || "");
+		const maxTtlRaw = Number(process.env.ZEE_WORKTREE_LOCK_TTL_MS);
+		const maxTtlMs = Number.isFinite(maxTtlRaw) && maxTtlRaw > 0 ? maxTtlRaw : DEFAULT_WORKTREE_LOCK_TTL_MS;
+		if (Number.isFinite(createdMs) && Date.now() - createdMs > maxTtlMs) return false;
+		const pid = Number(data?.pid);
+		if (Number.isInteger(pid) && pid > 0) {
+			try { process.kill(pid, 0); return true; }
+			catch (e) { return Boolean((e as NodeJS.ErrnoException)?.code === "EPERM"); }
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
 function prepareAtomicWorktree(spec: { repoRoot: string; slug: string; lane: string; baseRef: string; branch?: string }) {
 	const absRepo = path.resolve(spec.repoRoot);
 	if (!fs.existsSync(absRepo)) throw new Error(`主仓库不存在：${absRepo}`);
+	try {
+		execFileSync("git", ["-C", absRepo, "rev-parse", "--verify", "--quiet", spec.baseRef], { stdio: ["ignore", "pipe", "pipe"] });
+	} catch {
+		throw new Error(`无法创建 worktree：基准引用 "${spec.baseRef}" 不存在（0→1 空仓请先执行 init-run --ensure-git 或创建首次提交）。`);
+	}
 	const wtRoot = path.join(resolveRepoRunDir(RUNS_ROOT, absRepo), sanitizeSlug(spec.slug), "worktrees");
 	const wtPath = path.join(wtRoot, sanitizeSlug(spec.lane));
 	fs.mkdirSync(wtRoot, { recursive: true });
 
 	if (fs.existsSync(wtPath)) {
+		if (isWorktreeActiveLocked(wtPath)) {
+			throw new Error(`worktree 正被活跃子代理占用，拒绝覆盖：${wtPath}`);
+		}
 		let dirty = "";
 		try { dirty = execFileSync("git", ["-C", wtPath, "status", "--porcelain"], { encoding: "utf8" }).trim(); } catch {}
 		if (dirty) throw new Error(`worktree 目录存在未提交改动，拒绝覆盖：${wtPath}`);
+		unmountNodeModulesLink(wtPath);
 		try { execFileSync("git", ["-C", absRepo, "worktree", "remove", "--force", wtPath], { stdio: "ignore" }); }
 		catch { fs.rmSync(wtPath, { recursive: true, force: true }); }
+		if (fs.existsSync(wtPath)) {
+			fs.rmSync(wtPath, { recursive: true, force: true });
+			try { execFileSync("git", ["-C", absRepo, "worktree", "prune"], { stdio: "ignore" }); } catch {}
+		}
 	}
 
 	const gitArgs = ["-C", absRepo, "worktree", "add"];
@@ -330,17 +375,25 @@ function removeWorktreeActiveLock(lockPath: string | undefined): void {
 	try { fs.rmSync(lockPath, { force: true }); } catch {}
 }
 
-function readGitSnapshot(cwd: string): { isGit: boolean; head: string; statusLines: string[] } {
+export function readGitSnapshot(cwd: string): { isGit: boolean; head: string; statusLines: string[] } {
 	try {
-		const head = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		execFileSync("git", ["-C", cwd, "rev-parse", "--git-dir"], { stdio: ["ignore", "pipe", "ignore"] });
+	} catch {
+		return { isGit: false, head: "", statusLines: [] };
+	}
+	let head = "";
+	try {
+		head = execFileSync("git", ["-C", cwd, "rev-parse", "--verify", "--quiet", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	} catch {}
+	let statusLines: string[] = [];
+	try {
 		const statusRaw = execFileSync("git", ["-C", cwd, "-c", "core.quotepath=false", "status", "--porcelain"], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 		});
-		return { isGit: true, head, statusLines: statusRaw.split(/\r?\n/).filter((l) => l.trim().length > 0) };
-	} catch {
-		return { isGit: false, head: "", statusLines: [] };
-	}
+		statusLines = statusRaw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+	} catch {}
+	return { isGit: true, head, statusLines };
 }
 
 function expandUntrackedDirPaths(cwd: string, relDir: string): string[] {
@@ -369,7 +422,7 @@ function parsePorcelainPaths(line: string): string[] {
 
 function inferGateFromZeeArgs(args: string): GateMode {
 	const t = args.trim();
-	if (/^(?:plan|init)\b/i.test(t)) return "plan";
+	if (/^(?:plan|init)\b/i.test(t) && !/(?:--autopilot|直接实施|全自动|自动驾驶)/i.test(t)) return "plan";
 	if (/^(?:review|verify\s+run)\b/i.test(t)) return "review";
 	return "none";
 }
@@ -377,19 +430,63 @@ function inferGateFromZeeArgs(args: string): GateMode {
 function isBenignReadOnlySearchCommand(toolName: string, rawArgsObj: unknown): boolean {
 	if (toolName !== "bash" && toolName !== "powershell") return false;
 	const cmd = rawArgsObj && typeof rawArgsObj === "object" && "command" in rawArgsObj ? String((rawArgsObj as { command?: unknown }).command ?? "").trim() : "";
-	return /^(?:rg|grep|egrep|fgrep|diff)\b/.test(cmd);
+	return /^(?:rg|grep|egrep|fgrep|diff|findstr|select-string|sls|git\s+(?:diff|grep|status|log))\b/i.test(cmd);
+}
+
+function getNightStaleMs(): number {
+	const n = Number(process.env.ZEE_NIGHT_STALE_MS);
+	return Number.isFinite(n) && n > 0 ? n : DEFAULT_NIGHT_STALE_MS;
+}
+
+function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string | null } | null {
+	if (!cwd || !fs.existsSync(RUNS_ROOT)) return null;
+	const maxAgeMs = getNightStaleMs();
+	const now = Date.now();
+	let latest: { slug: string; resumeNext: string | null; tsMs: number; hasReport: boolean } | null = null;
+	try {
+		const gitRoot = resolveGitRoot(cwd);
+		const keySet = new Set<string>(repoKeyCandidates(cwd));
+		if (gitRoot) repoKeyCandidates(gitRoot).forEach((k: string) => keySet.add(k));
+		for (const key of keySet) {
+			const repoRunDir = path.join(RUNS_ROOT, key);
+			if (!fs.existsSync(repoRunDir)) continue;
+			for (const ent of fs.readdirSync(repoRunDir, { withFileTypes: true })) {
+				if (!ent.isDirectory()) continue;
+				const runDir = path.join(repoRunDir, ent.name);
+				const sp = path.join(runDir, "state.json");
+				if (!fs.existsSync(sp)) continue;
+				try {
+					const st = JSON.parse(fs.readFileSync(sp, "utf8")) as { mode?: string; status?: string; slug?: string; resumeNext?: string | null; updatedAt?: string; createdAt?: string };
+					if (st.mode !== "night" || st.status !== "running") continue;
+					const tsMs = Date.parse(st.updatedAt || st.createdAt || "") || fs.statSync(sp).mtimeMs;
+					if (Number.isFinite(tsMs) && now - tsMs > maxAgeMs) continue;
+					if (!latest || tsMs > latest.tsMs) {
+						latest = {
+							slug: String(st.slug || ent.name),
+							resumeNext: st.resumeNext ?? null,
+							tsMs,
+							hasReport: fs.existsSync(path.join(runDir, "morning-report.md")),
+						};
+					}
+				} catch {}
+			}
+		}
+	} catch {
+		return null;
+	}
+	return latest && !latest.hasReport ? { slug: latest.slug, resumeNext: latest.resumeNext } : null;
 }
 
 function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string {
 	const lines = [
-		"## zee 个人主厨路由",
+		"## zee 个人主厨自动驾驶路由",
 		mode === "strict"
-			? `- Mode: **STRICT**（非闲聊工程任务须先加载 \`${ZEE_SKILL_DIR}/SKILL.md\`）`
-			: `- Mode: **AUTO**（简单问答直答；非平凡开发/修 Bug/重构/过夜加载 \`${ZEE_SKILL_DIR}/SKILL.md\`）`,
+			? `- Mode: **STRICT**（非闲聊工程任务须先加载 \`${ZEE_SKILL_DIR}/SKILL.md\` 并全自动交付）`
+			: `- Mode: **AUTO**（纯问答直答；创建项目/新增需求/修改设计/Bug修复/性能迭代自动加载 \`${ZEE_SKILL_DIR}/SKILL.md\` 零干扰推进到底）`,
 		`- **Skills Root**: \`${SKILLS_ROOT}\`（7 个核心技能：\`zee\`, \`zee-plan\`, \`zee-verify\`, \`zee-review\`, \`zee-night\`, \`zee-retro\`, \`zee-setup\`）`,
 		"- **Subagents**: 并发/隔离工作树派发统一调用 `zee_subagent`（传递 `role`, `provider`, `model`, `thinkingLevel`, `worktree`, `authorFamily`）。",
 	];
-	if (gate === "plan") lines.push("- **ACTIVE WRITE LOCK (`plan`)**: 禁止写业务源码，仅允许写计划文档/总线/沙盒。");
+	if (gate === "plan") lines.push("- **ACTIVE WRITE LOCK (`plan`)**: 禁止写业务源码，仅允许写计划/设计文档、总线或沙盒。");
 	else if (gate === "review") lines.push("- **ACTIVE WRITE LOCK (`review`)**: 只读审查/验收期禁止修改仓库文件。");
 	return lines.join("\n");
 }
@@ -422,7 +519,7 @@ const ZeeSubagentParams = Type.Object({
 	role: Type.Optional(Type.String({ description: "角色标识（scout / architect / ui / coder / verifier / reviewer / judge）" })),
 	provider: Type.Optional(Type.String({ description: "模型提供方 ID（必须与 model 同传，切勿传路径前缀如 vm/devin/codex）" })),
 	model: Type.Optional(Type.String({ description: "目标模型 ID 或 provider/model" })),
-	authorFamily: Type.Optional(Type.String({ description: "当 role='reviewer' 或 'judge' 时传入作者家族（claude/openai/gemini/deepseek 等），拦截同家族自审" })),
+	authorFamily: Type.Optional(Type.String({ description: "当 role='reviewer'/'judge'/'adversary' 时传入作者家族（claude/openai/gemini/deepseek 等），拦截同家族自审" })),
 	thinkingLevel: Type.Optional(
 		Type.Union(
 			[Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")],
@@ -478,10 +575,13 @@ interface SubagentDetails {
 	usage: { turns: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens: number };
 }
 
+const PLAN_UNLOCK_RE =
+	/^(?:解锁|解除锁定|开始写代码|开始实现|执行计划|按推荐|按计划|直接实施|直接开始|开始吧|开始干|实施吧|可以开始|好的?[,，。!\s]*(?:开始|实施|改|做|执行|按推荐|按计划)|lgtm|proceed|go ahead|implement|approve|ship it)\b/i;
+
 export default function zeeExtension(pi: ExtensionAPI) {
 	let routingMode: ZeeMode = (() => {
 		const raw = String(pi.getFlag("zee-mode") ?? "").trim().toLowerCase();
-		return raw === "auto" || raw === "strict" || raw === "off" ? raw : "off";
+		return raw === "auto" || raw === "strict" || raw === "off" ? raw : "auto";
 	})();
 	let writeGate: GateMode = "none";
 	let gatePreSnapshot: Set<string> | null = null;
@@ -524,7 +624,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 	const restoreState = (ctx: ExtensionContext) => {
 		const flagMode = String(pi.getFlag("zee-mode") ?? "").trim().toLowerCase();
-		let nextMode: ZeeMode = flagMode === "auto" || flagMode === "strict" || flagMode === "off" ? flagMode : "off";
+		let nextMode: ZeeMode = flagMode === "auto" || flagMode === "strict" || flagMode === "off" ? flagMode : "auto";
 		let nextGate: GateMode = "none";
 		let foundMode = false;
 		let foundGate = false;
@@ -549,52 +649,10 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		updateStatusBar(ctx);
 	};
 
-	pi.registerFlag("zee-mode", { type: "string", description: "启动时启用 zee 自动路由模式：off | auto | strict" });
+	pi.registerFlag("zee-mode", { type: "string", description: "启动时启用 zee 自动路由模式：auto（默认） | strict | off" });
 	pi.on("session_start", (_e, ctx) => restoreState(ctx));
 	pi.on("session_tree", (_e, ctx) => restoreState(ctx));
 	pi.on("session_shutdown", (_e, ctx) => { if (!isSilentSession(ctx)) ctx.ui.setStatus("zee-mode", undefined); });
-
-function getNightStaleMs(): number {
-	const n = Number(process.env.ZEE_NIGHT_STALE_MS);
-	return Number.isFinite(n) && n > 0 ? n : DEFAULT_NIGHT_STALE_MS;
-}
-
-function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string | null } | null {
-	if (!cwd || !fs.existsSync(RUNS_ROOT)) return null;
-	const maxAgeMs = getNightStaleMs();
-	const now = Date.now();
-	let latest: { slug: string; resumeNext: string | null; updatedAt: string; hasReport: boolean } | null = null;
-	try {
-		for (const key of repoKeyCandidates(cwd)) {
-			const repoRunDir = path.join(RUNS_ROOT, key);
-			if (!fs.existsSync(repoRunDir)) continue;
-			for (const ent of fs.readdirSync(repoRunDir, { withFileTypes: true })) {
-				if (!ent.isDirectory()) continue;
-				const runDir = path.join(repoRunDir, ent.name);
-				const sp = path.join(runDir, "state.json");
-				if (!fs.existsSync(sp)) continue;
-				try {
-					const st = JSON.parse(fs.readFileSync(sp, "utf8")) as { mode?: string; status?: string; slug?: string; resumeNext?: string | null; updatedAt?: string; createdAt?: string };
-					if (st.mode !== "night" || st.status !== "running") continue;
-					const tsMs = Date.parse(st.updatedAt || st.createdAt || "") || fs.statSync(sp).mtimeMs;
-					if (Number.isFinite(tsMs) && now - tsMs > maxAgeMs) continue;
-					const updatedAt = String(st.updatedAt || "");
-					if (!latest || updatedAt.localeCompare(latest.updatedAt) > 0) {
-						latest = {
-							slug: String(st.slug || ent.name),
-							resumeNext: st.resumeNext ?? null,
-							updatedAt,
-							hasReport: fs.existsSync(path.join(runDir, "morning-report.md")),
-						};
-					}
-				} catch {}
-			}
-		}
-	} catch {
-		return null;
-	}
-	return latest && !latest.hasReport ? { slug: latest.slug, resumeNext: latest.resumeNext } : null;
-}
 
 	pi.on("agent_settled", (_e, ctx) => {
 		if (writeGate !== "none" && gatePreSnapshot) {
@@ -607,7 +665,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 					if (trimmed === "?? node_modules" || trimmed === "?? node_modules/") continue;
 					for (const rel of parsePorcelainPaths(line)) {
 						const targets =
-							writeGate === "plan" && line.startsWith("?? ") && rel.endsWith("/") && rel !== "node_modules/"
+							(writeGate === "plan" || writeGate === "review") && line.startsWith("?? ") && rel.endsWith("/") && rel !== "node_modules/"
 								? expandUntrackedDirPaths(ctx.cwd, rel.replace(/\/+$/, ""))
 								: [rel];
 						for (const t of targets) {
@@ -628,9 +686,10 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 		}
 
 		if (writeGate === "review") setGate("none", ctx);
+		if (isSilentSession(ctx)) return;
 
 		const unfinishedNight = findUnfinishedNightRun(ctx.cwd);
-		if (unfinishedNight && writeGate === "none" && !isSilentSession(ctx)) {
+		if (unfinishedNight && writeGate === "none") {
 			ctx.ui.setStatus("zee-mode", "zee:night⚠");
 			ctx.ui.notify(
 				`[zee-night] 过夜任务 (${unfinishedNight.slug}) 仍处于 running 且尚未输出 morning-report.md${unfinishedNight.resumeNext ? `（resumeNext=${unfinishedNight.resumeNext}）` : ""}，请收尾并生成晨报。`,
@@ -642,7 +701,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 	pi.on("before_agent_start", (event, ctx) => {
 		const promptTrimmed = (event.prompt || "").trim();
 		if (event.messageType === "user") {
-			const skillMatch = promptTrimmed.match(/^<skill\s+name="(zee(?:-[a-z-]+)?)"(?=[\s>])[\s\S]*\n<\/skill>([\s\S]*)$/i);
+			const skillMatch = promptTrimmed.match(/^<skill\s+name="(zee(?:-[a-z-]+)?)"(?=[\s>])[\s\S]*?\n<\/skill>([\s\S]*)$/i);
 			if (skillMatch) {
 				const sName = skillMatch[1].toLowerCase();
 				const skillArgs = (skillMatch[2] || "").trim();
@@ -653,12 +712,14 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				else if (sName === "zee") nextGate = inferGateFromZeeArgs(skillArgs);
 				if (writeGate !== nextGate) setGate(nextGate, ctx);
 			} else if (/^\/(?:skill:)?zee-plan\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee\s+(?:plan|init)\b/i.test(promptTrimmed)) {
-				setGate("plan", ctx);
+				const subMatch = promptTrimmed.match(/^\/(?:skill:)?zee\s+(.+)$/i);
+				const nextGate = subMatch ? inferGateFromZeeArgs(subMatch[1]) : "plan";
+				setGate(nextGate, ctx);
 			} else if (/^\/(?:skill:)?zee-review\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee\s+review\b/i.test(promptTrimmed) || /^\/(?:skill:)?zee-verify\s+run\b/i.test(promptTrimmed)) {
 				setGate("review", ctx);
 			} else if (
 				/^\/(?:skill:)?zee(?:-(?:night|retro|verify|setup))?\b/i.test(promptTrimmed) ||
-				/^(解锁|解除锁定|开始写代码|开始实现|执行计划)\b/.test(promptTrimmed)
+				(writeGate === "plan" && PLAN_UNLOCK_RE.test(promptTrimmed))
 			) {
 				const subMatch = promptTrimmed.match(/^\/(?:skill:)?zee\s+(.+)$/i);
 				const nextGate = subMatch ? inferGateFromZeeArgs(subMatch[1]) : "none";
@@ -666,28 +727,31 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			}
 		}
 
+		const sections = event.systemPromptOptions?.sections;
+		if (!sections) return undefined;
+
 		if (isSubagentContext(event, ctx)) {
-			delete event.systemPromptOptions.sections.zee;
+			delete sections.zee;
 			return undefined;
 		}
 		if (routingMode === "off" && writeGate === "none") {
-			delete event.systemPromptOptions.sections.zee;
+			delete sections.zee;
 			return undefined;
 		}
 		if (routingMode === "off" && writeGate !== "none") {
-			event.systemPromptOptions.sections.zee =
+			sections.zee =
 				writeGate === "plan"
-					? "## zee Write Lock (`plan`)\n禁止修改业务源码，仅允许写入计划文档、GLOSSARY/ADR、总线或 /tmp/zee-*。"
+					? "## zee Write Lock (`plan`)\n禁止修改业务源码，仅允许写入计划/设计文档、GLOSSARY/ADR、总线或 /tmp/zee-*。"
 					: "## zee Write Lock (`review`)\n只读验收/审查期禁止修改仓库文件，仅允许写运行总线或 /tmp/zee-*。";
 			return undefined;
 		}
-		event.systemPromptOptions.sections.zee = buildZeeSection(routingMode, writeGate);
+		sections.zee = buildZeeSection(routingMode, writeGate);
 		return undefined;
 	});
 
 	pi.on("tool_call", (event, ctx) => {
 		if (isToolCallEventType("bash", event) || isToolCallEventType("powershell", event)) {
-			const command = event.input.command;
+			const command = String((event.input as { command?: unknown } | undefined)?.command ?? "");
 			const denyReason = checkProjectDenyCommands(command, ctx.cwd);
 			if (denyReason) {
 				if (!isSilentSession(ctx)) ctx.ui.notify(denyReason, "warning");
@@ -702,9 +766,9 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			return undefined;
 		}
 		if (writeGate !== "none" && (isToolCallEventType("write", event) || isToolCallEventType("edit", event))) {
-			const rawPath = event.input.path;
+			const rawPath = String((event.input as { path?: unknown } | undefined)?.path ?? "");
 			if (!sharedIsWriteAllowedUnderGate(rawPath, ctx.cwd, writeGate)) {
-				const reason = `当前处于 zee-${writeGate} 保护锁，禁止修改 "${rawPath}"。如需写代码请调用 /zee 执行计划。`;
+				const reason = `当前处于 zee-${writeGate} 保护锁，禁止修改 "${rawPath}"。如需写代码请回复“开始实施”或调用 /zee 执行计划。`;
 				if (!isSilentSession(ctx)) ctx.ui.notify(reason, "warning");
 				return { block: true, reason };
 			}
@@ -714,10 +778,10 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 
 	// 1. /zee-mode
 	pi.registerCommand("zee-mode", {
-		description: "切换 zee 自动路由模式：auto | strict | off | status",
+		description: "切换 zee 自动路由模式：auto（默认） | strict | off | status",
 		getArgumentCompletions: (prefix) =>
 			[
-				{ value: "auto", label: "auto — 智能路由（简单直答，复杂进 zee）" },
+				{ value: "auto", label: "auto — 智能自动驾驶路由（默认，简单直答，工程任务直通）" },
 				{ value: "strict", label: "strict — 严格编排模式" },
 				{ value: "off", label: "off — 关闭自动路由" },
 				{ value: "status", label: "status — 查看当前状态" },
@@ -760,10 +824,11 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 		});
 	};
 
-	registerSkillCmd("zee", "个人主厨研发主入口（直做 / 标准 / 高危 + 8 份按需剧本）", (args) => inferGateFromZeeArgs(args));
+	registerSkillCmd("zee", "个人主厨全自动研发入口（建项/新需求/改设计/修Bug/性能迭代 + 9 份按需剧本）", (args) => inferGateFromZeeArgs(args));
 	registerSkillCmd("zee-plan", "先查代码与原型探针再极简提问，产出可执行计划与原子 units（带 plan 锁）", "plan");
-	registerSkillCmd("zee-verify", "项目实机验证全生命周期：init / maintain / run", (args) => (/^run\b/i.test(args.trim()) ? "review" : "none"), [
+	registerSkillCmd("zee-verify", "项目实机验证全生命周期：init / maintain / run（含 --fuzz）", (args) => (/^run\b/i.test(args.trim()) ? "review" : "none"), [
 		{ value: "run", label: "run — 执行实机验证 + gate-tamper-diff（默认）" },
+		{ value: "run --fuzz", label: "run --fuzz — 实机验证 + 限时边界探索压测" },
 		{ value: "init", label: "init — 读仓生成并自跑验真 .agents/verify-ctl.mjs" },
 		{ value: "maintain", label: "maintain — 核对入口漂移并串行复跑保鲜" },
 	]);
@@ -772,7 +837,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 		{ value: "--quick", label: "--quick — 聚焦 diff 轻量单轮快审" },
 	]);
 	registerSkillCmd("zee-night", "个人主厨无人值守过夜模式（本地隔离分支 + 3 分钟中文晨报）", "none");
-	registerSkillCmd("zee-retro", "实证复盘 + 4 级环境固化阶梯（架构/Lint/测试/文档 + Bite Proof）", "none");
+	registerSkillCmd("zee-retro", "实证复盘 + 4 级环境固化阶梯（架构/Lint/测试/文档 + 园艺队列 + Bite Proof）", "none");
 	registerSkillCmd("zee-setup", "按能力梯队为当前宿主配置 fast / workhorse / adversary 三槽位（单宿主隔离）", "none");
 
 	// 3. zee_subagent 工具
@@ -792,6 +857,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			let effectiveProvider = resolvedTarget.provider;
 			let effectiveModel = resolvedTarget.model;
 			const role = (params.role?.trim() || "worker").toLowerCase();
+			const isAdversaryRole = mapRoleToSlotName(role) === "adversary";
 
 			let cooldownNoticeBanner = "";
 			let cooldownSwitchedFrom: string | undefined;
@@ -810,11 +876,16 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 				}
 			}
 
-			if ((role === "reviewer" || role === "judge") && params.authorFamily && effectiveModel) {
+			let singleFamilyBanner = "";
+			if (isAdversaryRole && params.authorFamily && effectiveModel) {
 				const authorFam = extractModelFamily(params.authorFamily);
 				const reviewerFam = extractModelFamily(effectiveModel);
 				if (authorFam && reviewerFam && authorFam === reviewerFam) {
-					throw new Error(`[zee_subagent:${role}] 跨家族拦截：审查/裁决模型 "${effectiveModel}" (${reviewerFam}) 与作者家族 "${authorFam}" 相同！`);
+					if (isPiSingleFamilyConfig()) {
+						singleFamilyBanner = `[单家族降级] 当前 Pi 配置启用 singleFamily: true，允许同家族 (${reviewerFam}) 独立只读审查。\n`;
+					} else {
+						throw new Error(`[zee_subagent:${role}] 跨家族拦截：审查/裁决模型 "${effectiveModel}" (${reviewerFam}) 与作者家族 "${authorFam}" 相同！`);
+					}
 				}
 			}
 			if (signal?.aborted) throw new Error(`[zee_subagent:${role}] 启动前已被取消。`);
@@ -927,8 +998,11 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 					let settled = false;
 					let exited = false;
 					let closed = false;
+					let exitCodeSeen: number | null = null;
+					let exitSignalSeen: NodeJS.Signals | null = null;
 					let buffer = "";
 					let killTimer: ReturnType<typeof setTimeout> | undefined;
+					let exitCloseTimer: ReturnType<typeof setTimeout> | undefined;
 					let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 					let idleTimer: ReturnType<typeof setTimeout> | undefined;
 					let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -952,6 +1026,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 						if (settled) return;
 						settled = true; closed = true;
 						if (killTimer) clearTimeout(killTimer);
+						if (exitCloseTimer) clearTimeout(exitCloseTimer);
 						if (timeoutTimer) clearTimeout(timeoutTimer);
 						if (idleTimer) clearTimeout(idleTimer);
 						if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -960,9 +1035,19 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 					};
 
 					const terminateChild = () => {
-						if (closed || exited || proc.exitCode !== null || proc.signalCode !== null) return;
+						if (closed) return;
+						if (exited || proc.exitCode !== null || proc.signalCode !== null) {
+							try { proc.stdout?.destroy(); } catch {}
+							try { proc.stderr?.destroy(); } catch {}
+							if (buffer.trim()) processLine(buffer);
+							finish({ code: exitCodeSeen ?? proc.exitCode, termSignal: exitSignalSeen ?? proc.signalCode });
+							return;
+						}
+						if (killTimer) clearTimeout(killTimer);
 						killProcessTree(proc, { force: false });
-						killTimer = setTimeout(() => { if (!closed && !exited) killProcessTree(proc, { force: true }); }, 5000);
+						killTimer = setTimeout(() => {
+							if (!closed && !exited) killProcessTree(proc, { force: true });
+						}, 5000);
 					};
 
 					const processLine = (line: string) => {
@@ -1058,7 +1143,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 						thinkingStreamStartedAt = 0;
 						const text = extractMessageText(msg.content).trim();
 						const msgOutTokens = msg.usage?.output ?? 0;
-						if (!(msg.stopReason === "error" && !text && msgOutTokens === 0 && details.lastActions.length === 0)) {
+						if (!(msg.stopReason === "error" && msgOutTokens === 0 && details.lastActions.length === 0)) {
 							details.usage.turns += 1;
 						}
 						if (msg.usage) {
@@ -1100,8 +1185,26 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 						buffer = lines.pop() ?? "";
 						for (const line of lines) processLine(line);
 					});
-					proc.stderr?.on("data", (chunk) => { stderrText += chunk.toString(); });
-					proc.on("exit", () => { exited = true; });
+					proc.stderr?.on("data", (chunk) => {
+						if (stderrText.length < MAX_STDERR_CHARS) {
+							stderrText += chunk.toString().slice(0, MAX_STDERR_CHARS - stderrText.length);
+						}
+					});
+					proc.on("exit", (code, termSignal) => {
+						exited = true;
+						exitCodeSeen = code;
+						exitSignalSeen = termSignal;
+						if (!closed) {
+							exitCloseTimer = setTimeout(() => {
+								if (!closed) {
+									try { proc.stdout?.destroy(); } catch {}
+									try { proc.stderr?.destroy(); } catch {}
+									if (buffer.trim()) processLine(buffer);
+									finish({ code: exitCodeSeen, termSignal: exitSignalSeen });
+								}
+							}, EXIT_CLOSE_GRACE_MS);
+						}
+					});
 					proc.on("close", (code, termSignal) => { if (buffer.trim()) processLine(buffer); finish({ code, termSignal }); });
 					proc.on("error", (error) => { finish({ code: null, termSignal: null, spawnError: error }); });
 					if (signal) {
@@ -1119,6 +1222,10 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			const postSnapshot = readGitSnapshot(effectiveCwd);
 			if (preSnapshot?.isGit && postSnapshot.isGit) {
 				const preSet = new Set(preSnapshot.statusLines);
+				const preDirtyPaths = new Set<string>();
+				for (const line of preSnapshot.statusLines) {
+					for (const p of parsePorcelainPaths(line)) preDirtyPaths.add(p);
+				}
 				const isBenignSymlink = (line: string): boolean => {
 					const t = line.trim();
 					if (t !== "?? node_modules" && t !== "?? node_modules/") return false;
@@ -1130,8 +1237,13 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 					details.roleViolation = true;
 					const tracked = new Set<string>();
 					const untracked = new Set<string>();
+					const preservedPreDirty = new Set<string>();
 					for (const line of newDirty) {
 						for (const p of parsePorcelainPaths(line)) {
+							if (preDirtyPaths.has(p)) {
+								preservedPreDirty.add(p);
+								continue;
+							}
 							if (line.startsWith("?? ")) untracked.add(p);
 							else tracked.add(p);
 						}
@@ -1139,12 +1251,17 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 					try {
 						if (tracked.size > 0) {
 							const rels = [...tracked];
-							try { execFileSync("git", ["-C", effectiveCwd, "reset", "HEAD", "--", ...rels], { stdio: "ignore" }); } catch {}
-							for (const relFile of rels) {
-								let inHead = false;
-								try { execFileSync("git", ["-C", effectiveCwd, "cat-file", "-e", `HEAD:${relFile}`], { stdio: "ignore" }); inHead = true; } catch {}
-								if (inHead) { try { execFileSync("git", ["-C", effectiveCwd, "checkout", "HEAD", "--", relFile], { stdio: "ignore" }); } catch {} }
-								else untracked.add(relFile);
+							if (postSnapshot.head) {
+								try { execFileSync("git", ["-C", effectiveCwd, "reset", "HEAD", "--", ...rels], { stdio: "ignore" }); } catch {}
+								for (const relFile of rels) {
+									let inHead = false;
+									try { execFileSync("git", ["-C", effectiveCwd, "cat-file", "-e", `HEAD:${relFile}`], { stdio: "ignore" }); inHead = true; } catch {}
+									if (inHead) { try { execFileSync("git", ["-C", effectiveCwd, "checkout", "HEAD", "--", relFile], { stdio: "ignore" }); } catch {} }
+									else untracked.add(relFile);
+								}
+							} else {
+								try { execFileSync("git", ["-C", effectiveCwd, "rm", "--cached", "-f", "--", ...rels], { stdio: "ignore" }); } catch {}
+								rels.forEach((r) => untracked.add(r));
 							}
 						}
 						for (const relFile of untracked) {
@@ -1155,22 +1272,19 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 							try { execFileSync("git", ["-C", effectiveCwd, "reset", "--hard", preSnapshot.head], { stdio: "ignore" }); } catch {}
 						}
 					} catch {}
-					violationBanner = `\n[ROLE_VIOLATION] 只读/门禁角色 (${role}) 越权修改仓库工作区，已精准回滚。\n`;
+					const preservedNote =
+						preservedPreDirty.size > 0
+							? `（已保护运行前既有未提交文件不误删：${[...preservedPreDirty].slice(0, 5).join(", ")}）`
+							: "";
+					violationBanner = `\n[ROLE_VIOLATION] 只读/门禁角色 (${role}) 越权修改仓库工作区，已精准回滚新增脏区${preservedNote}。\n`;
 				}
 			}
 
 			if (createdWorktreePath && params.worktree) {
 				const shouldCleanup = params.worktree.autoCleanup ?? !params.worktree.branch;
-				if (shouldCleanup) {
-					const nmLink = path.join(createdWorktreePath, "node_modules");
-					try {
-						if (fs.lstatSync(nmLink).isSymbolicLink()) {
-							try { fs.unlinkSync(nmLink); } catch { fs.rmdirSync(nmLink); }
-						}
-					} catch {}
-				}
 				const curSnap = readGitSnapshot(createdWorktreePath);
 				if (shouldCleanup && (!curSnap.isGit || curSnap.statusLines.length === 0)) {
+					unmountNodeModulesLink(createdWorktreePath);
 					try {
 						execFileSync("git", ["-C", path.resolve(params.worktree.repoRoot), "worktree", "remove", "--force", createdWorktreePath], { stdio: "ignore" });
 						details.worktreeCleaned = true;
@@ -1189,29 +1303,31 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 
 			if (isRunError) {
 				details.status = "failed";
+				const effectiveErrText = details.errorMessage || (details.stopReason === "error" ? latestAssistantText : "");
 				const transientInfo = classifyTransientProviderFailure({
-					errorMessage: details.errorMessage || "",
+					errorMessage: effectiveErrText,
 					stderrText,
 					exitCode: outcome.code,
 					turns: details.usage.turns,
-					hasOutput: hasProducedText,
+					hasOutput: hasProducedText && details.stopReason !== "error",
 					hasToolCalls: details.lastActions.length > 0,
 					outputTokens: details.usage.output,
 				});
 				if (transientInfo.transient) {
 					let cooldownNote = "";
-					if (effectiveModel || effectiveProvider) {
-						recordModelCooldown(effectiveProvider, effectiveModel, {
+					const cooldownModel = effectiveModel || details.model;
+					if (cooldownModel || effectiveProvider) {
+						recordModelCooldown(effectiveProvider, cooldownModel, {
 							kind: transientInfo.kind ?? "rate_limit",
 							reason: transientInfo.reason,
 							ttlMs: transientInfo.ttlMs,
-							errorSnippet: details.errorMessage || stderrText,
+							errorSnippet: effectiveErrText || stderrText,
 						});
 						cooldownNote = `已写入 ${Math.round(transientInfo.ttlMs / 60000)}m 熔断冷却，`;
 					}
 					const reasonParts = [
 						`[BUDGET_EXEMPT: ${transientInfo.reason} 未扣减预算，${cooldownNote}下次将自动 0ms 切备]`,
-						details.errorMessage,
+						effectiveErrText,
 						outcome.code !== null && outcome.code !== 0 ? `退出码 ${outcome.code}` : "",
 						stderrText.trim() ? `stderr: ${stderrText.trim().slice(0, 600)}` : "",
 					].filter(Boolean);
@@ -1263,7 +1379,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 
 				const cleanStderr = stripAnsiAndControl(stderrText).trim();
 				const partialParts = [
-					cooldownNoticeBanner.trim(), normNoticeBanner.trim(), branchNote.trim(),
+					cooldownNoticeBanner.trim(), singleFamilyBanner.trim(), normNoticeBanner.trim(), branchNote.trim(),
 					`[STATUS: ${tag}] ${reasonLine}`,
 					`[进度] elapsed=${elapsedSec}s | turns=${details.usage.turns} | cost=$${details.usage.cost.toFixed(4)} | ${gitSummary}`,
 					partialArtifactPath ? `[已落盘完整抢救稿] ${partialArtifactPath}` : "",
@@ -1277,7 +1393,7 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 			details.status = "completed";
 			const body = truncateSubagentOutput(stripAnsiAndControl(latestAssistantText.trim() || streamingAssistantText.trim()) || "(子代理未返回文本输出)");
 			return {
-				content: [{ type: "text", text: `${cooldownNoticeBanner}${normNoticeBanner}${branchNote}${violationBanner}${budgetCutoffBanner}${body}${metaLine.replace("status=running", "status=completed")}` }],
+				content: [{ type: "text", text: `${cooldownNoticeBanner}${singleFamilyBanner}${normNoticeBanner}${branchNote}${violationBanner}${budgetCutoffBanner}${body}${metaLine.replace("status=running", "status=completed")}` }],
 				details,
 			};
 		},

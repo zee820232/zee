@@ -7,19 +7,19 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_SKILLS = ["zee", "zee-plan", "zee-verify", "zee-review", "zee-night", "zee-retro"];
-const EXPECTED_PLAYBOOKS = ["plan.md", "feature.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md"];
+const EXPECTED_PLAYBOOKS = ["understand.md", "plan.md", "feature.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md"];
 const EXPECTED_ROLES = ["scout.md", "architect.md", "ui.md", "coder.md", "verifier.md", "reviewer.md"];
 
-test("v5.0.1 清单文件与包元数据符合精简规范", () => {
+test("v5.0.2 清单文件与包元数据符合精简规范", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.version, "5.0.1");
+  assert.equal(pkg.version, "5.0.2");
   assert.deepEqual(pkg.pi?.extensions, ["./pi-extension/index.ts"]);
   assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills 以免与 /skill:zee* 冲突");
   assert.equal(pkg.peerDependencies?.["@earendil-works/pi-tui"], undefined, "不应保留 pi-tui 依赖");
 
   const plugin = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, ".antigravity-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.name, "zee");
-  assert.equal(plugin.version, "5.0.1");
+  assert.equal(plugin.version, "5.0.2");
 
   const hooks = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "hooks.json"), "utf8"));
   const cfg = hooks["zee-lifecycle-guard"];

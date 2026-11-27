@@ -42,7 +42,8 @@ test("v5.3.0 清单文件、发布白名单、自举验证设施与 AGY 规则/�
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "agents", "zee-worker.md")), true, "须包含专职隔离执行子代理 agents/zee-worker.md");
   assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "verify-ctl.mjs")), true, "zee 自身须具备 .agents/verify-ctl.mjs 自举验证器");
   assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "verify-features", "README.md")), true, "zee 自身须具备 Feature Map 索引");
-  assert.equal(fs.existsSync(path.join(REPO_ROOT, "AGENTS.md")), true, "zee 仓根须具备极薄 AGENTS.md 规则映射表");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "RULES.md")), true, "zee 须具备 .agents/RULES.md 规则映射表");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "AGENTS.md")), false, "AGY 插件根目录严禁放置 AGENTS.md，否则 agy plugin validate --strict 会报错");
 });
 
 test("主技能开放自然语言隐式唤醒，6 把专项单刀保留显式触发隔离，v4 冗余已彻底清理", () => {

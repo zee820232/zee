@@ -74,6 +74,8 @@ const {
   getPiInvocation,
   resolveEffectiveSubagentTimeout,
   readGitSnapshot,
+  formatZeeStatusBadge,
+  readActiveRunUnitProgress,
 } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "index.ts")).href);
 const { default: zeeWorkerGuard } = await import(pathToFileURL(path.join(REPO_ROOT, "pi-extension", "worker-guard.ts")).href);
 
@@ -860,6 +862,104 @@ process.stdout.write(JSON.stringify({
     if (prevHealth === undefined) delete process.env.ZEE_PROVIDER_HEALTH_PATH; else process.env.ZEE_PROVIDER_HEALTH_PATH = prevHealth;
     if (prevBin === undefined) delete process.env.ZEE_PI_BIN; else process.env.ZEE_PI_BIN = prevBin;
     if (prevMode === undefined) delete process.env.ZEE_FAKE_PI_MODE; else process.env.ZEE_FAKE_PI_MODE = prevMode;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("setStatus 单行状态栏实时显示运行中子代理数 (sub:N) 与当前单元进度 (U?(done/total))", async () => {
+  assert.equal(formatZeeStatusBadge({ routingMode: "auto", writeGate: "none" }), "zee:auto");
+  assert.equal(formatZeeStatusBadge({ routingMode: "off", writeGate: "none", activeSubagents: 2 }), undefined);
+  assert.equal(
+    formatZeeStatusBadge({
+      routingMode: "auto",
+      writeGate: "none",
+      activeSubagents: 2,
+      unitProgress: { slug: "demo", currentUnitId: "U2", done: 1, total: 4, label: "U2(1/4)" },
+    }),
+    "zee:auto sub:2 U2(1/4)",
+  );
+  assert.equal(
+    formatZeeStatusBadge({
+      routingMode: "auto",
+      writeGate: "plan",
+      activeSubagents: 1,
+      unitProgress: { slug: "demo", currentUnitId: "U1", done: 0, total: 3, label: "U1(0/3)" },
+    }),
+    "zee:plan🔒 sub:1 U1(0/3)",
+  );
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-status-live-"));
+  const repo = path.join(tmpDir, "repo");
+  const fakePi = path.join(tmpDir, "fake-pi.mjs");
+  const prevBin = process.env.ZEE_PI_BIN;
+  let busDir = "";
+  try {
+    fs.mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    fs.writeFileSync(
+      fakePi,
+      `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "end_turn", content: [{ type: "text", text: "ok" }] } }));\n`,
+      "utf8",
+    );
+    process.env.ZEE_PI_BIN = fakePi;
+
+    const init = JSON.parse(
+      execFileSync(process.execPath, [path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs"), "init-run", repo, "live-status"], {
+        encoding: "utf8",
+      }),
+    );
+    busDir = init.busDir;
+    execFileSync(
+      process.execPath,
+      [
+        path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs"),
+        "update-state",
+        busDir,
+        "--status",
+        "running",
+        "--units",
+        JSON.stringify([
+          { id: "U1", status: "done" },
+          { id: "U2", status: "in_progress" },
+          { id: "U3", status: "pending" },
+        ]),
+      ],
+      { encoding: "utf8" },
+    );
+
+    const progress = readActiveRunUnitProgress(repo);
+    assert.equal(progress?.label, "U2(1/3)");
+
+    const m = createMockPi({ cwd: repo });
+    zeeExtension(m.pi);
+    await m.emit("session_start");
+    assert.equal(m.statuses.at(-1)?.value, "zee:auto U2(1/3)");
+
+    const subTool = m.tools.get("zee_subagent");
+    await subTool.execute("tc-live", { task: "quick check", role: "scout" }, undefined, undefined, m.ctx);
+    assert.ok(m.statuses.some((s) => s.value === "zee:auto sub:1 U2(1/3)"), "子代理运行期间状态栏须包含 sub:1 与单元进度");
+    assert.equal(m.statuses.at(-1)?.value, "zee:auto U2(1/3)", "子代理结束后 sub:1 须归零消失");
+
+    // 推进单元状态并在 tool_result 实时刷新状态栏
+    execFileSync(
+      process.execPath,
+      [
+        path.join(REPO_ROOT, "skills", "zee", "scripts", "zee-tool.mjs"),
+        "update-state",
+        busDir,
+        "--unit-upsert",
+        JSON.stringify({ id: "U2", status: "done" }),
+      ],
+      { encoding: "utf8" },
+    );
+    await m.emit("tool_result", { toolName: "bash" });
+    assert.equal(m.statuses.at(-1)?.value, "zee:auto U3(2/3)");
+
+    await m.commands.get("zee-mode").handler("status", m.ctx);
+    assert.match(m.notifications.at(-1)?.msg || "", /运行中子代理：0 \| 单元进度：U3\(2\/3\)/);
+  } finally {
+    if (prevBin === undefined) delete process.env.ZEE_PI_BIN; else process.env.ZEE_PI_BIN = prevBin;
+    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

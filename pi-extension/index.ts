@@ -3,7 +3,7 @@
  *
  * 保留硬核能力并修复全层审计边界：
  * 1. 8 个干净命令（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup、/zee-mode），默认 auto 开箱即用
- * 2. 1 行状态栏徽章（setStatus("zee-mode")，绝不调用 setFooter()，静默支持 Print/JSON/ZEE_WORKER=1；非交互 pi -p 主会话仍注入路由）
+ * 2. 1 行状态栏徽章（setStatus("zee-mode") 实时展示模式/锁、运行中子代理数 sub:N 与当前单元进度 U?(done/total)，绝不调用 setFooter()，静默支持 Print/JSON/ZEE_WORKER=1；非交互 pi -p 主会话仍注入路由）
  * 3. 工具级安全守卫：项目 denyCommands + 跨平台破坏性命令 + plan/review 写路径锁与空仓兼容的增量脏树告警
  * 4. zee_subagent：-ne -e worker-guard.ts、429/5xx 跨会话熔断 0ms 切备免扣预算、10s 心跳、Windows 进程树强杀 + 孙进程管道防挂死、
  *    声明式原子 worktree（含活锁检查与安全 junction 卸载）、>2KB 抢救落盘、70% 截断、只读事后脏区回滚与全量 adversary 跨家族硬拦截
@@ -477,6 +477,95 @@ function findUnfinishedNightRun(cwd: string): { slug: string; resumeNext: string
 	return latest && !latest.hasReport ? { slug: latest.slug, resumeNext: latest.resumeNext } : null;
 }
 
+export interface ActiveUnitProgress {
+	slug: string;
+	currentUnitId: string | null;
+	done: number;
+	total: number;
+	label: string;
+}
+
+export function readActiveRunUnitProgress(cwd: string): ActiveUnitProgress | null {
+	try {
+		if (!fs.existsSync(RUNS_ROOT)) return null;
+		const keySet = new Set<string>(repoKeyCandidates(cwd));
+		const gitRoot = resolveGitRoot(cwd);
+		if (gitRoot) repoKeyCandidates(gitRoot).forEach((k) => keySet.add(k));
+		const maxAgeMs = getNightStaleMs();
+		const now = Date.now();
+		let latest: { tsMs: number; progress: ActiveUnitProgress } | null = null;
+		for (const key of keySet) {
+			const repoRunDir = path.join(RUNS_ROOT, key);
+			if (!fs.existsSync(repoRunDir)) continue;
+			for (const slug of fs.readdirSync(repoRunDir)) {
+				const runDir = path.join(repoRunDir, slug);
+				const sp = path.join(runDir, "state.json");
+				if (!fs.existsSync(sp)) continue;
+				try {
+					const st = JSON.parse(fs.readFileSync(sp, "utf8")) as {
+						slug?: string;
+						status?: string;
+						updatedAt?: string;
+						createdAt?: string;
+						units?: Array<{ id?: string; status?: string }>;
+					};
+					const status = String(st.status || "").toLowerCase();
+					if (status !== "running" && status !== "planned" && status !== "in_progress") continue;
+					if (!Array.isArray(st.units) || st.units.length === 0) continue;
+					const tsMs = Date.parse(st.updatedAt || st.createdAt || "") || fs.statSync(sp).mtimeMs;
+					if (Number.isFinite(tsMs) && now - tsMs > maxAgeMs) continue;
+					if (!latest || tsMs > latest.tsMs) {
+						const total = st.units.length;
+						const done = st.units.filter((u) => {
+							const us = String(u?.status || "").toLowerCase();
+							return us === "done" || us === "completed";
+						}).length;
+						const active =
+							st.units.find((u) => String(u?.status || "").toLowerCase() === "in_progress") ||
+							st.units.find((u) => String(u?.status || "").toLowerCase() === "pending") ||
+							null;
+						const currentUnitId = active?.id ? String(active.id) : null;
+						const label = currentUnitId ? `${currentUnitId}(${done}/${total})` : `${done}/${total}`;
+						latest = { tsMs, progress: { slug: st.slug || slug, currentUnitId, done, total, label } };
+					}
+				} catch {}
+			}
+		}
+		return latest ? latest.progress : null;
+	} catch {
+		return null;
+	}
+}
+
+export function formatZeeStatusBadge({
+	routingMode,
+	writeGate,
+	activeSubagents = 0,
+	unitProgress = null,
+	nightWarning = false,
+}: {
+	routingMode: ZeeMode;
+	writeGate: GateMode;
+	activeSubagents?: number;
+	unitProgress?: ActiveUnitProgress | null;
+	nightWarning?: boolean;
+}): string | undefined {
+	let base: string | undefined;
+	if (writeGate !== "none") {
+		base = `zee:${writeGate === "plan" ? "plan🔒" : "rev🔒"}`;
+	} else if (nightWarning) {
+		base = "zee:night⚠";
+	} else if (routingMode === "off") {
+		return undefined;
+	} else {
+		base = `zee:${routingMode}`;
+	}
+	const parts = [base];
+	if (activeSubagents > 0) parts.push(`sub:${activeSubagents}`);
+	if (unitProgress?.label) parts.push(unitProgress.label);
+	return parts.join(" ");
+}
+
 function buildZeeSection(mode: Exclude<ZeeMode, "off">, gate: GateMode): string {
 	const lines = [
 		"## zee 个人主厨自动驾驶路由",
@@ -585,6 +674,7 @@ export default function zeeExtension(pi: ExtensionAPI) {
 	})();
 	let writeGate: GateMode = "none";
 	let gatePreSnapshot: Set<string> | null = null;
+	let activeSubagents = 0;
 
 	const isSilentSession = (ctx: ExtensionContext): boolean => {
 		if (process.env.ZEE_WORKER === "1" || !ctx.hasUI) return true;
@@ -592,14 +682,11 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		return m === "print" || m === "json";
 	};
 
-	const updateStatusBar = (ctx: ExtensionContext) => {
+	const updateStatusBar = (ctx: ExtensionContext, nightWarning = false) => {
 		if (isSilentSession(ctx)) return;
-		if (writeGate !== "none") {
-			const lockTag = writeGate === "plan" ? "plan🔒" : "rev🔒";
-			ctx.ui.setStatus("zee-mode", `zee:${lockTag}`);
-			return;
-		}
-		ctx.ui.setStatus("zee-mode", routingMode === "off" ? undefined : `zee:${routingMode}`);
+		const unitProgress = readActiveRunUnitProgress(ctx.cwd);
+		const badge = formatZeeStatusBadge({ routingMode, writeGate, activeSubagents, unitProgress, nightWarning });
+		ctx.ui.setStatus("zee-mode", badge);
 	};
 
 	const setMode = (next: ZeeMode, ctx: ExtensionContext, persist = true) => {
@@ -690,12 +777,18 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 		const unfinishedNight = findUnfinishedNightRun(ctx.cwd);
 		if (unfinishedNight && writeGate === "none") {
-			ctx.ui.setStatus("zee-mode", "zee:night⚠");
+			updateStatusBar(ctx, true);
 			ctx.ui.notify(
 				`[zee-night] 过夜任务 (${unfinishedNight.slug}) 仍处于 running 且尚未输出 morning-report.md${unfinishedNight.resumeNext ? `（resumeNext=${unfinishedNight.resumeNext}）` : ""}，请收尾并生成晨报。`,
 				"warning",
 			);
+		} else {
+			updateStatusBar(ctx, false);
 		}
+	});
+
+	pi.on("tool_result", (_e, ctx) => {
+		updateStatusBar(ctx);
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -789,7 +882,11 @@ export default function zeeExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 			if (!arg || arg === "status") {
-				if (!isSilentSession(ctx)) ctx.ui.notify(`zee 当前模式：${routingMode} | 写保护锁：${writeGate}`, "info");
+				if (!isSilentSession(ctx)) {
+					const progress = readActiveRunUnitProgress(ctx.cwd);
+					const unitNote = progress ? ` | 单元进度：${progress.label}` : "";
+					ctx.ui.notify(`zee 当前模式：${routingMode} | 写保护锁：${writeGate} | 运行中子代理：${activeSubagents}${unitNote}`, "info");
+				}
 				return;
 			}
 			if (arg === "off" || arg === "auto" || arg === "strict") {
@@ -992,6 +1089,8 @@ export default function zeeExtension(pi: ExtensionAPI) {
 
 			emitProgress();
 			let outcome: { code: number | null; termSignal: NodeJS.Signals | null; spawnError?: Error };
+			activeSubagents += 1;
+			updateStatusBar(ctx);
 			try {
 				outcome = await new Promise((resolve) => {
 					const invocation = getPiInvocation(cliArgs);
@@ -1213,7 +1312,9 @@ export default function zeeExtension(pi: ExtensionAPI) {
 					}
 				});
 			} finally {
+				activeSubagents = Math.max(0, activeSubagents - 1);
 				removeWorktreeActiveLock(activeLockPath);
+				updateStatusBar(ctx);
 			}
 
 			details.exitCode = outcome.code;

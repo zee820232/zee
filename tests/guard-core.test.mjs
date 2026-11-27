@@ -101,9 +101,11 @@ test("evaluateDestructiveCommand 识别 POSIX 与 Windows 高危删除、嵌套 
     assert.ok(evaluateDestructiveCommand('cmd /c "git push --force origin main"', repo));
     assert.ok(evaluateDestructiveCommand("echo `rm -rf /`", repo));
 
-    // 主干强推绕过与容器删库绕过封堵
+    // 主干强推绕过、容器删库与管道跨段删库封堵
     assert.ok(evaluateDestructiveCommand("git push --force --all", repo));
     assert.ok(evaluateDestructiveCommand('docker exec db psql -c "DROP DATABASE prod"', repo));
+    assert.ok(evaluateDestructiveCommand('echo "DROP DATABASE prod;" | psql', repo));
+    assert.ok(evaluateDestructiveCommand('printf "DROP DATABASE prod;" | mysql -u root', repo));
 
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
     assert.ok(evaluateDestructiveCommand("git push --force origin HEAD", repo));
@@ -115,6 +117,7 @@ test("evaluateDestructiveCommand 识别 POSIX 与 Windows 高危删除、嵌套 
     assert.equal(evaluateDestructiveCommand("rm -rf ./dist", repo), null);
     assert.equal(evaluateDestructiveCommand('echo bash -c "rm -rf /"', repo), null);
     assert.equal(evaluateDestructiveCommand('psql -c "SELECT 1" && echo "DROP DATABASE prod"', repo), null);
+    assert.equal(evaluateDestructiveCommand('psql -c "SELECT 1" || echo "DROP DATABASE prod"', repo), null);
 
     const safeHeredoc = "cat <<'EOF'\nrm -rf /tmp/example\nDROP DATABASE test;\nEOF";
     assert.equal(stripHeredocBodies(safeHeredoc).includes("DROP DATABASE"), false);

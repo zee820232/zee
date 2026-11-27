@@ -2,16 +2,16 @@
 
 适用场景：`/zee-verify init`、`/zee-verify maintain`、`/zee-verify run [--fuzz]`、任意功能/设计改版/过夜合并前门禁。
 
-## `/zee-verify init`（读仓自建项目确定性验证入口）
-1. 运行 `<ZEE_TOOL> doctor --repo <repoRoot>` 读取 `projectProfile`，设计 `.agents/verify-ctl.mjs` 统一封装 4 个确定性子命令：
-   - `doctor`：纯只读环境、依赖与配置检查；
-   - `launch` / `run`：自动分配**动态空闲端口**与**隔离临时数据目录**，依次执行类型/语法检查、单元测试及 3–5 条用户视角核心路径实跑，支持 `--json` 输出 `{ ok, checks[], cleanupPid }`；
-   - `cleanup`：按 PID 文件精确回收自启子进程，**清理动作严禁删除 `<busDir>` 内的截图与日志证明产物**。
-2. 脚本必须严格遵守失败返非 0 退出码，并在交付前完成**双向验真**：跑通至少 1 条真实绿灯链路 + 故意破损验证关键断言“能失败（Able to fail）”。
+## `/zee-verify init`（读仓自建确定性验证入口 + Feature Map 物化记忆）
+1. 运行 `<ZEE_TOOL> doctor --repo <repoRoot>` 读取 `projectProfile`，生成两件套：
+   - **驱动脚本 `.agents/verify-ctl.mjs`**：统一封装 `doctor`（纯只读检查）/ `launch` / `run`（动态空闲端口、隔离临时数据目录、3–5 条用户视角核心路径、`--json` 输出 `{ ok, checks[], cleanupPid }`）/ `cleanup`（按 PID 精确回收，**严禁删除 `<busDir>` 证明产物**），失败必返非 0；
+   - **Feature Map `.agents/verify-features/`**：含索引 `README.md` 与 3–5 份核心功能 `.md`，每份固定 4 节 H2（`## Sub-features` / `## 用户入口（全路径）` / `## 驱动与可观测验收` / `## Gotchas`）。多入口须全覆盖，**缺种子数据须判 FAIL 并记入 `Gotchas`，绝不放宽检查**。
+2. **交付前三重验真**：① 真实跑通至少 1 条绿色主链路；② 故意破损验证关键断言“能失败（Able to fail）”；③ 执行 `cleanup` 后实查 `<busDir>` 证据文件依然存活。
 
-## `/zee-verify maintain`（防腐保鲜）
-1. 对照最近改动核查 `.agents/verify-ctl.mjs` 与项目入口、路由或命令是否漂移，仅修复过时的验证驱动或选择句柄。
-2. 串行真实复跑 1 次并保存退出码；**严禁修改业务源码或弱化断言来掩盖真实回归**。
+## `/zee-verify maintain`（防腐保鲜 · 严格三结局）
+1. **Wave 1 源核对**：核对 `.agents/verify-features/README.md` 索引与每份功能文件是否漂移（跨多文件时可并行派只读 `scout`），排查近期改动新增的用户入口。
+2. **Wave 2 串行全量实跑**：即使源码看似无漂移也必实跑全部映射功能至少 1 次；任一失败后先跑 `doctor` 判断是驱动漂移还是产品回归，**严禁修改业务源码或弱化断言来掩盖回归**。
+3. **严格三结局收口**：仅返回 `CLEAN`（全覆盖零漂移）/ `CHANGED`（仅修 `.agents/verify-ctl.mjs` 与 `.agents/verify-features/` 并重跑绿灯）/ `BLOCKED`（列明环境前置缺口；若抓到真回归直报 `PRODUCT_REGRESSION`）。
 
 ## `/zee-verify run [--fuzz]`（分级实跑 + 探索压测 + 防篡改）
 1. **按应用形态分级实跑（消灭 UI 肉身代理）**：

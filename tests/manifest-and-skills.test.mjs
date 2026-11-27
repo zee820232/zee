@@ -13,19 +13,22 @@ const EXPLICIT_ONLY_SKILLS = ["zee-plan", "zee-verify", "zee-review", "zee-night
 const EXPECTED_PLAYBOOKS = ["understand.md", "plan.md", "feature.md", "design.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md", "ship.md"];
 const EXPECTED_ROLES = ["scout.md", "architect.md", "ui.md", "coder.md", "verifier.md", "reviewer.md", "judge.md"];
 
-test("v5.2.0 清单文件、发布白名单与 AGY 规则/子代理元数据符合规范", () => {
+test("v5.3.0 清单文件、发布白名单、自举验证设施与 AGY 规则/子代理元数据符合规范", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.version, "5.2.0");
+  assert.equal(pkg.version, "5.3.0");
   assert.deepEqual(pkg.pi?.extensions, ["./pi-extension/index.ts"]);
   assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills 以免与 /skill:zee* 冲突");
   assert.equal(pkg.peerDependencies?.["@earendil-works/pi-tui"], undefined, "不应保留 pi-tui 依赖");
   assert.ok(Array.isArray(pkg.files) && pkg.files.includes("rules/") && pkg.files.includes("skills/"), "package.json 须配置 files 白名单防止打包研究/测试文件");
   assert.equal(pkg.files.includes("docs/"), false);
   assert.equal(pkg.files.includes("tests/"), false);
+  assert.equal(pkg.files.includes(".agents/"), false);
+  assert.equal(pkg.files.includes("AGENTS.md"), false);
+  assert.ok(pkg.scripts?.typecheck && pkg.scripts?.verify, "package.json 须配置 typecheck 与 verify 自举脚本");
 
   const plugin = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, ".antigravity-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.name, "zee");
-  assert.equal(plugin.version, "5.2.0");
+  assert.equal(plugin.version, "5.3.0");
 
   const hooks = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "hooks.json"), "utf8"));
   const cfg = hooks["zee-lifecycle-guard"];
@@ -37,6 +40,9 @@ test("v5.2.0 清单文件、发布白名单与 AGY 规则/子代理元数据符�
 
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "rules", "AGENTS.md")), true, "须包含极薄 rules/AGENTS.md 实现 AGY 自然语言自动唤醒");
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "agents", "zee-worker.md")), true, "须包含专职隔离执行子代理 agents/zee-worker.md");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "verify-ctl.mjs")), true, "zee 自身须具备 .agents/verify-ctl.mjs 自举验证器");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "verify-features", "README.md")), true, "zee 自身须具备 Feature Map 索引");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "AGENTS.md")), true, "zee 仓根须具备极薄 AGENTS.md 规则映射表");
 });
 
 test("主技能开放自然语言隐式唤醒，6 把专项单刀保留显式触发隔离，v4 冗余已彻底清理", () => {
@@ -259,9 +265,16 @@ test("install.mjs 辅助函数、Windows 安全参数转义、--target auto/all 
       cwd: linkParent,
       encoding: "utf8",
     });
-    assert.match(linkHelp, /zee v5\.2\.0/, "通过软链/Junction 执行 install.mjs --help 必须正常输出帮助");
+    assert.match(linkHelp, /zee v5\.3\.0/, "通过软链/Junction 执行 install.mjs --help 必须正常输出帮助");
   } finally {
     try { fs.unlinkSync(linkRepo); } catch { fs.rmSync(linkRepo, { recursive: true, force: true }); }
     fs.rmSync(linkParent, { recursive: true, force: true });
   }
+
+  // 验证盲测 Eval 工具自检通过
+  const evalSelf = execFileSync(process.execPath, [path.join(REPO_ROOT, "tests", "eval", "blind-eval.mjs"), "--self-check"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  assert.equal(JSON.parse(evalSelf).ok, true);
 });

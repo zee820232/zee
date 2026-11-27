@@ -1,7 +1,7 @@
 ---
 name: zee-worker
 description: >-
-  zee v5.2.0 专用隔离执行子代理（遵循 skills/zee/worker.md 站立契约，按角色卡执行单点侦察、施工、实机验证或只读审查，严禁递归派发与越权外写）。
+  zee v5.3.0 专用隔离执行子代理（遵循 skills/zee/worker.md 站立契约，按角色卡执行单点侦察、施工、实机验证或只读审查，严禁递归派发与越权外写）。
 mainAgent: false
 subagent: true
 model: inherit
@@ -10,7 +10,7 @@ inheritCustomizations: true
 inheritMcp: false
 ---
 
-# zee-worker — 隔离执行子代理（v5.2.0）
+# zee-worker — 隔离执行子代理（v5.3.0）
 
 你以子代理身份直接执行主控派发的单点任务，严格遵循 `skills/zee/worker.md` 与任务附带的 `skills/zee/roles/<role>.md`：
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## [5.3.0] - 2026-11-27
+
+> 基于 Zenn 全书《Cursor pstack: build the environment behind 2,500 agent PRs a month》（69 节，含 RGDD 附录）与官方 `cursor/plugins/pstack v0.15.48` 源码深度对标，在严格守住零配置自然语言直通、跨 5 宿主与零常驻膨胀的前提下，落地 P0–P1 全部核心升级并完成仓库自身验证自举。
+
+### Added & Hardened
+- **自身仓库吃狗粮与 `trustLevel` 可验证性硬闸门（P0-1 + P1-3）**：
+  - 为 `zee` 自身补齐 `.agents/verify-ctl.mjs`（`doctor`/`run --json`/`cleanup` + 全链路总线冒烟）、`.agents/verify-features/`（3 份 4-H2 Feature Map）、`.agents/zee.project.json`（`trustLevel: "T3"` + `denyCommands` + `riskPaths`）、仓库根 `AGENTS.md`（`Rule -> Enforcer` 映射表）及 `package.json` `typecheck`/`verify` 脚本，使自身仓库 `doctor --repo .` 达到 `verifiability: "ready"`、`effectiveTrust: "T3"`；
+  - `zee-tool.mjs doctor --repo` 机械落地 `trustLevel`（`T1`/`T2`/`T3`）可验证性硬校验与自动钳制降级，并新增 `verifyFeaturesMap` 探测，杜绝无护栏盲目升档。
+- **单仓只读 `recall` 原语与外部副作用守夜止损（P0-4 + P1-3）**：
+  - `zee-tool.mjs` 新增第 15 个确定性原语 `recall --repo <path> [--topic <kw>] [--days <N>] [--transcripts-dir <dir>]`，严格单仓隔离聚合 `decisions.tsv`、未闭环园艺簇、`docs/adr/`、`GLOSSARY.md` 与可选工作区转录（自动脱敏密钥并剔除 `<skill>` 展开块）；
+  - `scripts/agy-guard.mjs` 升级 `.stop-guard.json` 为**外部副作用复合指纹**（`git HEAD` + 工作区脏状态摘要 + `decisions.tsv` 行数 + unit 状态签名），彻底封死空刷 `state.updatedAt` 的假进展死循环。
+- **反观察者效应盲测 Eval 基础设施（P1-1）**：
+  - 新增零依赖 `tests/eval/blind-eval.mjs` 与 `tests/eval/README.md`，提供 `assertBlindedText`（防泄露实验词）、`createSanitizedWorkspace` 与 `verifyTranscriptChain`（直查真实 JSONL 转录打开文件与执行命令，不信模型自报）。
+- **剧本与角色方法论全面跃迁（P0-2 + P0-3 + P1-2 + P1-4，0 常驻税膨胀）**：
+  - `verify.md` / `zee-verify/SKILL.md`：补齐 Feature Map 4-H2 模板（全入口覆盖 + 缺种子数据禁放宽）、`cleanup` 后证据存活验真与 `maintain` 两波三结局协议（`CLEAN` / `CHANGED` / `BLOCKED`）；
+  - `plan.md` / `understand.md` / `principles.md`：融入 RGDD 轻前置（0→1 用户视角用法先行、`GLOSSARY.md` `_Avoid_` 禁用词、3 条件 ADR 及 `superseded by` 不可删历史链）、负向测试配对正向测试纪律与“机械拦截落地即删旧文字规则”；
+  - `perf.md`：升级为 7 项基准核查（补齐物理极限算术与双边生产同配）、7 条由廉至贵性能口诀排序、成对停止谓词（目标+最小轮次）与单主数字汇报；
+  - `roles/reviewer.md` & `ship.md` & `overnight.md`：吸收 `Comment Sicko` 注释反挖（`MUST_RESHAPE`）、Bot 评论高危禁自动跳过红线、连续已验证 PR 栈入干（Ceiling + `gh pr view` 真合并回读）以及 `decisions.tsv` 仅追加 `supersede` 行转录核验与图文风险降序晨报。
+
 ## [5.2.0] - 2026-11-27
 
 > 基于 Poteto × Matt Pocock Skill 工程方法论研究与 5 路 Gemini 4 异构 Swarm 全栈分层审计，全面修复 5 层实测 P0/P1 缺陷，并升级为**下载即用、5 大场景零干扰自动驾驶**工作流（总体积严守轻量零常驻膨胀）。

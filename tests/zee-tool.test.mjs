@@ -924,9 +924,72 @@ test("update-state 6 并发无锁冲突、hasChildRefs、过期锁 TTL、T3 跨�
     // --help 正常返回退出码 0
     const helpRes = runTool(["--help"]);
     assert.equal(helpRes.status, 0);
-    assert.match(helpRes.stdout, /zee-tool\.mjs v5\.2\.0/);
+    assert.match(helpRes.stdout, /zee-tool\.mjs v5\.3\.0/);
   } finally {
     if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("v5.3.0 trustLevel 硬闸门自动降级、Feature Map 探测与单仓只读 recall（含密钥脱敏）", () => {
+  const repo = initGitRepo("zee-v53-");
+  const txDir = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v53-tx-"));
+  let busDir = "";
+  try {
+    // 1. 无 verify-ctl/typecheck 却配置 trustLevel=T3 -> 强制钳制回 T1 并列出缺口
+    fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".agents", "zee.project.json"), JSON.stringify({ trustLevel: "T3", denyCommands: ["npm publish"] }), "utf8");
+    const clamped = JSON.parse(runTool(["doctor", "--repo", repo]).stdout);
+    assert.equal(clamped.projectProfile.configuredTrust, "T3");
+    assert.equal(clamped.projectProfile.effectiveTrust, "T1");
+    assert.ok(clamped.projectProfile.trustGateGaps.length >= 2);
+    assert.ok(clamped.warnings.some((w) => /强制降级/.test(w)));
+
+    // 2. zee 自身仓库（已自举 verify-ctl + Feature Map + typecheck + denyCommands）-> ready + T3
+    const selfDoc = JSON.parse(runTool(["doctor", "--repo", REPO_ROOT]).stdout);
+    assert.equal(selfDoc.ok, true);
+    assert.equal(selfDoc.projectProfile.verifiability, "ready");
+    assert.equal(selfDoc.projectProfile.effectiveTrust, "T3");
+    assert.ok(selfDoc.projectProfile.verifyFeaturesMap);
+
+    // 3. 单仓 recall 聚合决策、园艺队列、ADR、GLOSSARY 与脱敏转录
+    const init = JSON.parse(runTool(["init-run", repo, "recall-demo"]).stdout);
+    busDir = init.busDir;
+    runTool(["log-decision", busDir, "--unit", "U1", "--phase", "bug-fix", "--decision", "retry-lock-fix", "--why", "prevent duplicate job", "--result", "pass"]);
+    runTool(["finding", "add", "--repo", repo, "--pattern", "retry-leak", "--summary", "retry lock leaks on crash"]);
+
+    fs.mkdirSync(path.join(repo, "docs", "adr"), { recursive: true });
+    fs.writeFileSync(
+      path.join(repo, "docs", "adr", "0001-retry-lock.md"),
+      "---\nstatus: superseded by ADR-0002\n---\n\n# Retry lock lease\n",
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(repo, "GLOSSARY.md"),
+      "# Domain\n\n**Retry Lease**:\nLease protecting job retry.\n_Avoid_: mutex, token\n",
+      "utf8",
+    );
+    const fakeSecret = ["sk", "secret1234567890abcd"].join("-");
+    fs.writeFileSync(
+      path.join(txDir, "chat-1.jsonl"),
+      JSON.stringify({ role: "user", content: `<skill name="zee">expanded</skill> 请排查 retry lock 故障，临时测试 key=${fakeSecret}` }) + "\n",
+      "utf8",
+    );
+
+    const recalled = JSON.parse(runTool(["recall", "--repo", repo, "--topic", "retry", "--transcripts-dir", txDir]).stdout);
+    assert.equal(recalled.ok, true);
+    assert.equal(recalled.capsule.decisions.length, 1);
+    assert.equal(recalled.capsule.openFindings[0].pattern, "retry-leak");
+    assert.equal(recalled.capsule.adrs[0].status, "superseded by ADR-0002");
+    assert.equal(recalled.capsule.glossaryTerms[0].term, "Retry Lease");
+    assert.equal(recalled.capsule.glossaryTerms[0].avoid, "mutex, token");
+    assert.equal(recalled.capsule.transcriptHits.length, 1);
+    assert.doesNotMatch(recalled.capsule.transcriptHits[0].excerpt, /secret1234567890/);
+    assert.doesNotMatch(recalled.capsule.transcriptHits[0].excerpt, /<skill/);
+    assert.match(recalled.capsule.transcriptHits[0].excerpt, /sk-\*\*\*\*abcd/);
+  } finally {
+    if (busDir) fs.rmSync(path.dirname(busDir), { recursive: true, force: true });
+    fs.rmSync(txDir, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });

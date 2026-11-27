@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /**
- * Google Antigravity Lifecycle Hook for zee v5.2.0 (Stop + standalone PreToolUse helper)
+ * Google Antigravity Lifecycle Hook for zee v5.3.0 (Stop + standalone PreToolUse helper)
  *
  * 1. Antigravity PreToolUse 协议要求 decision ∈ {"allow","deny","ask","force_ask"}，无透传项；
  *    为避免空对象 {} 误拦普通 run_command（或 "allow" 越权绕过用户审批），hooks.json 在 AGY 下仅挂载 Stop。
  * 2. Stop 在存在活跃（24h 内）mode==="night" && status==="running" 且严格匹配当前 conversationId 的运行总线、
- *    fullyIdle === true 且未超出续命上限/连续无进展熔断时阻止静默断尾（安全透传严格返回 {}）。
+ *    fullyIdle === true 且未超出续命上限/连续无外部副作用进展熔断时阻止静默断尾（安全透传严格返回 {}）。
  * 3. handlePreToolUse 仅当 hookEventName === "PreToolUse" 时执行，其余未知事件一律透传 {}。
  */
 
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -102,20 +104,69 @@ function isHeadless(cwd, workspacePaths, cid) {
   return Boolean(findActiveNightRun(cwd, workspacePaths, cid));
 }
 
-function checkAndRecordStopProgress(busDir, stateUpdatedAt) {
+function computeSideEffectFingerprint(busDir, state, cwd) {
+  const repoRoot = String(state?.repoRoot || "").trim() || resolveGitRoot(cwd) || cwd || "";
+  let headSha = "";
+  let dirtyDigest = "";
+  if (repoRoot && fs.existsSync(repoRoot)) {
+    try {
+      headSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", "--quiet", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {}
+    try {
+      const porcelain = execFileSync("git", ["-C", repoRoot, "status", "--porcelain"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      dirtyDigest = crypto.createHash("sha256").update(porcelain).digest("hex").slice(0, 12);
+    } catch {}
+  }
+
+  let decisionsLines = 0;
+  try {
+    const tsvPath = path.join(busDir, "decisions.tsv");
+    if (fs.existsSync(tsvPath)) {
+      decisionsLines = fs.readFileSync(tsvPath, "utf8").split(/\r?\n/).filter((l) => l.trim()).length;
+    }
+  } catch {}
+
+  const unitsSig = Array.isArray(state?.units)
+    ? state.units
+        .map((u) => `${u?.id || ""}:${u?.status || ""}`)
+        .sort()
+        .join(",")
+    : "";
+
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ headSha, dirtyDigest, decisionsLines, unitsSig }))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function checkAndRecordStopProgress(busDir, state, cwd) {
   const guardPath = path.join(busDir, ".stop-guard.json");
+  const sideEffectFingerprint = computeSideEffectFingerprint(busDir, state, cwd);
+  const stateUpdatedAt = String(state?.updatedAt || "");
   let stagnantCount = 0;
   try {
     if (fs.existsSync(guardPath)) {
       const prev = JSON.parse(fs.readFileSync(guardPath, "utf8"));
-      if (prev && prev.lastStateUpdatedAt === stateUpdatedAt) {
+      if (prev && prev.sideEffectFingerprint) {
+        if (prev.sideEffectFingerprint === sideEffectFingerprint) {
+          stagnantCount = (Number(prev.stagnantCount) || 0) + 1;
+        }
+      } else if (prev && prev.lastStateUpdatedAt === stateUpdatedAt) {
         stagnantCount = (Number(prev.stagnantCount) || 0) + 1;
       }
     }
   } catch {}
   try {
     atomicWriteJson(guardPath, {
-      lastStateUpdatedAt: stateUpdatedAt || "",
+      lastStateUpdatedAt: stateUpdatedAt,
+      sideEffectFingerprint,
       stagnantCount,
       updatedAt: new Date().toISOString(),
     });
@@ -170,7 +221,7 @@ function handleStop(payload, cwd) {
   }
 
   const { state, busDir } = active;
-  const stagnantCount = checkAndRecordStopProgress(busDir, String(state.updatedAt || ""));
+  const stagnantCount = checkAndRecordStopProgress(busDir, state, cwd);
   if (stagnantCount >= MAX_STAGNANT_WAKEUPS) {
     respond({});
     return;

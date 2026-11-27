@@ -211,7 +211,8 @@ test("v5.2.0 Stop Hook 四大边界：严防 null 跨会话劫持、多轮续命
     assert.match(cont1.reason, /night-active/);
     assert.match(cont1.reason, /U1/);
 
-    // 3. 连续无进展熔断：如果 state.updatedAt 连续 2 次唤醒毫无变化，自动放行防死循环
+    // 3. 连续无进展熔断（外部副作用指纹）：即使空刷 update-state 改变 updatedAt，无真实副作用变化连续 2 次也必须放行止损
+    execFileSync(process.execPath, [ZEE_TOOL, "update-state", activeRun.busDir, "--status", "running"], { encoding: "utf8" });
     const cont2 = runHook({
       hookEventName: "Stop",
       cwd: subDir,
@@ -222,6 +223,7 @@ test("v5.2.0 Stop Hook 四大边界：严防 null 跨会话劫持、多轮续命
       terminationReason: "NO_TOOL_CALL",
     });
     assert.equal(cont2.decision, "continue");
+    execFileSync(process.execPath, [ZEE_TOOL, "update-state", activeRun.busDir, "--status", "running"], { encoding: "utf8" });
     const stagnantStop = runHook({
       hookEventName: "Stop",
       cwd: subDir,
@@ -231,7 +233,24 @@ test("v5.2.0 Stop Hook 四大边界：严防 null 跨会话劫持、多轮续命
       continuationActive: true,
       terminationReason: "NO_TOOL_CALL",
     });
-    assert.deepEqual(stagnantStop, {}, "连续 2 次唤醒无状态推进必须放行止损");
+    assert.deepEqual(stagnantStop, {}, "空刷 updatedAt 但无外部副作用推进连续 2 次唤醒必须放行止损");
+
+    // 4. 发生真实副作用（写入决策行）后重置停滞计数，恢复续命
+    execFileSync(
+      process.execPath,
+      [ZEE_TOOL, "log-decision", activeRun.busDir, "--unit", "U1", "--phase", "exec", "--decision", "progress", "--why", "real", "--result", "pass"],
+      { encoding: "utf8" },
+    );
+    const resumed = runHook({
+      hookEventName: "Stop",
+      cwd: subDir,
+      conversationId: cid,
+      executionNum: 4,
+      fullyIdle: true,
+      continuationActive: true,
+      terminationReason: "NO_TOOL_CALL",
+    });
+    assert.equal(resumed.decision, "continue", "真实副作用产出后应重置停滞计数并继续守夜");
 
     // 超过最大续命次数直接放行
     execFileSync(process.execPath, [ZEE_TOOL, "update-state", activeRun.busDir, "--status", "running"], { encoding: "utf8" });

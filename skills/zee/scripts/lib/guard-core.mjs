@@ -837,13 +837,136 @@ function segmentInvokesDbClient(tokens) {
   return false;
 }
 
+function splitShellPipelines(command) {
+  const pipelines = [];
+  let current = "";
+  let quote = null;
+  let escaping = false;
+  let substParenDepth = 0;
+  let substBraceDepth = 0;
+  let quoteStartIdx = -1;
+
+  const flush = () => {
+    if (current.trim()) pipelines.push(current.trim());
+    current = "";
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (escaping) {
+      current += ch;
+      escaping = false;
+      continue;
+    }
+    if (quote === "'") {
+      current += ch;
+      if (ch === "'") { quote = null; quoteStartIdx = -1; }
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        const insideQuote = quoteStartIdx >= 0 ? command.slice(quoteStartIdx + 1, i) : "";
+        const nextCh = command[i + 1];
+        if (looksLikeWindowsPathPrefix(insideQuote) && nextCh === '"') {
+          current += ch;
+          continue;
+        }
+        if (isShellEscapeTarget(nextCh)) {
+          current += ch;
+          escaping = true;
+          continue;
+        }
+      }
+      current += ch;
+      if (ch === '"') { quote = null; quoteStartIdx = -1; }
+      continue;
+    }
+    if (ch === "\\") {
+      const lastWord = current.split(/\s+/).pop() || "";
+      if (!looksLikeWindowsPathPrefix(lastWord) && isShellEscapeTarget(command[i + 1])) {
+        current += ch;
+        escaping = true;
+        continue;
+      }
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      quoteStartIdx = i;
+      current += ch;
+      continue;
+    }
+    if (ch === "$" && command[i + 1] === "(") {
+      substParenDepth += 1;
+      current += "$(";
+      i += 1;
+      continue;
+    }
+    if (substParenDepth > 0) {
+      if (ch === "(") substParenDepth += 1;
+      else if (ch === ")") substParenDepth -= 1;
+      current += ch;
+      continue;
+    }
+    if (ch === "$" && command[i + 1] === "{") {
+      substBraceDepth += 1;
+      current += "${";
+      i += 1;
+      continue;
+    }
+    if (substBraceDepth > 0) {
+      if (ch === "{") substBraceDepth += 1;
+      else if (ch === "}") substBraceDepth -= 1;
+      current += ch;
+      continue;
+    }
+    if (ch === "(" || ch === ")") {
+      flush();
+      continue;
+    }
+    if (ch === "{" || ch === "}") {
+      const prev = command[i - 1];
+      const next = command[i + 1];
+      const prevBoundary = prev === undefined || /[\s;|&(\n{]/.test(prev);
+      const nextBoundary = next === undefined || /[\s;|&)\n};]/.test(next);
+      if (prevBoundary && nextBoundary) {
+        flush();
+        continue;
+      }
+    }
+    if (ch === ";" || ch === "\n") {
+      flush();
+      continue;
+    }
+    if (ch === "|" && command[i + 1] === "|") {
+      flush();
+      i += 1;
+      continue;
+    }
+    if (ch === "&") {
+      const next = command[i + 1];
+      if (command[i - 1] === ">") {
+        current += ch;
+        continue;
+      }
+      flush();
+      if (next === "&") i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  flush();
+  return pipelines;
+}
+
 function checkDropDatabase(allCmds) {
   for (const cmd of allCmds) {
-    for (const seg of splitShellSegments(cmd)) {
-      if (!DROP_DB_RE.test(seg)) continue;
-      const tokens = stripLeadingEnvAssignments(tokenizeShell(seg));
-      if (segmentInvokesDbClient(tokens)) {
-        return "检测到通过数据库客户端执行 DROP DATABASE 破坏性删库命令";
+    for (const pipeline of splitShellPipelines(cmd)) {
+      if (!DROP_DB_RE.test(pipeline)) continue;
+      for (const stage of splitShellSegments(pipeline)) {
+        const tokens = stripLeadingEnvAssignments(tokenizeShell(stage));
+        if (segmentInvokesDbClient(tokens)) {
+          return "检测到通过数据库客户端执行 DROP DATABASE 破坏性删库命令";
+        }
       }
     }
   }

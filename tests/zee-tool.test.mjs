@@ -727,6 +727,25 @@ test("v5.2.0 基础设施加固：sanitizeSlug、UUID 锁防误删、update-stat
     assert.equal(init.gitBootstrap?.initializedGit, true);
     assert.equal(init.gitBootstrap?.createdBaselineCommit, true);
 
+    // 无 HEAD 仓库存在已暂存文件时，init-run --ensure-git 创建纯空基线提交且完整保留用户暂存区
+    const stagedNoHead = fs.mkdtempSync(path.join(os.tmpdir(), "zee-v53-staged-"));
+    let stagedBusDir = "";
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: stagedNoHead });
+      fs.writeFileSync(path.join(stagedNoHead, "staged-user.ts"), "export const keep = 1;\n", "utf8");
+      execFileSync("git", ["add", "staged-user.ts"], { cwd: stagedNoHead });
+      const stagedInit = JSON.parse(runTool(["init-run", stagedNoHead, "keep-index", "--ensure-git"]).stdout);
+      stagedBusDir = stagedInit.busDir;
+      assert.equal(stagedInit.gitBootstrap?.createdBaselineCommit, true);
+      const headFiles = execFileSync("git", ["-C", stagedNoHead, "ls-tree", "-r", "--name-only", "HEAD"], { encoding: "utf8" }).trim();
+      assert.equal(headFiles, "", "空基线提交不得吞掉用户暂存区文件");
+      const cachedFiles = execFileSync("git", ["-C", stagedNoHead, "diff", "--cached", "--name-only"], { encoding: "utf8" }).trim();
+      assert.equal(cachedFiles, "staged-user.ts", "用户已暂存文件须完整保留在 index 中");
+    } finally {
+      if (stagedBusDir) fs.rmSync(path.dirname(stagedBusDir), { recursive: true, force: true });
+      fs.rmSync(stagedNoHead, { recursive: true, force: true });
+    }
+
     const badUpd = runTool(["update-state", busDir, "--budget", "[]"], { allowFail: true });
     assert.notEqual(badUpd.status, 0);
     assert.equal(fs.existsSync(path.join(busDir, "state.json.lock")), false, "非法参数退出不得遗留 state.json.lock");

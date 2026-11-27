@@ -243,11 +243,28 @@ function ensureGitBaseline(absRepo) {
     hasHead = true;
   } catch {}
   if (!hasHead) {
-    execFileSync(
+    // 使用 mktree + commit-tree + update-ref 创建纯空基线提交，绝不误吞用户已暂存在 index 中的文件
+    const emptyTree = execFileSync("git", ["-C", absRepo, "mktree"], {
+      input: "",
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    const commitSha = execFileSync(
       "git",
-      ["-C", absRepo, "-c", "user.name=zee", "-c", "user.email=zee@local", "commit", "--allow-empty", "-qm", "chore: bootstrap zee baseline"],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
+      ["-C", absRepo, "commit-tree", emptyTree, "-m", "chore: bootstrap zee baseline"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "zee",
+          GIT_AUTHOR_EMAIL: "zee@local",
+          GIT_COMMITTER_NAME: "zee",
+          GIT_COMMITTER_EMAIL: "zee@local",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ).trim();
+    execFileSync("git", ["-C", absRepo, "update-ref", "HEAD", commitSha], { stdio: ["ignore", "pipe", "pipe"] });
     createdBaselineCommit = true;
   }
   return { initializedGit, createdBaselineCommit };

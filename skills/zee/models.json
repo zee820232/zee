@@ -2,7 +2,7 @@
   "version": 1,
   "budgets": {
     "large": {
-      "label": "large（满血推理，对齐 pstack large）",
+      "label": "large（满血推理）",
       "efforts": {
         "workhorse": "xhigh",
         "adversary": "xhigh",
@@ -10,7 +10,7 @@
       }
     },
     "medium": {
-      "label": "medium（均衡主力，推荐，对齐 pstack medium）",
+      "label": "medium（均衡主力，推荐）",
       "efforts": {
         "workhorse": "high",
         "adversary": "high",
@@ -18,7 +18,7 @@
       }
     },
     "small": {
-      "label": "small（省时日常，对齐 pstack small）",
+      "label": "small（省时日常）",
       "efforts": {
         "workhorse": "medium",
         "adversary": "medium",

@@ -1,14 +1,14 @@
 ---
 name: zee-setup
-description: Zee 单宿主模型配置器：对齐 pstack 能力梯队与预算阶梯（large/medium/small），严格按当前宿主推荐并写入 harnesses.<activeHarness>
+description: Zee 单宿主模型配置器：按能力梯队与预算阶梯（large/medium/small），严格按当前宿主推荐并写入 harnesses.<activeHarness>
 disable-model-invocation: true
 ---
 
-# `/zee-setup` — 单宿主能力梯队与预算分配（对齐 pstack）
+# `/zee-setup` — 单宿主能力梯队与预算分配
 
 > 提示：Zee 零配置单兵开箱即用；仅当你希望启用多模型异构分工与跨家族对抗审查时才需按需运行本命令。
 
-本命令采用 **能力优先 + 预算仅调思考档位**（参考 `pstack` 阶梯：`large` / `medium` / `small`），将选定方案合并写入 `~/.agents/zee-config.json` 的 `harnesses.<activeHarness>` 分区，**严禁改动业务仓库源码**。
+本命令采用 **能力优先 + 预算仅调思考档位**（预算阶梯：`large` / `medium` / `small`），将选定方案合并写入 `~/.agents/zee-config.json` 的 `harnesses.<activeHarness>` 分区，**严禁改动业务仓库源码**。
 
 ## 核心红线：单宿主隔离 + 禁止低智降级 / 测速竞速
 

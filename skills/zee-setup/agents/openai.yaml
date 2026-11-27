@@ -1,5 +1,5 @@
 interface:
   display_name: "Zee Setup"
-  short_description: "对齐 pstack 能力梯队与预算档位，为当前宿主分配 3 槽位模型（单宿主隔离）"
+  short_description: "按能力梯队与预算档位，为当前宿主分配 3 槽位模型（单宿主隔离）"
 policy:
   allow_implicit_invocation: false

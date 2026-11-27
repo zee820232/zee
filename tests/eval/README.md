@@ -1,6 +1,6 @@
 # Zee 盲测 Eval 规范与工具（反观察者效应）
 
-当修改 `skills/zee/SKILL.md`、`principles.md`、`playbooks/*.md` 或 `roles/*.md` 时，单元测试只能验证文件结构和体积，无法证明模型在真实任务中是否仍会按链路执行。本目录提供零依赖的盲测基础设施（吸收 `pstack` `playbooks/eval.md`）。
+当修改 `skills/zee/SKILL.md`、`principles.md`、`playbooks/*.md` 或 `roles/*.md` 时，单元测试只能验证文件结构和体积，无法证明模型在真实任务中是否仍会按链路执行。本目录提供零依赖的盲测基础设施。
 
 ## 盲测 4 条不可违背红线
 

@@ -2,13 +2,13 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "zee",
   "displayName": "zee Workflow",
-  "version": "5.1.0",
-  "description": "zee v5.1.0 个人主厨 + 可过夜工程工作流：7 把核心尖刀（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup）、8 份按需剧本（含 ship）、7 角色（含 judge）、跨家族实证对抗与实机验证闭环。",
+  "version": "5.3.0",
+  "description": "zee v5.3.0 下载即用全场景自动驾驶工程工作流：自然语言自动唤醒，内置 RGDD 上下文先行、Feature Map 验证自举、trustLevel 硬闸门、单仓 recall、园艺队列与跨家族实证对抗。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "/zee-plan 先查代码与原型探针再极简提问，沉淀可执行计划与原子 units（只规划不改业务代码）",
+    "从零创建一个带实机验证脚本的新项目（自动驾驶全流程交付）",
     "/zee-review --strict 对当前改动执行只读跨家族实证对抗审查与爆炸半径校验",
-    "/zee-verify init 为当前项目生成并自跑验真 .agents/verify-ctl.mjs 实机验证入口"
+    "/zee-verify init 为当前项目生成并双向验真 .agents/verify-ctl.mjs 实机验证入口"
   ],
   "author": {
     "name": "zee820232",

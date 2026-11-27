@@ -1,5 +1,52 @@
 # Changelog
 
+## [5.3.0] - 2026-11-27
+
+> 基于 Zenn 全书《Cursor pstack: build the environment behind 2,500 agent PRs a month》（69 节，含 RGDD 附录）与官方 `cursor/plugins/pstack v0.15.48` 源码深度对标，在严格守住零配置自然语言直通、跨 5 宿主与零常驻膨胀的前提下，落地 P0–P1 全部核心升级并完成仓库自身验证自举。
+
+### Added & Hardened
+- **自身仓库吃狗粮与 `trustLevel` 可验证性硬闸门（P0-1 + P1-3）**：
+  - 为 `zee` 自身补齐 `.agents/verify-ctl.mjs`（`doctor`/`run --json`/`cleanup` + 全链路总线冒烟）、`.agents/verify-features/`（3 份 4-H2 Feature Map）、`.agents/zee.project.json`（`trustLevel: "T3"` + `denyCommands` + `riskPaths`）、仓库根 `AGENTS.md`（`Rule -> Enforcer` 映射表）及 `package.json` `typecheck`/`verify` 脚本，使自身仓库 `doctor --repo .` 达到 `verifiability: "ready"`、`effectiveTrust: "T3"`；
+  - `zee-tool.mjs doctor --repo` 机械落地 `trustLevel`（`T1`/`T2`/`T3`）可验证性硬校验与自动钳制降级，并新增 `verifyFeaturesMap` 探测，杜绝无护栏盲目升档。
+- **单仓只读 `recall` 原语与外部副作用守夜止损（P0-4 + P1-3）**：
+  - `zee-tool.mjs` 新增第 15 个确定性原语 `recall --repo <path> [--topic <kw>] [--days <N>] [--transcripts-dir <dir>]`，严格单仓隔离聚合 `decisions.tsv`、未闭环园艺簇、`docs/adr/`、`GLOSSARY.md` 与可选工作区转录（自动脱敏密钥并剔除 `<skill>` 展开块）；
+  - `scripts/agy-guard.mjs` 升级 `.stop-guard.json` 为**外部副作用复合指纹**（`git HEAD` + 工作区脏状态摘要 + `decisions.tsv` 行数 + unit 状态签名），彻底封死空刷 `state.updatedAt` 的假进展死循环。
+- **反观察者效应盲测 Eval 基础设施（P1-1）**：
+  - 新增零依赖 `tests/eval/blind-eval.mjs` 与 `tests/eval/README.md`，提供 `assertBlindedText`（防泄露实验词）、`createSanitizedWorkspace` 与 `verifyTranscriptChain`（直查真实 JSONL 转录打开文件与执行命令，不信模型自报）。
+- **剧本与角色方法论全面跃迁（P0-2 + P0-3 + P1-2 + P1-4，0 常驻税膨胀）**：
+  - `verify.md` / `zee-verify/SKILL.md`：补齐 Feature Map 4-H2 模板（全入口覆盖 + 缺种子数据禁放宽）、`cleanup` 后证据存活验真与 `maintain` 两波三结局协议（`CLEAN` / `CHANGED` / `BLOCKED`）；
+  - `plan.md` / `understand.md` / `principles.md`：融入 RGDD 轻前置（0→1 用户视角用法先行、`GLOSSARY.md` `_Avoid_` 禁用词、3 条件 ADR 及 `superseded by` 不可删历史链）、负向测试配对正向测试纪律与“机械拦截落地即删旧文字规则”；
+  - `perf.md`：升级为 7 项基准核查（补齐物理极限算术与双边生产同配）、7 条由廉至贵性能口诀排序、成对停止谓词（目标+最小轮次）与单主数字汇报；
+  - `roles/reviewer.md` & `ship.md` & `overnight.md`：吸收 `Comment Sicko` 注释反挖（`MUST_RESHAPE`）、Bot 评论高危禁自动跳过红线、连续已验证 PR 栈入干（Ceiling + `gh pr view` 真合并回读）以及 `decisions.tsv` 仅追加 `supersede` 行转录核验与图文风险降序晨报。
+
+## [5.2.0] - 2026-11-27
+
+> 基于 Poteto × Matt Pocock Skill 工程方法论研究与 5 路 Gemini 4 异构 Swarm 全栈分层审计，全面修复 5 层实测 P0/P1 缺陷，并升级为**下载即用、5 大场景零干扰自动驾驶**工作流（总体积严守轻量零常驻膨胀）。
+
+### Added — 全场景零干扰自动驾驶与研究方法论落地
+- **零配置自然语言开箱自动唤醒**：
+  - 放开主入口 `skills/zee/SKILL.md` 隐式触发与 `skills/zee/agents/openai.yaml`（`allow_implicit_invocation: true`），保留 6 把专项单刀显式隔离；
+  - Pi 扩展默认路由模式由 `off` 切换为 `auto`（可随时 `/zee-mode off`）；
+  - Antigravity 插件新增极薄 `rules/AGENTS.md`（不劫持闲聊、工程任务直通）与专职隔离执行子代理 `agents/zee-worker.md`（`subagent: true`）；
+  - `scripts/install.mjs` 新增 `--target auto`（自动探测本机 `pi`/`agy`/`npx` 一键装齐）与 `--target all`，`package.json` 增补 `"files"` 发布白名单。
+- **补齐 5 大自动驾驶场景闭环（创建项目 / 新增需求 / 修改设计 / Bug 修复 / 性能迭代）**：
+  - **新增 `skills/zee/playbooks/design.md`**：覆盖高保真重构、UI/交互视觉改版（桌面+移动双视口、真实渲染 0 Console Error、`--fuzz` 边界探索）与架构重设计（特征测试 + 2-Shape + 小步迁移）；
+  - **0→1 空仓直通自举**：`plan.md` 明确自动驾驶默认不停门、仅 `/zee-plan` 停门；`zee-tool.mjs init-run` 新增 `--ensure-git` 一键初始化 Git 与空基线提交；`sandbox-export` 与 `gate-tamper-diff` 全面兼容非 Git / 无 `HEAD` 空目录；
+  - **验证闭环与 `--fuzz` 探索层升级**：`verify.md`、`zee-verify/SKILL.md` 与 `roles/verifier.md` 解除 UI 任务禁开浏览器限制，恢复限时限步 `--fuzz` 探索压测并固化 `.agents/verify-ctl.mjs` 动态端口/隔离目录/`--json`/PID 回收契约；
+  - **零配置项目体检 + 园艺队列 + 跨会话决策召回**：`doctor --repo` 零依赖输出 `projectProfile`（包管理器、测试/Lint/构建命令、应用形态、`verifiability` 与建议自治档位）；新增极简单命令 `finding add|list|resolve` 维护 `.agents/gardening-queue.jsonl`（同模式 ≥3 次标 `systemic`）；扩展 `list-runs --decisions` 赋能 `bug-fix.md`（多报错聚类 + 偶发连跑 + 两败转轨）与 `/zee-retro`（4+1 级固化 + 闭环关单）；`perf.md` 接入 `--predicate` 与实验 untracked 清理。
+
+### Fixed & Hardened — 5 层 Swarm 审计 P0/P1 缺陷全量清零
+- **Layer 1（安装分发与 AGY Stop Hook）**：
+  - `scripts/install.mjs`：封装 `runCrossPlatformCmd` + `quoteWinCmdArg`（Windows `.exe` 直调 `shell: false`，`.cmd`/`.bat` 安全转义调用 `cmd.exe /d /s /c` + `windowsVerbatimArguments: true`，彻底消除 `DEP0190` 与空格/括号/`&` 参数撕裂）；停止默认删除跨宿主共享目录 `~/.agents/skills/zee*`；`installUniversalSkills` 补齐 `-g -s * -y` 与本地源优先；改用 `parseArgs({ strict: true })` 防拼错 flag 误删。
+  - `scripts/agy-guard.mjs`：修复 `conversationId: null` 跨会话劫持普通窗口漏洞；移除 `continuationActive === true` 单轮二次即断尾限制，改为 `executionNum < 8` + `.stop-guard.json` 连续 2 次无进展止损；聚合 `cwd`/`workspacePaths` + `resolveGitRoot` 解决子目录漏检；先过滤 `status === "running"` 防被新 `completed` 总线遮蔽并改数值时间戳比较；未知事件默认透传 `{}`。
+- **Layer 2（Pi 扩展、429 冷却与词法安全核）**：
+  - `skills/zee/scripts/lib/guard-core.mjs`：补全 Windows 盘符根/系统目录保护、`Remove-Item`/`rd`/`del` 与大小写不敏感 PowerShell 参数识别、`powershell`/`pwsh`/`cmd /c`/反引号嵌套解包、Windows 路径尾反斜杠引号分词；修复 `git push --force origin HEAD`/`-o`/`--all`、`docker exec ... psql DROP DATABASE`、`/usr/bin/npm publish`/`npm --tag next publish` 绕过与 `echo bash -c`/`psql && echo DROP DATABASE`/`cat deploy-prod` 误拦；`extractModelFamily` 过滤 `inherit-parent`/`auto` 并识别 `neon`/`hydrogen`/`carbon`/`argon` 为 `gemini`；清理废弃 `init-design` 死分支。
+  - `pi-extension/index.ts` & `provider-health.mjs`：修复非交互 `pi -p` (`!ctx.hasUI`) 误判子代理导致路由丢失；扩展 `plan` 锁自然语言解锁短语；分离 `readGitSnapshot` 的 `--git-dir` 与 `HEAD` 读取使空仓回滚/脏树告警生效；`prepareAtomicWorktree` 增活锁检查与安全卸载 junction；`proc.on("exit")` 增 2s 宽限定时器销毁管道防孙进程挂死，并将 junction 卸载移入 clean 分支；统一 `mapRoleToSlotName === "adversary"` 覆盖 `adversary`/`reviewer.*` 跨家族硬拦截，阻断非 Pi `bindings` 泄漏；修复带 429 正文的 `stopReason="error"` 误判与 `clearModelCooldown` 子串误清；补齐 `stderr` 上限、随机抢救文件名与 Windows 只读搜索豁免。
+- **Layer 3（确定性 CLI、原子锁与模型目录）**：
+  - `skills/zee/scripts/lib/fs-atomic.mjs`：Windows `openSync("wx")` 重试 `EPERM`/`EACCES`/`EBUSY`；锁体引入 UUID owner token 与 `renameSync` 原子抢占回收陈旧锁，彻底消除 TOCTOU 竞争与误删他人活锁；拒绝传入 async 回调。
+  - `skills/zee/scripts/lib/repo-utils.mjs`：加固 `sanitizeSlug`（防 `..`/`.` 穿越、纯中文附短 hash 防碰撞、剥尾点与屏蔽 Windows 保留设备名）；抽公共 `unmountNodeModulesLink`（直接 `lstatSync` 处理悬空 junction）与 `resolveGitRoot`；加锁保护 `.git/info/exclude` 写入。
+  - `skills/zee/scripts/zee-tool.mjs` & `models.json`：修复 `sandbox-clean` 误拒含 `.agents/zee.project.json` 的合法沙盒（引入 `.zee-sandbox-marker`）；修复 `worktree-create` Windows 重复创建因 junction 崩溃；修复 `cleanup-worktrees --prune-safe` 误删未合并 detached worktree；修复 `sandbox-export` 丢失 `.gitattributes export-ignore` 目录与无 HEAD 已暂存文件；修复 `gate-tamper-diff` 中文路径八进制乱码（`-c core.quotepath=false`）、无 HEAD 未暂存漏检，并区分纯新增测试 `testFilesAdded` 与门禁篡改 `gateFilesTouched`；`update-state` 校验前置锁外防 `.lock` 泄漏；`resolve-model` 对 T3 `delegateTarget.options` 强制 `medium` 下限、统一 standalone 字段、增加全员冷却告警与 `workhorse -> adversary` 冷却借调，彻底移除 AGY `pro`/`flash`/`flash_lite` 映射；`recommend-models` 剥离 ANSI 与警告行、去重 AGY 双后缀与 `carbon` 钳制；`models.json` 补全 `gemini-2.5-pro`/`gemini-3`/`gpt-5`/`o3`/`o4`/`gpt-4.1`/`grok-4`；`doctor` 校验仓库存在且不让非当前宿主坏配置连坐失败。
+
 ## [5.1.0] - 2026-11-27
 
 > 基于 `zee v5.0.6` 与上游 `backnotprop/pstack v0.15.48` 双向交叉源码评审（Neon + Carbon High 双审共识），在不增加第三方依赖与常驻上下文税的前提下完成 P0 运行时加固、P1 方法论补厚与 P2 跨宿主易用性收口。

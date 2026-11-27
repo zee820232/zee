@@ -1,0 +1,14 @@
+{
+  "trustLevel": "T3",
+  "denyCommands": [
+    "npm publish",
+    "git push --force",
+    "rm -rf /"
+  ],
+  "riskPaths": [
+    "skills/zee/scripts/lib/guard-core.mjs",
+    "skills/zee/scripts/lib/fs-atomic.mjs",
+    "pi-extension/worker-guard.ts",
+    "scripts/agy-guard.mjs"
+  ]
+}

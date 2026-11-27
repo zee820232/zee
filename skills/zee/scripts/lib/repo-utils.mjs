@@ -1,5 +1,5 @@
 /**
- * zee 共享仓库 / 路径 / Worktree / 进程与文本安全辅助模块（v5.1.0）
+ * zee 共享仓库 / 路径 / Worktree / 进程与文本安全辅助模块（v5.2.0）
  *
  * 统一收敛 pi-extension/index.ts、skills/zee/scripts/zee-tool.mjs 与 scripts/agy-guard.mjs
  * 的公共逻辑，消除三处重复实现与跨平台漂移。
@@ -9,15 +9,32 @@ import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { withFileLock } from "./fs-atomic.mjs";
+
+const WIN_RESERVED_NAMES = new Set([
+  "con", "prn", "aux", "nul",
+  "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+]);
 
 export function sanitizeSlug(s) {
-  return (
-    String(s ?? "")
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 64) || "task"
-  );
+  const raw = String(s ?? "").trim();
+  let cleaned = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/\.{2,}/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 64)
+    .replace(/[._-]+$/g, "");
+  if (!cleaned) {
+    if (!raw) return "task";
+    const shortHash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 6);
+    return `task-${shortHash}`;
+  }
+  if (WIN_RESERVED_NAMES.has(cleaned.split(".")[0])) {
+    cleaned = `z-${cleaned}`.slice(0, 64);
+  }
+  return cleaned;
 }
 
 export function normalizeRepoPathForKey(repoPath) {
@@ -58,6 +75,32 @@ export function resolveRepoRunDir(runsRoot, repoPath) {
     if (fs.existsSync(candidate)) return candidate;
   }
   return path.join(runsRoot, keys[0]);
+}
+
+export function resolveGitRoot(dirPath) {
+  if (!dirPath) return null;
+  let cur = path.resolve(dirPath);
+  try {
+    if (fs.existsSync(cur) && !fs.statSync(cur).isDirectory()) {
+      cur = path.dirname(cur);
+    }
+  } catch {
+    return null;
+  }
+  try {
+    const top = execFileSync("git", ["-C", cur, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (top) return path.resolve(top);
+  } catch {}
+  for (let i = 0; i < 32; i++) {
+    if (fs.existsSync(path.join(cur, ".git"))) return cur;
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return null;
 }
 
 export function resolveSafeWorktreeBranch(absRepo, rawBranch) {
@@ -111,10 +154,31 @@ export function resolveSafeWorktreeBranch(absRepo, rawBranch) {
   return { branch: candidate, flattened };
 }
 
+export function unmountNodeModulesLink(wtPath) {
+  if (!wtPath) return false;
+  const nmLink = path.join(wtPath, "node_modules");
+  try {
+    const st = fs.lstatSync(nmLink);
+    if (!st.isSymbolicLink()) return false;
+    try {
+      fs.unlinkSync(nmLink);
+    } catch {
+      fs.rmdirSync(nmLink);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function ensureNodeModulesMount(absRepo, wtPath) {
   const src = path.join(absRepo, "node_modules");
   const dst = path.join(wtPath, "node_modules");
-  if (!fs.existsSync(src) || fs.existsSync(dst)) return false;
+  if (!fs.existsSync(src)) return false;
+  try {
+    fs.lstatSync(dst);
+    return false;
+  } catch {}
   try {
     if (
       execFileSync("git", ["-C", absRepo, "ls-files", "node_modules"], {
@@ -130,10 +194,12 @@ export function ensureNodeModulesMount(absRepo, wtPath) {
     }).trim();
     const exFile = path.resolve(wtPath, exRel);
     fs.mkdirSync(path.dirname(exFile), { recursive: true });
-    const existing = fs.existsSync(exFile) ? fs.readFileSync(exFile, "utf8") : "";
-    if (!existing.split(/\r?\n/).some((l) => l.trim() === "/node_modules" || l.trim() === "node_modules")) {
-      fs.appendFileSync(exFile, `${existing && !existing.endsWith("\n") ? "\n" : ""}/node_modules\n`, "utf8");
-    }
+    withFileLock(exFile, () => {
+      const existing = fs.existsSync(exFile) ? fs.readFileSync(exFile, "utf8") : "";
+      if (!existing.split(/\r?\n/).some((l) => l.trim() === "/node_modules" || l.trim() === "node_modules")) {
+        fs.appendFileSync(exFile, `${existing && !existing.endsWith("\n") ? "\n" : ""}/node_modules\n`, "utf8");
+      }
+    });
     fs.symlinkSync(src, dst, process.platform === "win32" ? "junction" : undefined);
     return true;
   } catch {

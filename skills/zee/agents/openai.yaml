@@ -1,5 +1,5 @@
 interface:
   display_name: "Zee"
-  short_description: "通用多模型全自动研发工作流（0→1 建项与 1→100 迭代）"
+  short_description: "零配置全场景自动驾驶研发工作流（建项/新需求/改设计/修Bug/性能迭代全自动直通）"
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

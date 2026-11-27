@@ -1,11 +1,25 @@
 {
   "name": "zee-workflow",
-  "version": "5.1.0",
+  "version": "5.3.0",
   "private": true,
   "type": "module",
-  "description": "zee v5.1.0 个人主厨 + 可过夜工程工作流（Pi Package + Antigravity Plugin + Agent Skills 三形态；7 技能 + 8 剧本 + 7 角色、跨家族实证对抗审查、原型驱动规划、4 级复盘固化、429 跨宿主熔断与 Windows 进程树保护）",
+  "description": "zee v5.3.0 零配置全场景自动驾驶工程工作流（Pi Package + Antigravity Plugin + Agent Skills 三形态；RGDD 上下文先行、Feature Map 验证自举、trustLevel 硬闸门、单仓 recall、盲测 Eval 与外部副作用守夜）",
+  "files": [
+    ".antigravity-plugin/",
+    "agents/",
+    "assets/",
+    "pi-extension/",
+    "rules/",
+    "scripts/",
+    "skills/",
+    "hooks.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "node .agents/verify-ctl.mjs doctor",
+    "verify": "node .agents/verify-ctl.mjs run"
   },
   "bin": {
     "zee-workflow": "./scripts/install.mjs"
@@ -14,7 +28,8 @@
     "pi-package",
     "agent-skills",
     "workflow",
-    "multi-model"
+    "multi-model",
+    "autopilot"
   ],
   "license": "MIT",
   "peerDependencies": {

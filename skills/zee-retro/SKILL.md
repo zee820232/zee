@@ -11,7 +11,7 @@ disable-model-invocation: true
 1. **先实跑验磁盘真相**：
    - 运行 `git status --short`、`git log --oneline -n 20`；
    - 若存在 `.agents/verify-ctl.mjs` 或测试套件，**复盘前必须实跑一次**，记录真实通过/失败数与报错行号；
-   - 运行 `<ZEE_TOOL> gate-tamper-diff --repo <repoRoot> --working-tree`、`list-runs <repoRoot> --decisions`、`finding list --repo <repoRoot>` 与 `provider-health`。
+   - 运行 `<ZEE_TOOL> gate-tamper-diff --repo <repoRoot> --working-tree`、`recall --repo <repoRoot>`、`finding list --repo <repoRoot>` 与 `provider-health`。
 2. **跨 Run 盘点与系统性错因聚类**：
    - 合并检查历史 `decisions.tsv`、`.agents/gardening-queue.jsonl`（重点优先标 `systemic: true` 的 `≥3` 次簇）、`<busDir>` 产物与当前工作区最近会话中反复出现的人工纠偏片段，提炼出现 `≥2` 次的同类故障或摩擦根因。
 3. **4+1 级环境固化阶梯（吸收 `correct`，文档永远排最后）**：

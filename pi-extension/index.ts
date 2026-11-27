@@ -1,5 +1,5 @@
 /**
- * zee Pi Extension v5.2.0 — 个人主厨自动驾驶编排器 + zee_subagent 并行引擎
+ * zee Pi Extension v5.3.0 — 个人主厨自动驾驶编排器 + zee_subagent 并行引擎
  *
  * 保留硬核能力并修复全层审计边界：
  * 1. 8 个干净命令（/zee、/zee-plan、/zee-verify、/zee-review、/zee-night、/zee-retro、/zee-setup、/zee-mode），默认 auto 开箱即用

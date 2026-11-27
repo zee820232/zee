@@ -3,7 +3,7 @@ name: zee
 description: 下载即用全自动研发工作流：纯问答直答；创建项目（0→1）、新增需求、修改设计（UI/交互/架构改版）、Bug 修复与性能迭代均自动接管，零配置零干扰直通实机验证交付。
 ---
 
-# Zee v5.2.0 — 零配置全场景自动驾驶主厨
+# Zee v5.3.0 — 零配置全场景自动驾驶主厨
 
 纯问答/闲聊直接回复，绝不劫持；工程交付任务立即自主推进到底，**可逆决策按最佳实践敲定记账直通，严禁中途反问打断**。
 
@@ -41,7 +41,7 @@ description: 下载即用全自动研发工作流：纯问答直答；创建项�
 | **T3 (`t3`)** | `delegate_task(target: delegateTarget, isolation:"worktree")` | `orchestrator_capabilities` 仅 `/zee-setup` 首查 |
 | **Codex / CC** | 原生 subagent / `Agent` | 并发写先调 `<ZEE_TOOL> worktree-create` |
 
-派发附 `worker.md` 与 `roles/{scout,architect,ui,coder,verifier,reviewer,judge}.md`。`zee-tool.mjs` 内置 14 个确定性原语（含 `finding` 园艺队列，参数见 `--help`）。
+派发附 `worker.md` 与 `roles/{scout,architect,ui,coder,verifier,reviewer,judge}.md`。`zee-tool.mjs` 内置 15 个确定性原语（含 `recall` 单仓召回与 `finding` 园艺队列，见 `--help`）。
 
 ## 4. 红线与三块交付
 

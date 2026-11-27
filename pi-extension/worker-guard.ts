@@ -1,5 +1,5 @@
 /**
- * zee Worker Guard Extension (v5.2.0)
+ * zee Worker Guard Extension (v5.3.0)
  *
  * 供 zee_subagent 启动的 Pi 子进程通过 `-ne -e worker-guard.ts` 挂载：
  * 1. 对所有角色执行项目 denyCommands（token 边界匹配）与跨平台破坏性命令拦截

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zee 多宿主零摩擦安装器 (v5.2.0)
+ * zee 多宿主零摩擦安装器 (v5.3.0)
  *
  * 支持：--target auto（自动探测本机全部宿主一键装齐）| pi | agy | skills | both | all
  * 修复：Windows 空格/括号/& 路径安全执行（无 DEP0190）、跨宿主 ~/.agents/skills 不互删、strict 参数校验
@@ -199,7 +199,7 @@ function installAuto(dryRun, useRemote, cleanShared) {
 }
 
 function printHelp() {
-  console.log(`zee v5.2.0 个人主厨自动驾驶工作流安装器
+  console.log(`zee v5.3.0 个人主厨自动驾驶工作流安装器
 
 用法：
   node scripts/install.mjs --target <auto|pi|agy|skills|both|all> [--dry-run] [--remote] [--doctor] [--clean-shared-skills]

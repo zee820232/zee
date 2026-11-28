@@ -12,7 +12,7 @@
 3. **冷启动接棒（`session-pickup`）与安全挂起（`pause-safely`）**：接手已有运行总线时，信任既有 `done` 轨迹不重复施工，仅对终态产物做实证复验；若因预算/外部阻塞必须中断，先打 `wip:` commit 保护现场、更新 `--status handoff --resume-next <unitId>` 并在 `<busDir>/morning-report.md` 写明续跑入口。
 
 ## 主循环协议（并发/分单推进）
-1. **领取待办单元**：≥2 个互不重叠且依赖就绪的 `pending` unit 时，Pi 下用 `zee_subagent` + 声明式 `worktree`（省略 `timeoutMs`），T3 下用 `delegate_task(isolation:"worktree")`，AGY 下用 `invoke_subagent(Workspace:"share", Model:"inherit")`，勿手调 `worktree-create` 制造冲突。
+1. **领取待办单元**：≥2 个互不重叠且依赖就绪的 `pending` unit 时，Pi 下用 `zee_subagent` + 声明式 `worktree`（省略 `timeoutMs`），T3 下用 `delegate_task(isolation:"worktree")`，AGY 下用 `invoke_subagent(TypeName:"self", Workspace:"share", Model:"inherit")`（严禁自定义 Agent），勿手调 `worktree-create` 制造冲突。
 2. **施工 + 即时校验 + Verifier 实跑**：每次改码立刻跑语法检查与窄单测；单元收尾跑对应测试与 `.agents/verify-ctl.mjs`（UI/设计单元含真实渲染核验）。
 3. **先落袋再加餐**：单单元跑绿后立即 `update-state`（如 `--unit-upsert '{"id":"U1","status":"done"}'` 或 `--units-file`）、`log-decision` 与 `git commit` 锁定成果；连续失败 **2 次即熔断标 `blocked`** 并记录前提假设复盘；非阻断 P2 坏味道随手 `finding add` 入园艺队列。
 4. **预算熔断、日志核验与晨前对抗终审**：遇 `budget_warning`（70% 截断）或达时间边界停止开新单；跑 `/zee-verify run --fuzz`、`gate-tamper-diff` 与跨家族 `reviewer`（传 `--author-family <fam>`，必要时加 `judge` 终审把关）；**收口前对照实跑记录核验 `decisions.tsv` 证据指针（严禁修改/删除旧行，有误仅追加 `phase=audit` 的 `supersede` 行纠正）**，提交通过代码并将 `state.json` 置为 `completed` 或 `handoff`。

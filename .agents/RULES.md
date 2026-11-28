@@ -13,6 +13,7 @@
 | 全部 `.mjs` 与 `.ts` 无语法错误（零外部依赖检查） | `npm run typecheck` / `.agents/verify-ctl.mjs` | 已强制 |
 | AGY `hooks.json` 仅挂载 `Stop`（严禁挂 `PreToolUse`） | `tests/manifest-and-skills.test.mjs` | 已强制 |
 | AGY 插件根严禁存在 `AGENTS.md`（防 `agy plugin validate --strict` 失败） | `tests/manifest-and-skills.test.mjs` | 已强制 |
+| AGY 插件严禁定义自定义 `agents/*.md`（防触发 custom-agent 4× 计费，子代理仅用内置 `self`/`research`） | `package.json` (`files`) + `tests/manifest-and-skills.test.mjs` | 已强制 |
 | AGY `Stop` 按外部副作用指纹止损，防空刷 `updatedAt` 死循环 | `tests/agy-hook.test.mjs` | 已强制 |
 | 只读角色严禁改写仓库源码，跨家族审查硬拦截同家族模型 | `pi-extension/worker-guard.ts` + `tests/pi-extension.test.mjs` | 已强制 |
 | 跨平台破坏性命令与 `denyCommands` 词法拦截（含 Windows） | `skills/zee/scripts/lib/guard-core.mjs` + `tests/guard-core.test.mjs` | 已强制 |

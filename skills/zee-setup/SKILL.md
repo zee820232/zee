@@ -30,7 +30,7 @@ disable-model-invocation: true
      ```
      仅当用户明确要求验证连通性时才跑最小探活：且只需判 `exitCode === 0` 且 stdout 非空（绝不要求正文严格等于 `"ok"`）。
    - **`t3`（T3 Code）**：仅调用 `orchestrator_capabilities` **一次**（0 条 shell 探活），将完整 JSON 喂给 `<ZEE_TOOL> recommend-models --harness t3 --budget medium`。
-   - **`antigravity`（独立 AGY CLI，无 T3 Code）**：0 条 shell 探活，严格遵守 Gemini 4 代际锁（`invoke_subagent` 固定 `Model: "inherit"`，配 Gemini 4 `swarmModel`，标记 `singleFamily: true`；仅已在 `/swarm` 中时可调 `swarm(action="models")`）。
+   - **`antigravity`（独立 AGY CLI，无 T3 Code）**：0 条 shell 探活，严格遵守 Gemini 4 代际锁与 1× 内置代理原则（`invoke_subagent` 仅用内置 `self`/`research` 并固定 `Model: "inherit"`，严禁自定义 Agent；配 Gemini 4 `swarmModel`，标记 `singleFamily: true`；仅已在 `/swarm` 中时可调 `swarm(action="models")`）。
    - **`codex` / `claude` / `cursor` / `local`**：收集当前宿主可用 slug 传给 `recommend-models --harness <activeHarness> --budget medium`，或使用 `inherit-parent` 别名（如 `{"prefer":{"model":"inherit-parent","effort":"high"}}`；注意将 `adversary` 设为 `inherit-parent` 时 `doctor` 会提示未启用独立跨家族审查的 warning）。
 2. **展示简体中文推荐表并一次确认**：
    - 列出推荐的 **预算档位**（默认 `medium`）、**3 槽位**（`fast` / `workhorse` / `adversary` 主+备）及可选 `inherit-parent` / `auto` 开关；若含 `optInModels` 单独附注一行等待用户确认（或按推荐直接写盘）。

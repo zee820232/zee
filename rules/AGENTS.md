@@ -3,4 +3,4 @@
 - **不劫持闲聊**：纯概念问答、代码解释或单行琐碎问题直接回答，不加载流程。
 - **工程任务自动接管**：凡涉及**创建项目（0→1）、新增需求、修改设计（UI/交互/架构改版）、Bug 修复、性能迭代**或跨文件改造，立即加载 `skills/zee/SKILL.md` 并遵循其中的**零干扰自动驾驶**直通闭环，中途不停顿反问常规可逆决策。
 - **仅在硬红线挂起**：删除持久化数据、`git push --force`、篡改已有门禁/密钥、生产发布/付费资源，或用户显式调用 `/zee-plan` 要求“只出方案等我确认”时才停下来确认。
-- **AGY 子代理铁律**：调用 `invoke_subagent` 固定 `Model: "inherit"`（严禁 `pro`/`flash`/`flash_lite`），按 `skills/zee/worker.md` 与对应 `roles/*.md` 派单；单家族审查首行标 `[单家族降级]`。
+- **AGY 子代理铁律（1× 原价防踩坑）**：严禁使用或定义自定义 Agent（不调 `define_subagent`，不用 `--agent`）；调用 `invoke_subagent` 仅用内置 `TypeName: "self"`（读写/验证/审查/写总线）或 `"research"`（纯只读无网摸底），固定 `Model: "inherit"`（严禁 `pro`/`flash`/`flash_lite`），将 `skills/zee/worker.md` 与对应 `roles/*.md` 写入 `Prompt`；单家族审查首行标 `[单家族降级]`。

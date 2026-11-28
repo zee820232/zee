@@ -13,13 +13,14 @@ const EXPLICIT_ONLY_SKILLS = ["zee-plan", "zee-verify", "zee-review", "zee-night
 const EXPECTED_PLAYBOOKS = ["understand.md", "plan.md", "feature.md", "design.md", "bug-fix.md", "perf.md", "verify.md", "overnight.md", "ship.md"];
 const EXPECTED_ROLES = ["scout.md", "architect.md", "ui.md", "coder.md", "verifier.md", "reviewer.md", "judge.md"];
 
-test("v5.3.0 清单文件、发布白名单、自举验证设施与 AGY 规则/子代理元数据符合规范", () => {
+test("v5.3.0 清单文件、发布白名单、自举验证设施与 AGY 1× 规则元数据符合规范", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
   assert.equal(pkg.version, "5.3.0");
   assert.deepEqual(pkg.pi?.extensions, ["./pi-extension/index.ts"]);
   assert.equal(pkg.pi?.skills, undefined, "package.json 不应声明 pi.skills 以免与 /skill:zee* 冲突");
   assert.equal(pkg.peerDependencies?.["@earendil-works/pi-tui"], undefined, "不应保留 pi-tui 依赖");
   assert.ok(Array.isArray(pkg.files) && pkg.files.includes("rules/") && pkg.files.includes("skills/"), "package.json 须配置 files 白名单防止打包研究/测试文件");
+  assert.equal(pkg.files.includes("agents/"), false, "发布白名单严禁包含 agents/ 自定义代理，防止触发 AGY custom-agent 4× 计费");
   assert.equal(pkg.files.includes("docs/"), false);
   assert.equal(pkg.files.includes("tests/"), false);
   assert.equal(pkg.files.includes(".agents/"), false);
@@ -39,7 +40,7 @@ test("v5.3.0 清单文件、发布白名单、自举验证设施与 AGY 规则/�
   assert.equal(cfg.SessionStart, undefined);
 
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "rules", "AGENTS.md")), true, "须包含极薄 rules/AGENTS.md 实现 AGY 自然语言自动唤醒");
-  assert.equal(fs.existsSync(path.join(REPO_ROOT, "agents", "zee-worker.md")), true, "须包含专职隔离执行子代理 agents/zee-worker.md");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "agents")), false, "严禁存在 agents/ 自定义代理目录（防触发 AGY custom-agent 4× 计费）");
   assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "verify-ctl.mjs")), true, "zee 自身须具备 .agents/verify-ctl.mjs 自举验证器");
   assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "verify-features", "README.md")), true, "zee 自身须具备 Feature Map 索引");
   assert.equal(fs.existsSync(path.join(REPO_ROOT, ".agents", "RULES.md")), true, "zee 须具备 .agents/RULES.md 规则映射表");
@@ -57,6 +58,9 @@ test("主技能开放自然语言隐式唤醒，6 把专项单刀保留显式触
     "skills/zee/references",
     "skills/zee/disciplines",
     "skills/zee/playbooks/ops-deploy.md",
+    "agents",
+    "agents/zee.md",
+    "agents/zee-worker.md",
     "agents/zee-scout.md",
     "agents/zee-architect.md",
     "agents/zee-coder.md",
@@ -138,10 +142,13 @@ test("skills/zee 体积控制在 <= 4KB，9 份剧本/原则/角色卡契约完�
     }
   }
 
-  const agyAgent = fs.readFileSync(path.join(REPO_ROOT, "agents", "zee.md"), "utf8");
-  assert.ok(agyAgent.length < 2500, "agents/zee.md 应保持精简");
-  assert.doesNotMatch(agyAgent, /\bgeneral-purpose\b/);
-  assert.match(agyAgent, /zee-worker/);
+  const agyRules = fs.readFileSync(path.join(REPO_ROOT, "rules", "AGENTS.md"), "utf8");
+  assert.match(agyRules, /TypeName:\s*"self"/, "rules/AGENTS.md 须明确 AGY 子代理使用内置 self");
+  assert.match(agyRules, /"research"/, "rules/AGENTS.md 须明确纯只读侦察可使用内置 research");
+  assert.match(agyRules, /define_subagent/, "rules/AGENTS.md 须明确禁止调用 define_subagent");
+  const mainSkillContent = fs.readFileSync(mainSkillPath, "utf8");
+  assert.doesNotMatch(mainSkillContent, /TypeName:\s*"zee-worker"/, "skills/zee/SKILL.md 严禁再推荐自定义子代理 zee-worker");
+  assert.match(mainSkillContent, /TypeName:"self"\\\|"research"/, "skills/zee/SKILL.md 须写明内置 self|research 派发");
 
   const principlesLines = fs.readFileSync(path.join(REPO_ROOT, "skills", "zee", "principles.md"), "utf8").trim().split(/\r?\n/);
   assert.ok(principlesLines.length <= 12, `principles.md 应保持 <=12 行，实际 ${principlesLines.length} 行`);

@@ -37,7 +37,7 @@ description: 下载即用全自动研发工作流：纯问答直答；创建项�
 | 宿主 | 子代理派发 | 隔离与门禁 |
 | :--- | :--- | :--- |
 | **Pi (`pi`)** | `zee_subagent`（`subagentArgs` + `authorFamily`，省 `timeoutMs`） | 默认 `auto`；工具级拦截、429 切备、只读回滚 |
-| **AGY (`agy`)** | `invoke_subagent(TypeName:"zee-worker"\|"self", Model:"inherit")` | 禁 `pro`/`flash`/`flash_lite`；`rules/AGENTS.md` + `Stop` 守夜 |
+| **AGY (`agy`)** | `invoke_subagent(TypeName:"self"\|"research", Model:"inherit")` | 禁自定义 Agent 与 `pro`/`flash`/`flash_lite`；`rules/AGENTS.md` + `Stop` |
 | **T3 (`t3`)** | `delegate_task(target: delegateTarget, isolation:"worktree")` | `orchestrator_capabilities` 仅 `/zee-setup` 首查 |
 | **Codex / CC** | 原生 subagent / `Agent` | 并发写先调 `<ZEE_TOOL> worktree-create` |
 

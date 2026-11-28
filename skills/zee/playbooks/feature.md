@@ -7,7 +7,7 @@
 2. **契约先行**：跨前后端或跨模块改动先在 `plan.md` 锁定数据结构、公开接口与验收口径，避免并发互踩。
 3. **按需并发，禁止重复建 worktree**：
    - **单模块/小改**：主厨直接施工 + 立刻跑语法检查与窄单测（0 子代理）。
-   - **≥2 个互不重叠单元**：用 `<ZEE_TOOL> resolve-model --role <role> --allow-standalone` 解析模型（`standalone: true` 直接用默认模型）。Pi 下用 `zee_subagent` 声明式 `worktree` 并行派发 `coder`/`ui`，T3 用 `delegate_task(isolation:"worktree")`，AGY 用 `invoke_subagent(Workspace:"share", Model:"inherit")`，**勿提前手调 `worktree-create`**；仅无内置隔离的宿主才先手调 `worktree-create`。
+   - **≥2 个互不重叠单元**：用 `<ZEE_TOOL> resolve-model --role <role> --allow-standalone` 解析模型（`standalone: true` 直接用默认模型）。Pi 下用 `zee_subagent` 声明式 `worktree` 并行派发 `coder`/`ui`，T3 用 `delegate_task(isolation:"worktree")`，AGY 用 `invoke_subagent(TypeName:"self", Workspace:"share", Model:"inherit")`（纯只读侦察用 `TypeName:"research"`，严禁自定义 Agent），**勿提前手调 `worktree-create`**；仅无内置隔离的宿主才先手调 `worktree-create`。
 4. **集成验收与验证自举**：
    - 合入变更并补齐外部行为回归单测（拒绝锁死内部实现的同义反复废测）；
    - 若项目已有 `.agents/verify-ctl.mjs` 直接实跑；若缺失，纯库类跑原生 `projectProfile.detectedCmds.test`，Web/CLI/服务类的 0→1 或核心新功能按 `verify.md` (`init`) 自动自举轻量 `.agents/verify-ctl.mjs` 并跑通；

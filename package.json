@@ -6,7 +6,6 @@
   "description": "zee v5.3.0 零配置全场景自动驾驶工程工作流（Pi Package + Antigravity Plugin + Agent Skills 三形态；RGDD 上下文先行、Feature Map 验证自举、trustLevel 硬闸门、单仓 recall、盲测 Eval 与外部副作用守夜）",
   "files": [
     ".antigravity-plugin/",
-    "agents/",
     "assets/",
     "pi-extension/",
     "rules/",
